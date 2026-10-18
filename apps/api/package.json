@@ -10,7 +10,6 @@
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
     "db:seed": "ts-node --transpile-only prisma/seed.ts",
-    "tenant:create": "ts-node --transpile-only scripts/create-tenant.ts",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand src",
     "test:e2e": "jest --runInBand test"

@@ -97,6 +97,7 @@ export class ReportCardsService {
             sanctions: sanctions.find((a) => a.studentId === s.id)?._count ?? 0,
             appreciation: card?.appreciation ?? council?.[s.id]?.appreciation ?? '',
             councilDecision: card?.councilDecision ?? council?.[s.id]?.councilDecision ?? '',
+            reportCardId: card?.id ?? null,
           };
         }),
       };

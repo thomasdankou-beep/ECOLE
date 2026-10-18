@@ -1,0 +1,79 @@
+# Lancement complet en local ou sur un serveur : docker compose up -d --build
+# Copiez d'abord .env.docker.example en .env et remplissez les secrets.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?à définir dans .env}
+      ERP_OWNER_PASSWORD: ${ERP_OWNER_PASSWORD:?à définir dans .env}
+      ERP_APP_PASSWORD: ${ERP_APP_PASSWORD:?à définir dans .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d erp"]
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+
+  api:
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    environment:
+      DATABASE_URL: postgresql://erp_app:${ERP_APP_PASSWORD}@postgres:5432/erp
+      DATABASE_ADMIN_URL: postgresql://erp_owner:${ERP_OWNER_PASSWORD}@postgres:5432/erp
+      REDIS_URL: redis://redis:6379
+      PORT: 4000
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      PUBLIC_API_URL: ${WEB_ORIGIN:-http://localhost:8080}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?à définir dans .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?à définir dans .env}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?à définir dans .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-sandbox}
+      CINETPAY_API_KEY: ${CINETPAY_API_KEY:-}
+      CINETPAY_SITE_ID: ${CINETPAY_SITE_ID:-}
+      CINETPAY_SECRET_KEY: ${CINETPAY_SECRET_KEY:-}
+      SMS_PROVIDER: ${SMS_PROVIDER:-console}
+      STORAGE_DIR: /repo/apps/api/storage
+    volumes:
+      - uploads:/repo/apps/api/storage
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        API_URL: http://api:4000
+        NEXT_PUBLIC_TENANT: ${TENANT_SLUG:-saint-kisito}
+        NEXT_PUBLIC_DEMO: ${SHOW_DEMO_ACCOUNTS:-true}
+    restart: unless-stopped
+    depends_on: [api]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [web, api]
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "443:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+
+volumes:
+  pgdata:
+  redisdata:
+  uploads:
+  caddydata:

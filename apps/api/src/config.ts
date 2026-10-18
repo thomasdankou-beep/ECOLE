@@ -37,4 +37,6 @@ export const config = {
   smsProvider: env.SMS_PROVIDER ?? 'console',
   gotenbergUrl: env.GOTENBERG_URL ?? '',
   isProd: env.NODE_ENV === 'production',
+  /// Cookie de session réservé au HTTPS ; COOKIE_SECURE=false seulement pour un essai local en http.
+  cookieSecure: env.COOKIE_SECURE ? env.COOKIE_SECURE === 'true' : env.NODE_ENV === 'production',
 };
