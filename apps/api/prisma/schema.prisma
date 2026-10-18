@@ -1,0 +1,995 @@
+// Modèle de données de l'ERP scolaire.
+// Règles communes (cahier des charges §5.3) :
+// - chaque table métier porte tenant_id, protégé par la Row Level Security (voir migrations/*_rls) ;
+// - les notes, paiements, reçus et décisions ne sont jamais supprimés physiquement ;
+// - montants en FCFA entiers, notes en décimal au centième.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_ADMIN_URL")
+}
+
+// ---------------------------------------------------------------- Organisation
+
+/// Groupe scolaire client (décision D1 : un tenant = un groupe avec ses sites).
+model Tenant {
+  id         String   @id @default(uuid()) @db.Uuid
+  slug       String   @unique
+  name       String
+  shortName  String?
+  country    String   @default("BJ")
+  currency   String   @default("XOF")
+  timezone   String   @default("Africa/Porto-Novo")
+  /// Paramètres : seuils de distinction, règles de calcul, blocage bulletin si impayé, canaux de notification...
+  settings   Json     @default("{}")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("tenants")
+}
+
+model Site {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String
+  address   String?
+  phone     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  classes Class[]
+  rooms   Room[]
+
+  @@unique([tenantId, name])
+  @@map("sites")
+}
+
+model AcademicYear {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  label     String
+  startDate DateTime @db.Date
+  endDate   DateTime @db.Date
+  isCurrent Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  terms       Term[]
+  classes     Class[]
+  enrollments Enrollment[]
+
+  @@unique([tenantId, label])
+  @@map("academic_years")
+}
+
+/// Période d'évaluation (trimestre ou semestre).
+model Term {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  academicYearId String       @db.Uuid
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  name           String
+  position       Int
+  /// Poids de la période dans la moyenne annuelle (ex. T1 × 1, T2 × 1, T3 × 2).
+  weight         Decimal      @default(1) @db.Decimal(4, 2)
+  startDate      DateTime     @db.Date
+  endDate        DateTime     @db.Date
+
+  assessments  Assessment[]
+  reportRuns   ReportCardRun[]
+
+  @@unique([academicYearId, position])
+  @@map("terms")
+}
+
+enum Cycle {
+  MATERNELLE
+  PRIMAIRE
+  COLLEGE
+  LYCEE_GENERAL
+  LYCEE_TECHNIQUE
+}
+
+/// Filière ou série (ex. Électrotechnique F3, Génie civil F4, Enseignement général).
+model Track {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  code     String
+  name     String
+  cycle    Cycle
+  classes  Class[]
+
+  @@unique([tenantId, code])
+  @@map("tracks")
+}
+
+model Level {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  name     String
+  cycle    Cycle
+  position Int
+  classes  Class[]
+
+  @@unique([tenantId, name])
+  @@map("levels")
+}
+
+model Class {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  siteId         String       @db.Uuid
+  site           Site         @relation(fields: [siteId], references: [id])
+  academicYearId String       @db.Uuid
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  levelId        String       @db.Uuid
+  level          Level        @relation(fields: [levelId], references: [id])
+  trackId        String?      @db.Uuid
+  track          Track?       @relation(fields: [trackId], references: [id])
+  name           String
+  capacity       Int?
+  /// Professeur principal.
+  headTeacherId  String?      @db.Uuid
+  headTeacher    User?        @relation("HeadTeacher", fields: [headTeacherId], references: [id])
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  subjects        ClassSubject[]
+  enrollments     Enrollment[]
+  attendance      AttendanceSession[]
+  reportRuns      ReportCardRun[]
+  reportCards     ReportCard[]
+  announcements   Announcement[]
+
+  @@unique([academicYearId, name])
+  @@index([tenantId, siteId])
+  @@map("classes")
+}
+
+model Room {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String  @map("tenant_id") @db.Uuid
+  siteId   String  @db.Uuid
+  site     Site    @relation(fields: [siteId], references: [id])
+  name     String
+  slots    TimetableSlot[]
+
+  @@unique([siteId, name])
+  @@map("rooms")
+}
+
+// ---------------------------------------------------------------- Identité
+
+enum RoleCode {
+  DIRECTION
+  SECRETARIAT
+  ENSEIGNANT
+  VIE_SCOLAIRE
+  COMPTABLE
+  PARENT
+  ELEVE
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+model User {
+  id                 String     @id @default(uuid()) @db.Uuid
+  tenantId           String     @map("tenant_id") @db.Uuid
+  phone              String?
+  email              String?
+  passwordHash       String
+  firstName          String
+  lastName           String
+  status             UserStatus @default(ACTIVE)
+  mustChangePassword Boolean    @default(true)
+  failedLogins       Int        @default(0)
+  lockedUntil        DateTime?
+  totpSecret         String?
+  totpEnabled        Boolean    @default(false)
+  lastLoginAt        DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  roles            UserRole[]
+  sessions         Session[]
+  otps             OtpCode[]
+  assignments      TeacherAssignment[]
+  headOf           Class[]             @relation("HeadTeacher")
+  notifications    Notification[]
+  guardian         Guardian?
+  student          Student?
+
+  @@unique([tenantId, phone])
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+/// Rôle d'un utilisateur, éventuellement limité à un site. Un compte peut cumuler plusieurs rôles (CDC §2).
+model UserRole {
+  id       String   @id @default(uuid()) @db.Uuid
+  tenantId String   @map("tenant_id") @db.Uuid
+  userId   String   @db.Uuid
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role     RoleCode
+  siteId   String?  @db.Uuid
+
+  @@unique([userId, role, siteId])
+  @@map("user_roles")
+}
+
+model Session {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  userId           String    @db.Uuid
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String
+  userAgent        String?
+  ip               String?
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+enum OtpPurpose {
+  PASSWORD_RESET
+  LOGIN
+}
+
+model OtpCode {
+  id         String     @id @default(uuid()) @db.Uuid
+  tenantId   String     @map("tenant_id") @db.Uuid
+  userId     String     @db.Uuid
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose    OtpPurpose
+  codeHash   String
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  @@map("otp_codes")
+}
+
+// ---------------------------------------------------------------- Élèves et familles
+
+enum Sex {
+  M
+  F
+}
+
+enum StudentStatus {
+  ACTIVE
+  TRANSFERRED
+  WITHDRAWN
+  GRADUATED
+}
+
+model Student {
+  id          String        @id @default(uuid()) @db.Uuid
+  tenantId    String        @map("tenant_id") @db.Uuid
+  /// Matricule unique et permanent (CDC §4.1), sert aussi de référence de paiement.
+  matricule   String
+  firstName   String
+  lastName    String
+  sex         Sex?
+  birthDate   DateTime?     @db.Date
+  birthPlace  String?
+  photoUrl    String?
+  allergies   String?
+  status      StudentStatus @default(ACTIVE)
+  userId      String?       @unique @db.Uuid
+  user        User?         @relation(fields: [userId], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  guardians       StudentGuardian[]
+  enrollments     Enrollment[]
+  attendance      AttendanceRecord[]
+  grades          Grade[]
+  reportCards     ReportCard[]
+  invoices        Invoice[]
+  payments        Payment[]
+  documents       Document[]
+  sanctions       Sanction[]
+
+  @@unique([tenantId, matricule])
+  @@index([tenantId, lastName, firstName])
+  @@map("students")
+}
+
+model Guardian {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  firstName String
+  lastName  String
+  phone     String
+  email     String?
+  address   String?
+  userId    String?  @unique @db.Uuid
+  user      User?    @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+
+  students StudentGuardian[]
+
+  @@index([tenantId, phone])
+  @@map("guardians")
+}
+
+model StudentGuardian {
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  studentId  String   @db.Uuid
+  student    Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  guardianId String   @db.Uuid
+  guardian   Guardian @relation(fields: [guardianId], references: [id], onDelete: Cascade)
+  relation   String
+  isPrimary  Boolean  @default(false)
+
+  @@unique([studentId, guardianId])
+  @@map("student_guardians")
+}
+
+enum EnrollmentStatus {
+  ACTIVE
+  TRANSFERRED
+  WITHDRAWN
+}
+
+/// Inscription : élève × classe × année.
+model Enrollment {
+  id             String           @id @default(uuid()) @db.Uuid
+  tenantId       String           @map("tenant_id") @db.Uuid
+  studentId      String           @db.Uuid
+  student        Student          @relation(fields: [studentId], references: [id])
+  classId        String           @db.Uuid
+  class          Class            @relation(fields: [classId], references: [id])
+  academicYearId String           @db.Uuid
+  academicYear   AcademicYear     @relation(fields: [academicYearId], references: [id])
+  status         EnrollmentStatus @default(ACTIVE)
+  enrolledAt     DateTime         @default(now())
+
+  @@unique([studentId, academicYearId])
+  @@index([classId])
+  @@map("enrollments")
+}
+
+enum ApplicationStatus {
+  RECU
+  INCOMPLET
+  EN_TEST
+  ACCEPTE
+  REFUSE
+  LISTE_ATTENTE
+  INSCRIT
+}
+
+/// Pré-inscription déposée depuis le site public (CDC §4.1, étapes 1 à 4).
+model Application {
+  id               String            @id @default(uuid()) @db.Uuid
+  tenantId         String            @map("tenant_id") @db.Uuid
+  reference        String
+  studentFirstName String
+  studentLastName  String
+  sex              Sex?
+  birthDate        DateTime?         @db.Date
+  previousSchool   String?
+  wantedLevel      String
+  wantedTrack      String?
+  wantedSite       String?
+  guardianName     String
+  guardianPhone    String
+  guardianEmail    String?
+  message          String?
+  status           ApplicationStatus @default(RECU)
+  testResult       String?
+  notes            String?
+  studentId        String?           @db.Uuid
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([tenantId, reference])
+  @@map("applications")
+}
+
+// ---------------------------------------------------------------- Pédagogie
+
+model Subject {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @map("tenant_id") @db.Uuid
+  code     String
+  name     String
+
+  classSubjects ClassSubject[]
+
+  @@unique([tenantId, code])
+  @@map("subjects")
+}
+
+/// Matière enseignée dans une classe, avec son coefficient (coefficient par niveau et série, CDC §3.3).
+model ClassSubject {
+  id          String  @id @default(uuid()) @db.Uuid
+  tenantId    String  @map("tenant_id") @db.Uuid
+  classId     String  @db.Uuid
+  class       Class   @relation(fields: [classId], references: [id], onDelete: Cascade)
+  subjectId   String  @db.Uuid
+  subject     Subject @relation(fields: [subjectId], references: [id])
+  coefficient Decimal @default(1) @db.Decimal(4, 2)
+
+  assignments TeacherAssignment[]
+  slots       TimetableSlot[]
+  assessments Assessment[]
+  lessons     Lesson[]
+
+  @@unique([classId, subjectId])
+  @@map("class_subjects")
+}
+
+/// Service : enseignant × matière × classe.
+model TeacherAssignment {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  teacherId      String       @db.Uuid
+  teacher        User         @relation(fields: [teacherId], references: [id])
+  classSubjectId String       @db.Uuid
+  classSubject   ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+
+  @@unique([teacherId, classSubjectId])
+  @@map("teacher_assignments")
+}
+
+/// Créneau hebdomadaire récurrent. Heures en minutes depuis minuit.
+model TimetableSlot {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  classSubjectId String       @db.Uuid
+  classSubject   ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+  roomId         String?      @db.Uuid
+  room           Room?        @relation(fields: [roomId], references: [id])
+  dayOfWeek      Int
+  startMinute    Int
+  endMinute      Int
+  createdAt      DateTime     @default(now())
+
+  changes TimetableChange[]
+
+  @@index([tenantId, dayOfWeek])
+  @@map("timetable_slots")
+}
+
+enum TimetableChangeKind {
+  CANCELLED
+  MOVED
+  ROOM_CHANGED
+}
+
+/// Modification ponctuelle d'un créneau à une date donnée (absence de professeur, déplacement, changement de salle).
+model TimetableChange {
+  id             String              @id @default(uuid()) @db.Uuid
+  tenantId       String              @map("tenant_id") @db.Uuid
+  slotId         String              @db.Uuid
+  slot           TimetableSlot       @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  date           DateTime            @db.Date
+  kind           TimetableChangeKind
+  newDate        DateTime?           @db.Date
+  newStartMinute Int?
+  newEndMinute   Int?
+  newRoomId      String?             @db.Uuid
+  reason         String?
+  createdById    String              @db.Uuid
+  createdAt      DateTime            @default(now())
+
+  @@unique([slotId, date])
+  @@map("timetable_changes")
+}
+
+/// Séance du cahier de texte.
+model Lesson {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  classSubjectId String       @db.Uuid
+  classSubject   ClassSubject @relation(fields: [classSubjectId], references: [id], onDelete: Cascade)
+  date           DateTime     @db.Date
+  title          String
+  content        String
+  homework       String?
+  homeworkDue    DateTime?    @db.Date
+  authorId       String       @db.Uuid
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([classSubjectId, date])
+  @@map("lessons")
+}
+
+// ---------------------------------------------------------------- Vie scolaire
+
+model AttendanceSession {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  classId        String   @db.Uuid
+  class          Class    @relation(fields: [classId], references: [id])
+  classSubjectId String?  @db.Uuid
+  date           DateTime @db.Date
+  startMinute    Int
+  takenById      String   @db.Uuid
+  takenAt        DateTime @default(now())
+
+  records AttendanceRecord[]
+
+  @@unique([classId, date, startMinute])
+  @@map("attendance_sessions")
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+}
+
+enum JustificationStatus {
+  NONE
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+model AttendanceRecord {
+  id                  String              @id @default(uuid()) @db.Uuid
+  tenantId            String              @map("tenant_id") @db.Uuid
+  sessionId           String              @db.Uuid
+  session             AttendanceSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studentId           String              @db.Uuid
+  student             Student             @relation(fields: [studentId], references: [id])
+  status              AttendanceStatus
+  minutesLate         Int?
+  justification       JustificationStatus @default(NONE)
+  justificationReason String?
+  justificationFile   String?
+  justifiedById       String?             @db.Uuid
+  reviewedById        String?             @db.Uuid
+  reviewedAt          DateTime?
+
+  @@unique([sessionId, studentId])
+  @@index([studentId])
+  @@map("attendance_records")
+}
+
+enum SanctionStatus {
+  PROPOSED
+  VALIDATED
+  REJECTED
+}
+
+model Sanction {
+  id          String         @id @default(uuid()) @db.Uuid
+  tenantId    String         @map("tenant_id") @db.Uuid
+  studentId   String         @db.Uuid
+  student     Student        @relation(fields: [studentId], references: [id])
+  kind        String
+  reason      String
+  date        DateTime       @db.Date
+  status      SanctionStatus @default(PROPOSED)
+  proposedById String        @db.Uuid
+  validatedById String?      @db.Uuid
+  createdAt   DateTime       @default(now())
+
+  @@map("sanctions")
+}
+
+// ---------------------------------------------------------------- Évaluation
+
+enum AssessmentKind {
+  INTERROGATION
+  DEVOIR
+  COMPOSITION
+}
+
+model Assessment {
+  id             String         @id @default(uuid()) @db.Uuid
+  tenantId       String         @map("tenant_id") @db.Uuid
+  classSubjectId String         @db.Uuid
+  classSubject   ClassSubject   @relation(fields: [classSubjectId], references: [id])
+  termId         String         @db.Uuid
+  term           Term           @relation(fields: [termId], references: [id])
+  title          String
+  kind           AssessmentKind
+  weight         Decimal        @default(1) @db.Decimal(4, 2)
+  maxScore       Decimal        @default(20) @db.Decimal(5, 2)
+  date           DateTime       @db.Date
+  published      Boolean        @default(false)
+  createdById    String         @db.Uuid
+  createdAt      DateTime       @default(now())
+
+  grades Grade[]
+
+  @@index([classSubjectId, termId])
+  @@map("assessments")
+}
+
+model Grade {
+  id           String     @id @default(uuid()) @db.Uuid
+  tenantId     String     @map("tenant_id") @db.Uuid
+  assessmentId String     @db.Uuid
+  assessment   Assessment @relation(fields: [assessmentId], references: [id])
+  studentId    String     @db.Uuid
+  student      Student    @relation(fields: [studentId], references: [id])
+  /// Note brute sur maxScore de l’évaluation ; null = non notée.
+  score        Decimal?   @db.Decimal(5, 2)
+  absent       Boolean    @default(false)
+  exempt       Boolean    @default(false)
+  comment      String?
+  updatedById  String     @db.Uuid
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([assessmentId, studentId])
+  @@map("grades")
+}
+
+/// Circuit de validation des bulletins d'une classe pour une période (CDC §3.3).
+enum ReportRunStatus {
+  SAISIE
+  CONTROLE
+  CONSEIL
+  VALIDE
+  PUBLIE
+}
+
+model ReportCardRun {
+  id          String          @id @default(uuid()) @db.Uuid
+  tenantId    String          @map("tenant_id") @db.Uuid
+  classId     String          @db.Uuid
+  class       Class           @relation(fields: [classId], references: [id])
+  termId      String          @db.Uuid
+  term        Term            @relation(fields: [termId], references: [id])
+  status      ReportRunStatus @default(SAISIE)
+  history     Json            @default("[]")
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([classId, termId])
+  @@map("report_card_runs")
+}
+
+model ReportCard {
+  id               String   @id @default(uuid()) @db.Uuid
+  tenantId         String   @map("tenant_id") @db.Uuid
+  studentId        String   @db.Uuid
+  student          Student  @relation(fields: [studentId], references: [id])
+  classId          String   @db.Uuid
+  class            Class    @relation(fields: [classId], references: [id])
+  termId           String   @db.Uuid
+  average          Decimal? @db.Decimal(5, 2)
+  rank             Int?
+  classSize        Int
+  distinction      String?
+  appreciation     String?
+  councilDecision  String?
+  absencesCount    Int      @default(0)
+  verifyCode       String   @unique
+  publishedAt      DateTime?
+  createdAt        DateTime @default(now())
+
+  items ReportCardItem[]
+
+  @@unique([studentId, termId])
+  @@map("report_cards")
+}
+
+model ReportCardItem {
+  id           String     @id @default(uuid()) @db.Uuid
+  tenantId     String     @map("tenant_id") @db.Uuid
+  reportCardId String     @db.Uuid
+  reportCard   ReportCard @relation(fields: [reportCardId], references: [id], onDelete: Cascade)
+  subjectName  String
+  coefficient  Decimal    @db.Decimal(4, 2)
+  average      Decimal?   @db.Decimal(5, 2)
+  classAverage Decimal?   @db.Decimal(5, 2)
+  minAverage   Decimal?   @db.Decimal(5, 2)
+  maxAverage   Decimal?   @db.Decimal(5, 2)
+  rank         Int?
+  teacherName  String?
+  appreciation String?
+
+  @@map("report_card_items")
+}
+
+/// Appréciation d'un enseignant pour un élève, une matière et une période.
+model Appreciation {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  studentId      String   @db.Uuid
+  classSubjectId String   @db.Uuid
+  termId         String   @db.Uuid
+  text           String
+  authorId       String   @db.Uuid
+  updatedAt      DateTime @updatedAt
+
+  @@unique([studentId, classSubjectId, termId])
+  @@map("appreciations")
+}
+
+// ---------------------------------------------------------------- Finances
+
+/// Tarif du catalogue (scolarité, inscription, tenue...). Les montants sont saisis par l'école.
+model FeeType {
+  id             String   @id @default(uuid()) @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  academicYearId String   @db.Uuid
+  name           String
+  amount         Int
+  levelId        String?  @db.Uuid
+  trackId        String?  @db.Uuid
+  dueDate        DateTime? @db.Date
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  @@map("fee_types")
+}
+
+enum InvoiceStatus {
+  OPEN
+  PARTIAL
+  PAID
+  CANCELLED
+}
+
+model Invoice {
+  id          String        @id @default(uuid()) @db.Uuid
+  tenantId    String        @map("tenant_id") @db.Uuid
+  number      String
+  studentId   String        @db.Uuid
+  student     Student       @relation(fields: [studentId], references: [id])
+  label       String
+  total       Int
+  paid        Int           @default(0)
+  dueDate     DateTime      @db.Date
+  status      InvoiceStatus @default(OPEN)
+  createdById String        @db.Uuid
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  items    InvoiceItem[]
+  payments Payment[]
+
+  @@unique([tenantId, number])
+  @@index([studentId])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @map("tenant_id") @db.Uuid
+  invoiceId String  @db.Uuid
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  feeTypeId String? @db.Uuid
+  label     String
+  amount    Int
+
+  @@map("invoice_items")
+}
+
+enum PaymentMethod {
+  CASH
+  CHEQUE
+  TRANSFER
+  MOBILE_MONEY_DESK
+  ONLINE
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model Payment {
+  id             String        @id @default(uuid()) @db.Uuid
+  tenantId       String        @map("tenant_id") @db.Uuid
+  invoiceId      String        @db.Uuid
+  invoice        Invoice       @relation(fields: [invoiceId], references: [id])
+  studentId      String        @db.Uuid
+  student        Student       @relation(fields: [studentId], references: [id])
+  amount         Int
+  method         PaymentMethod
+  /// Fournisseur pour les paiements en ligne (sandbox, cinetpay, paydunya).
+  provider       String?
+  /// Opérateur choisi par le payeur (MTN MoMo, Moov Money...).
+  operator       String?
+  providerRef    String?
+  /// Identifiant de transaction envoyé au fournisseur, unique.
+  transactionId  String        @unique
+  idempotencyKey String?       @unique
+  status         PaymentStatus @default(INITIATED)
+  payerPhone     String?
+  receivedById   String?       @db.Uuid
+  rawCallback    Json?
+  createdAt      DateTime      @default(now())
+  confirmedAt    DateTime?
+
+  receipt Receipt?
+
+  @@index([tenantId, status])
+  @@map("payments")
+}
+
+/// Reçu numéroté. Jamais supprimé : il s'annule par un avoir (CDC §4.4).
+model Receipt {
+  id          String    @id @default(uuid()) @db.Uuid
+  tenantId    String    @map("tenant_id") @db.Uuid
+  number      String
+  paymentId   String    @unique @db.Uuid
+  payment     Payment   @relation(fields: [paymentId], references: [id])
+  verifyCode  String    @unique
+  issuedAt    DateTime  @default(now())
+  cancelledAt DateTime?
+  cancelReason String?
+  cancelledById String? @db.Uuid
+
+  @@unique([tenantId, number])
+  @@map("receipts")
+}
+
+/// Clôture de caisse journalière par caissier.
+model CashClosing {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  siteId      String?  @db.Uuid
+  date        DateTime @db.Date
+  cashierId   String   @db.Uuid
+  expected    Int
+  counted     Int
+  difference  Int
+  comment     String?
+  createdAt   DateTime @default(now())
+
+  @@unique([tenantId, cashierId, date])
+  @@map("cash_closings")
+}
+
+/// Compteurs séquentiels par tenant (matricules, factures, reçus...).
+model Counter {
+  tenantId String @map("tenant_id") @db.Uuid
+  key      String
+  value    Int    @default(0)
+
+  @@id([tenantId, key])
+  @@map("counters")
+}
+
+// ---------------------------------------------------------------- Communication
+
+enum Audience {
+  ALL
+  PARENTS
+  STAFF
+  TEACHERS
+  CLASS
+}
+
+model Announcement {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  title       String
+  body        String
+  audience    Audience
+  classId     String?  @db.Uuid
+  class       Class?   @relation(fields: [classId], references: [id])
+  siteId      String?  @db.Uuid
+  urgent      Boolean  @default(false)
+  authorId    String   @db.Uuid
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("announcements")
+}
+
+enum NotificationChannel {
+  IN_APP
+  SMS
+  WHATSAPP
+  EMAIL
+  PUSH
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+model Notification {
+  id        String              @id @default(uuid()) @db.Uuid
+  tenantId  String              @map("tenant_id") @db.Uuid
+  userId    String              @db.Uuid
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel   NotificationChannel
+  kind      String
+  title     String
+  body      String
+  data      Json?
+  status    NotificationStatus  @default(QUEUED)
+  error     String?
+  readAt    DateTime?
+  sentAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------- Documents et audit
+
+enum DocumentKind {
+  CERTIFICAT_SCOLARITE
+  ATTESTATION_INSCRIPTION
+  CARTE_SCOLAIRE
+  ATTESTATION_PAIEMENT
+}
+
+model Document {
+  id         String       @id @default(uuid()) @db.Uuid
+  tenantId   String       @map("tenant_id") @db.Uuid
+  kind       DocumentKind
+  number     String
+  studentId  String       @db.Uuid
+  student    Student      @relation(fields: [studentId], references: [id])
+  verifyCode String       @unique
+  data       Json
+  issuedById String       @db.Uuid
+  issuedAt   DateTime     @default(now())
+
+  @@unique([tenantId, number])
+  @@map("documents")
+}
+
+/// Registre public de vérification des QR codes, sans donnée personnelle superflue.
+/// Hors RLS : consulté par la page publique /verifier/{code}.
+model VerificationEntry {
+  code      String   @id
+  tenantId  String   @map("tenant_id") @db.Uuid
+  kind      String
+  summary   String
+  issuedAt  DateTime
+  revokedAt DateTime?
+
+  @@map("verification_entries")
+}
+
+/// Journal d'audit : insertion seule (UPDATE et DELETE interdits par trigger).
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String?  @db.Uuid
+  userName  String?
+  action    String
+  entity    String
+  entityId  String?
+  data      Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("audit_logs")
+}
+
+/// Routage des webhooks de paiement vers le bon établissement (hors RLS : le webhook arrive sans contexte).
+model PaymentRoute {
+  transactionId String   @id @map("transaction_id")
+  tenantId      String   @map("tenant_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("payment_routes")
+}
