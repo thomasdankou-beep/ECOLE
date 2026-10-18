@@ -1,0 +1,11 @@
+# Point d'entrée unique : le site et l'API partagent la même origine (cookie de session « strict »).
+# Remplacez :80 par le nom de domaine de l'école pour obtenir automatiquement un certificat HTTPS.
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+	handle /api/* {
+		reverse_proxy api:4000
+	}
+	handle {
+		reverse_proxy web:3000
+	}
+}

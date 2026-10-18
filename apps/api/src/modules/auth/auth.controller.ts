@@ -46,7 +46,7 @@ export class AuthController {
   private setCookie(res: Response, value: string) {
     res.cookie(COOKIE, value, {
       httpOnly: true,
-      secure: config.isProd,
+      secure: config.cookieSecure,
       sameSite: 'strict',
       path: '/api/v1/auth',
       maxAge: config.jwt.refreshTtlDays * 86400000,

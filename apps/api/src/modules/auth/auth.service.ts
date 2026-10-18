@@ -207,7 +207,7 @@ export class AuthService {
         where: { userId: actor.userId, revokedAt: null, expiresAt: { gt: new Date() } },
         select: { id: true, ip: true, userAgent: true, createdAt: true, lastUsedAt: true },
         orderBy: { lastUsedAt: 'desc' },
-      }),
+      }).then((rows) => rows.map((r) => ({ ...r, current: r.id === actor.sessionId }))),
     );
   }
 
@@ -234,7 +234,16 @@ export class AuthService {
         });
         children = links.map((l) => ({ id: l.student.id, firstName: l.student.firstName, lastName: l.student.lastName, className: l.student.enrollments[0]?.class.name ?? null }));
       }
-      return { user, tenant, sites, year, children };
+      // Pour l'élève, sa propre fiche sert d'« enfant » unique : l'interface reste la même que pour le parent.
+      let self: { id: string; firstName: string; lastName: string; className: string | null } | null = null;
+      if (user.roles.some((r) => r.role === 'ELEVE')) {
+        const st = await tx.student.findUnique({
+          where: { userId: actor.userId },
+          select: { id: true, firstName: true, lastName: true, enrollments: { where: { academicYearId: year?.id }, select: { class: { select: { name: true } } } } },
+        });
+        if (st) self = { id: st.id, firstName: st.firstName, lastName: st.lastName, className: st.enrollments[0]?.class.name ?? null };
+      }
+      return { user, tenant, sites, year, children, self };
     });
   }
 

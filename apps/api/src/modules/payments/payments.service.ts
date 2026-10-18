@@ -44,7 +44,7 @@ export class PaymentsService {
         transactionId, amount: dto.amount, currency: 'XOF', description: `${payment.label} ${payment.studentName}`,
         payerPhone: payment.payerPhone ?? undefined, operator: dto.operator, customerName: actor.name,
         notifyUrl: `${config.publicApiUrl}/api/v1/payments/webhook/${this.provider.name}`,
-        returnUrl: `${config.webOrigin}/espace/parent/frais?paiement=${payment.id}`,
+        returnUrl: `${config.webOrigin}/espace/frais?paiement=${payment.id}`,
       });
       await this.db.forTenant(actor.tenantId, (tx) => tx.payment.update({ where: { id: payment.id }, data: { status: 'PENDING', providerRef: r.providerRef } }));
       return { paymentId: payment.id, transactionId, status: 'PENDING', ...r };
