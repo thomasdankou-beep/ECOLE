@@ -23,13 +23,25 @@ Sécurité : isolation des écoles par Row Level Security PostgreSQL, mots de pa
 
 ## Démarrer en 5 minutes avec Docker
 
-Prérequis : Docker et Docker Compose.
+Prérequis : Docker Desktop (Windows, Mac) ou Docker Engine (Linux), et Git.
 
 ```bash
-cp .env.docker.example .env      # puis remplir les secrets (openssl rand -base64 32)
+git clone https://github.com/thomasdankou-beep/ecole.git
+cd ecole
+./demarrer.sh
+```
+
+Au premier lancement, le script crée le fichier `.env` avec des secrets générés, démarre les services et charge les données de démonstration. Sous Windows, lancez-le depuis « Git Bash ».
+
+Lancement manuel, si vous préférez :
+
+```bash
+cp .env.docker.example .env      # puis remplir les secrets (openssl rand -base64 48)
 docker compose up -d --build
 docker compose exec api npm run db:seed   # données de démonstration (facultatif)
 ```
+
+Pour arrêter : `docker compose down` (les données sont conservées).
 
 Le site est sur http://localhost:8080. La documentation de l’API (OpenAPI) est sur http://localhost:8080/api/docs.
 
