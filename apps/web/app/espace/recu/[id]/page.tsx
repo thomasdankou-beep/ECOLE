@@ -3,14 +3,14 @@
 import { useParams } from 'next/navigation';
 import { Printer } from 'lucide-react';
 import { Loader } from '@/components/espace/bits';
-import { Letterhead, PrintBar } from '@/components/print/letterhead';
+import { LegalFooter, Letterhead, PrintBar, type SchoolIdentity } from '@/components/print/letterhead';
 import { VerifyQr } from '@/components/qr';
 import { Button } from '@/components/ui';
 import { dateTime, fcfa } from '@/lib/format';
 import { useApi } from '@/lib/use-api';
 
 type Receipt = {
-  id: string; number: string; verifyCode: string; issuedAt: string; cancelledAt: string | null; cancelReason: string | null; methodLabel: string; tenant: { name: string };
+  id: string; number: string; verifyCode: string; issuedAt: string; cancelledAt: string | null; cancelReason: string | null; methodLabel: string; tenant: { name: string }; identity: SchoolIdentity;
   payment: { amount: number; reference?: string | null; operator: string | null; transactionId: string; invoice: { number: string; label: string; total: number; paid: number }; student: { matricule: string; firstName: string; lastName: string; enrollments: { class: { name: string; site: { name: string } } }[] } };
 };
 
@@ -26,7 +26,7 @@ export default function Recu() {
           return (
             <article className="relative mx-auto grid w-full max-w-[148mm] gap-4 overflow-hidden bg-white p-6 text-black shadow-sm print:shadow-none">
               {r.cancelledAt && <p className="absolute right-[-40px] top-10 rotate-[30deg] bg-bad px-16 py-1 text-lg font-extrabold text-white">ANNULÉ</p>}
-              <Letterhead name={r.tenant.name} site={cls?.site.name} />
+              <Letterhead identity={r.identity} site={cls?.site.name} />
               <div className="flex items-baseline justify-between">
                 <h1 className="font-display text-2xl font-bold uppercase">Reçu de paiement</h1>
                 <p className="font-mono font-bold">N° {r.number}</p>
@@ -46,8 +46,9 @@ export default function Recu() {
               {r.cancelledAt && <p className="rounded bg-bad-soft p-2 text-sm text-bad">Reçu annulé le {dateTime(r.cancelledAt)} : {r.cancelReason}</p>}
               <div className="flex items-end justify-between">
                 <VerifyQr code={r.verifyCode} size={80} />
-                <div className="text-center text-sm"><p>Le caissier</p><p className="mt-10 text-xs text-black/60">Signature et cachet</p></div>
+                <div className="text-center text-sm"><p>Le caissier</p>{r.identity.stampUrl ? <img src={r.identity.stampUrl} alt="Cachet" className="mx-auto mt-1 max-h-16 opacity-80" /> : <p className="mt-10 text-xs text-black/60">Signature et cachet</p>}</div>
               </div>
+              <LegalFooter identity={r.identity} />
               <p className="text-center text-[11px] text-black/60">Reçu non fiscal. Facture normalisée e-MECeF : INFORMATION MANQUANTE (raccordement à prévoir).</p>
             </article>
           );
