@@ -21,6 +21,10 @@ Documents imprimables (format A4, QR code vérifiable) : bulletin, reçu, certif
 
 Sécurité : isolation des écoles par Row Level Security PostgreSQL, mots de passe argon2id, session courte avec renouvellement par cookie httpOnly, verrouillage après 5 échecs, double authentification (TOTP), droits par rôle et par site, notes et paiements jamais supprimés, journal d’audit en ajout seul.
 
+## Essayer en ligne avec GitHub Codespaces (sans rien installer)
+
+Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Le site se construit tout seul au démarrage (plusieurs minutes la première fois). Pour suivre l’avancement ou relancer, tapez `./demarrer.sh` dans le terminal du codespace ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.
+
 ## Démarrer en 5 minutes avec Docker
 
 Prérequis : Docker Desktop (Windows, Mac) ou Docker Engine (Linux), et Git.

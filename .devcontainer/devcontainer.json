@@ -1,0 +1,13 @@
+{
+  "name": "ERP Saint Kisito-GESA",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "hostRequirements": { "cpus": 2, "memory": "8gb" },
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": { "label": "Site de l'école", "onAutoForward": "openBrowser" }
+  },
+  "postStartCommand": "bash ./demarrer.sh"
+}

@@ -1,29 +1,58 @@
 #!/usr/bin/env bash
-# Lance le site en local avec Docker : crée .env (secrets générés) au premier lancement,
-# démarre les services, puis charge les données de démonstration.
+# Lance le site avec Docker : crée .env (secrets générés) au premier lancement,
+# démarre les services, charge les données de démonstration et attend que le site réponde.
 set -euo pipefail
 cd "$(dirname "$0")"
 
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker n'est pas démarré. Lancez Docker Desktop (ou le service docker), puis relancez ./demarrer.sh"
+  exit 1
+fi
+
 secret() { head -c 48 /dev/urandom | base64 | tr -d '\n/+='; }
+port=8080
 
 if [ ! -f .env ]; then
   cp .env.docker.example .env
   for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
     sed -i.bak "s|^$k=.*|$k=$(secret)|" .env
   done
+  # GitHub Codespaces : le site est servi sur une adresse publique propre au codespace.
+  if [ -n "${CODESPACE_NAME:-}" ]; then
+    sed -i.bak "s|^WEB_ORIGIN=.*|WEB_ORIGIN=https://${CODESPACE_NAME}-${port}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}|" .env
+  fi
   rm -f .env.bak
   echo "Fichier .env créé avec des secrets générés."
-  first_run=1
 fi
 
+echo "Construction et démarrage des services (le premier lancement prend plusieurs minutes)..."
 docker compose up -d --build
 
-if [ "${first_run:-0}" = 1 ]; then
-  echo "Chargement des données de démonstration..."
-  for i in $(seq 1 30); do
-    docker compose exec -T api npm run db:seed && break
-    sleep 5
-  done
-fi
+echo "Préparation de la base et des données de démonstration..."
+seeded=0
+for i in $(seq 1 40); do
+  if docker compose exec -T api node -e "process.exit(0)" >/dev/null 2>&1 \
+     && docker compose exec -T api npm run -s db:seed:if-empty >/dev/null 2>&1; then
+    seeded=1; break
+  fi
+  sleep 5
+done
+[ "$seeded" = 1 ] || echo "Attention : les données de démonstration n'ont pas pu être chargées (voir : docker compose logs api)."
 
-echo "Site prêt : http://localhost:${HTTP_PORT:-8080}"
+echo "Attente de la réponse du site..."
+for i in $(seq 1 60); do
+  if curl -fsS -o /dev/null "http://localhost:${port}/"; then
+    url=$(grep '^WEB_ORIGIN=' .env | cut -d= -f2-)
+    echo ""
+    echo "Site prêt : ${url:-http://localhost:${port}}"
+    echo "Mot de passe des comptes de démonstration : Kisito2026 (direction : +2290190000010)"
+    exit 0
+  fi
+  sleep 5
+done
+
+echo "Le site ne répond pas encore. État des services :"
+docker compose ps
+echo "Dernières lignes des journaux :"
+docker compose logs --tail=40 api web caddy
+exit 1

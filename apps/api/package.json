@@ -10,6 +10,7 @@
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
     "db:seed": "ts-node --transpile-only prisma/seed.ts",
+    "db:seed:if-empty": "SEED_IF_EMPTY=1 ts-node --transpile-only prisma/seed.ts",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand src",
     "test:e2e": "jest --runInBand test"

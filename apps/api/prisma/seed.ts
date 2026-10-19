@@ -22,6 +22,10 @@ const addDays = (n: number) => new Date(today.getTime() + n * 86400000);
 
 async function main() {
   const existing = await db.tenant.findUnique({ where: { slug: SLUG } });
+  if (existing && process.env.SEED_IF_EMPTY === '1') {
+    console.log('Données déjà présentes, jeu de démonstration non rechargé.');
+    return;
+  }
   if (existing) {
     await wipe(existing.id);
   }
