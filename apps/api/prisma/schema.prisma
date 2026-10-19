@@ -18,17 +18,17 @@ datasource db {
 
 /// Groupe scolaire client (décision D1 : un tenant = un groupe avec ses sites).
 model Tenant {
-  id         String   @id @default(uuid()) @db.Uuid
-  slug       String   @unique
-  name       String
-  shortName  String?
-  country    String   @default("BJ")
-  currency   String   @default("XOF")
-  timezone   String   @default("Africa/Porto-Novo")
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  shortName String?
+  country   String   @default("BJ")
+  currency  String   @default("XOF")
+  timezone  String   @default("Africa/Porto-Novo")
   /// Paramètres : seuils de distinction, règles de calcul, blocage bulletin si impayé, canaux de notification...
-  settings   Json     @default("{}")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@map("tenants")
 }
@@ -59,9 +59,10 @@ model AcademicYear {
   isCurrent Boolean  @default(false)
   createdAt DateTime @default(now())
 
-  terms       Term[]
-  classes     Class[]
-  enrollments Enrollment[]
+  terms             Term[]
+  classes           Class[]
+  enrollments       Enrollment[]
+  internshipPeriods InternshipPeriod[]
 
   @@unique([tenantId, label])
   @@map("academic_years")
@@ -80,8 +81,8 @@ model Term {
   startDate      DateTime     @db.Date
   endDate        DateTime     @db.Date
 
-  assessments  Assessment[]
-  reportRuns   ReportCardRun[]
+  assessments Assessment[]
+  reportRuns  ReportCardRun[]
 
   @@unique([academicYearId, position])
   @@map("terms")
@@ -139,12 +140,12 @@ model Class {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  subjects        ClassSubject[]
-  enrollments     Enrollment[]
-  attendance      AttendanceSession[]
-  reportRuns      ReportCardRun[]
-  reportCards     ReportCard[]
-  announcements   Announcement[]
+  subjects      ClassSubject[]
+  enrollments   Enrollment[]
+  attendance    AttendanceSession[]
+  reportRuns    ReportCardRun[]
+  reportCards   ReportCard[]
+  announcements Announcement[]
 
   @@unique([academicYearId, name])
   @@index([tenantId, siteId])
@@ -152,15 +153,25 @@ model Class {
 }
 
 model Room {
-  id       String  @id @default(uuid()) @db.Uuid
-  tenantId String  @map("tenant_id") @db.Uuid
-  siteId   String  @db.Uuid
-  site     Site    @relation(fields: [siteId], references: [id])
+  id       String          @id @default(uuid()) @db.Uuid
+  tenantId String          @map("tenant_id") @db.Uuid
+  siteId   String          @db.Uuid
+  site     Site            @relation(fields: [siteId], references: [id])
   name     String
+  /// Salle de classe, atelier ou laboratoire (travaux pratiques du lycée technique).
+  kind     RoomKind        @default(CLASSROOM)
+  capacity Int?
   slots    TimetableSlot[]
 
   @@unique([siteId, name])
   @@map("rooms")
+}
+
+enum RoomKind {
+  CLASSROOM
+  WORKSHOP
+  LAB
+  OTHER
 }
 
 // ---------------------------------------------------------------- Identité
@@ -198,14 +209,14 @@ model User {
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
 
-  roles            UserRole[]
-  sessions         Session[]
-  otps             OtpCode[]
-  assignments      TeacherAssignment[]
-  headOf           Class[]             @relation("HeadTeacher")
-  notifications    Notification[]
-  guardian         Guardian?
-  student          Student?
+  roles         UserRole[]
+  sessions      Session[]
+  otps          OtpCode[]
+  assignments   TeacherAssignment[]
+  headOf        Class[]             @relation("HeadTeacher")
+  notifications Notification[]
+  guardian      Guardian?
+  student       Student?
 
   @@unique([tenantId, phone])
   @@unique([tenantId, email])
@@ -277,32 +288,33 @@ enum StudentStatus {
 }
 
 model Student {
-  id          String        @id @default(uuid()) @db.Uuid
-  tenantId    String        @map("tenant_id") @db.Uuid
+  id         String        @id @default(uuid()) @db.Uuid
+  tenantId   String        @map("tenant_id") @db.Uuid
   /// Matricule unique et permanent (CDC §4.1), sert aussi de référence de paiement.
-  matricule   String
-  firstName   String
-  lastName    String
-  sex         Sex?
-  birthDate   DateTime?     @db.Date
-  birthPlace  String?
-  photoUrl    String?
-  allergies   String?
-  status      StudentStatus @default(ACTIVE)
-  userId      String?       @unique @db.Uuid
-  user        User?         @relation(fields: [userId], references: [id])
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  matricule  String
+  firstName  String
+  lastName   String
+  sex        Sex?
+  birthDate  DateTime?     @db.Date
+  birthPlace String?
+  photoUrl   String?
+  allergies  String?
+  status     StudentStatus @default(ACTIVE)
+  userId     String?       @unique @db.Uuid
+  user       User?         @relation(fields: [userId], references: [id])
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
 
-  guardians       StudentGuardian[]
-  enrollments     Enrollment[]
-  attendance      AttendanceRecord[]
-  grades          Grade[]
-  reportCards     ReportCard[]
-  invoices        Invoice[]
-  payments        Payment[]
-  documents       Document[]
-  sanctions       Sanction[]
+  guardians   StudentGuardian[]
+  enrollments Enrollment[]
+  attendance  AttendanceRecord[]
+  grades      Grade[]
+  reportCards ReportCard[]
+  invoices    Invoice[]
+  payments    Payment[]
+  documents   Document[]
+  sanctions   Sanction[]
+  internships InternshipPlacement[]
 
   @@unique([tenantId, matricule])
   @@index([tenantId, lastName, firstName])
@@ -406,10 +418,12 @@ model Application {
 // ---------------------------------------------------------------- Pédagogie
 
 model Subject {
-  id       String @id @default(uuid()) @db.Uuid
-  tenantId String @map("tenant_id") @db.Uuid
-  code     String
-  name     String
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @map("tenant_id") @db.Uuid
+  code      String
+  name      String
+  /// Matière de travaux pratiques d'atelier.
+  practical Boolean @default(false)
 
   classSubjects ClassSubject[]
 
@@ -573,17 +587,17 @@ enum SanctionStatus {
 }
 
 model Sanction {
-  id          String         @id @default(uuid()) @db.Uuid
-  tenantId    String         @map("tenant_id") @db.Uuid
-  studentId   String         @db.Uuid
-  student     Student        @relation(fields: [studentId], references: [id])
-  kind        String
-  reason      String
-  date        DateTime       @db.Date
-  status      SanctionStatus @default(PROPOSED)
-  proposedById String        @db.Uuid
-  validatedById String?      @db.Uuid
-  createdAt   DateTime       @default(now())
+  id            String         @id @default(uuid()) @db.Uuid
+  tenantId      String         @map("tenant_id") @db.Uuid
+  studentId     String         @db.Uuid
+  student       Student        @relation(fields: [studentId], references: [id])
+  kind          String
+  reason        String
+  date          DateTime       @db.Date
+  status        SanctionStatus @default(PROPOSED)
+  proposedById  String         @db.Uuid
+  validatedById String?        @db.Uuid
+  createdAt     DateTime       @default(now())
 
   @@map("sanctions")
 }
@@ -647,38 +661,38 @@ enum ReportRunStatus {
 }
 
 model ReportCardRun {
-  id          String          @id @default(uuid()) @db.Uuid
-  tenantId    String          @map("tenant_id") @db.Uuid
-  classId     String          @db.Uuid
-  class       Class           @relation(fields: [classId], references: [id])
-  termId      String          @db.Uuid
-  term        Term            @relation(fields: [termId], references: [id])
-  status      ReportRunStatus @default(SAISIE)
-  history     Json            @default("[]")
-  updatedAt   DateTime        @updatedAt
+  id        String          @id @default(uuid()) @db.Uuid
+  tenantId  String          @map("tenant_id") @db.Uuid
+  classId   String          @db.Uuid
+  class     Class           @relation(fields: [classId], references: [id])
+  termId    String          @db.Uuid
+  term      Term            @relation(fields: [termId], references: [id])
+  status    ReportRunStatus @default(SAISIE)
+  history   Json            @default("[]")
+  updatedAt DateTime        @updatedAt
 
   @@unique([classId, termId])
   @@map("report_card_runs")
 }
 
 model ReportCard {
-  id               String   @id @default(uuid()) @db.Uuid
-  tenantId         String   @map("tenant_id") @db.Uuid
-  studentId        String   @db.Uuid
-  student          Student  @relation(fields: [studentId], references: [id])
-  classId          String   @db.Uuid
-  class            Class    @relation(fields: [classId], references: [id])
-  termId           String   @db.Uuid
-  average          Decimal? @db.Decimal(5, 2)
-  rank             Int?
-  classSize        Int
-  distinction      String?
-  appreciation     String?
-  councilDecision  String?
-  absencesCount    Int      @default(0)
-  verifyCode       String   @unique
-  publishedAt      DateTime?
-  createdAt        DateTime @default(now())
+  id              String    @id @default(uuid()) @db.Uuid
+  tenantId        String    @map("tenant_id") @db.Uuid
+  studentId       String    @db.Uuid
+  student         Student   @relation(fields: [studentId], references: [id])
+  classId         String    @db.Uuid
+  class           Class     @relation(fields: [classId], references: [id])
+  termId          String    @db.Uuid
+  average         Decimal?  @db.Decimal(5, 2)
+  rank            Int?
+  classSize       Int
+  distinction     String?
+  appreciation    String?
+  councilDecision String?
+  absencesCount   Int       @default(0)
+  verifyCode      String    @unique
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
 
   items ReportCardItem[]
 
@@ -723,16 +737,16 @@ model Appreciation {
 
 /// Tarif du catalogue (scolarité, inscription, tenue...). Les montants sont saisis par l'école.
 model FeeType {
-  id             String   @id @default(uuid()) @db.Uuid
-  tenantId       String   @map("tenant_id") @db.Uuid
-  academicYearId String   @db.Uuid
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @map("tenant_id") @db.Uuid
+  academicYearId String    @db.Uuid
   name           String
   amount         Int
-  levelId        String?  @db.Uuid
-  trackId        String?  @db.Uuid
+  levelId        String?   @db.Uuid
+  trackId        String?   @db.Uuid
   dueDate        DateTime? @db.Date
-  active         Boolean  @default(true)
-  createdAt      DateTime @default(now())
+  active         Boolean   @default(true)
+  createdAt      DateTime  @default(now())
 
   @@map("fee_types")
 }
@@ -827,16 +841,16 @@ model Payment {
 
 /// Reçu numéroté. Jamais supprimé : il s'annule par un avoir (CDC §4.4).
 model Receipt {
-  id          String    @id @default(uuid()) @db.Uuid
-  tenantId    String    @map("tenant_id") @db.Uuid
-  number      String
-  paymentId   String    @unique @db.Uuid
-  payment     Payment   @relation(fields: [paymentId], references: [id])
-  verifyCode  String    @unique
-  issuedAt    DateTime  @default(now())
-  cancelledAt DateTime?
-  cancelReason String?
-  cancelledById String? @db.Uuid
+  id            String    @id @default(uuid()) @db.Uuid
+  tenantId      String    @map("tenant_id") @db.Uuid
+  number        String
+  paymentId     String    @unique @db.Uuid
+  payment       Payment   @relation(fields: [paymentId], references: [id])
+  verifyCode    String    @unique
+  issuedAt      DateTime  @default(now())
+  cancelledAt   DateTime?
+  cancelReason  String?
+  cancelledById String?   @db.Uuid
 
   @@unique([tenantId, number])
   @@map("receipts")
@@ -844,16 +858,16 @@ model Receipt {
 
 /// Clôture de caisse journalière par caissier.
 model CashClosing {
-  id          String   @id @default(uuid()) @db.Uuid
-  tenantId    String   @map("tenant_id") @db.Uuid
-  siteId      String?  @db.Uuid
-  date        DateTime @db.Date
-  cashierId   String   @db.Uuid
-  expected    Int
-  counted     Int
-  difference  Int
-  comment     String?
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid()) @db.Uuid
+  tenantId   String   @map("tenant_id") @db.Uuid
+  siteId     String?  @db.Uuid
+  date       DateTime @db.Date
+  cashierId  String   @db.Uuid
+  expected   Int
+  counted    Int
+  difference Int
+  comment    String?
+  createdAt  DateTime @default(now())
 
   @@unique([tenantId, cashierId, date])
   @@map("cash_closings")
@@ -880,17 +894,17 @@ enum Audience {
 }
 
 model Announcement {
-  id          String   @id @default(uuid()) @db.Uuid
-  tenantId    String   @map("tenant_id") @db.Uuid
-  title       String
-  body        String
-  audience    Audience
-  classId     String?  @db.Uuid
-  class       Class?   @relation(fields: [classId], references: [id])
-  siteId      String?  @db.Uuid
-  urgent      Boolean  @default(false)
-  authorId    String   @db.Uuid
-  createdAt   DateTime @default(now())
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  title     String
+  body      String
+  audience  Audience
+  classId   String?  @db.Uuid
+  class     Class?   @relation(fields: [classId], references: [id])
+  siteId    String?  @db.Uuid
+  urgent    Boolean  @default(false)
+  authorId  String   @db.Uuid
+  createdAt DateTime @default(now())
 
   @@index([tenantId, createdAt])
   @@map("announcements")
@@ -958,8 +972,8 @@ model Document {
 /// Registre public de vérification des QR codes, sans donnée personnelle superflue.
 /// Hors RLS : consulté par la page publique /verifier/{code}.
 model VerificationEntry {
-  code      String   @id
-  tenantId  String   @map("tenant_id") @db.Uuid
+  code      String    @id
+  tenantId  String    @map("tenant_id") @db.Uuid
   kind      String
   summary   String
   issuedAt  DateTime
@@ -992,4 +1006,54 @@ model PaymentRoute {
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@map("payment_routes")
+}
+
+// ---------------------------------------------------------------- Stages en entreprise
+
+/// Période de stage organisée par l'école pour un niveau et/ou une filière (règles fixées par l'école).
+model InternshipPeriod {
+  id             String       @id @default(uuid()) @db.Uuid
+  tenantId       String       @map("tenant_id") @db.Uuid
+  academicYearId String       @db.Uuid
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  label          String
+  levelId        String?      @db.Uuid
+  trackId        String?      @db.Uuid
+  startDate      DateTime     @db.Date
+  endDate        DateTime     @db.Date
+  notes          String?
+  createdAt      DateTime     @default(now())
+
+  placements InternshipPlacement[]
+
+  @@index([tenantId, academicYearId])
+  @@map("internship_periods")
+}
+
+enum InternshipStatus {
+  PLANNED
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+/// Placement d'un élève en entreprise pour une période de stage.
+model InternshipPlacement {
+  id             String           @id @default(uuid()) @db.Uuid
+  tenantId       String           @map("tenant_id") @db.Uuid
+  periodId       String           @db.Uuid
+  period         InternshipPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  studentId      String           @db.Uuid
+  student        Student          @relation(fields: [studentId], references: [id])
+  company        String
+  companyAddress String?
+  companyPhone   String?
+  tutorName      String?
+  tutorPhone     String?
+  status         InternshipStatus @default(PLANNED)
+  notes          String?
+  updatedAt      DateTime         @updatedAt
+
+  @@unique([periodId, studentId])
+  @@map("internship_placements")
 }

@@ -1,5 +1,5 @@
 import {
-  Banknote, BarChart3, Bell, BookOpen, CalendarDays, ClipboardCheck, ClipboardList, CreditCard, FileBadge, FileText, Gavel, GraduationCap,
+  Banknote, BarChart3, Briefcase, Bell, BookOpen, CalendarDays, ClipboardCheck, ClipboardList, CreditCard, FileBadge, FileText, Gavel, GraduationCap,
   Home, Inbox, KeyRound, LayoutDashboard, Megaphone, NotebookPen, Receipt, ScrollText, Settings, ShieldCheck, Tags, UserPlus, Users, Wallet,
   type LucideIcon,
 } from 'lucide-react';
@@ -24,6 +24,8 @@ export const NAV: Record<Role, NavItem[]> = {
     { href: '/espace/assiduite', label: 'Assiduité', icon: ClipboardCheck },
     { href: '/espace/sanctions', label: 'Discipline', icon: Gavel },
     { href: '/espace/finances', label: 'Finances', icon: BarChart3 },
+    { href: '/espace/tarifs', label: 'Frais et tarifs', icon: Tags },
+    { href: '/espace/stages', label: 'Stages et ateliers', icon: Briefcase },
     { href: '/espace/documents', label: 'Documents', icon: FileBadge },
     { href: '/espace/personnel', label: 'Personnel', icon: ShieldCheck },
     { href: '/espace/parametres', label: 'Paramètres', icon: Settings },

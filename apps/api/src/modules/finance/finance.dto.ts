@@ -13,6 +13,20 @@ export class FeeTypeDto {
   @IsOptional() @IsBoolean() active?: boolean;
 }
 
+export class FeeGridRow {
+  @IsUUID() levelId: string;
+  @IsOptional() @IsUUID() trackId?: string | null;
+  /** null ou absent : le frais est désactivé pour cette combinaison. */
+  @IsOptional() @IsInt() @Min(0) amount?: number | null;
+}
+
+/** Saisie d'un même frais (ex. scolarité) pour chaque niveau et filière. */
+export class FeeGridDto {
+  @IsString() @MaxLength(120) name: string;
+  @IsOptional() @IsDateString() dueDate?: string | null;
+  @IsArray() @ValidateNested({ each: true }) @Type(() => FeeGridRow) rows: FeeGridRow[];
+}
+
 export class InvoiceItemInput {
   @IsString() @MaxLength(160) label: string;
   @IsInt() @Min(1) amount: number;

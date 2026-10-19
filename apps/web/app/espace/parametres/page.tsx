@@ -1,37 +1,47 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, X } from 'lucide-react';
+import { Pencil, Plus, Trash2, X } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, Table, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
 import { date, note } from '@/lib/format';
 import type { ClassRow } from '@/lib/types';
 import { useAction, useApi } from '@/lib/use-api';
+import type { SchoolIdentity } from '@/components/print/letterhead';
+import { Coefficients } from './coefficients';
+import { Etablissement, type IdentitySettings } from './etablissement';
 
 type Settings = {
-  tenant: { name: string; settings: { grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero' }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean } } };
+  tenant: { name: string; identity: SchoolIdentity; settings: { grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero' }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean }[];
   levels: { id: string; name: string; cycle: string; position: number }[];
   tracks: { id: string; code: string; name: string; cycle: string }[];
-  rooms: { id: string; name: string; siteId: string }[];
-  subjects: { id: string; code: string; name: string }[];
+  rooms: { id: string; name: string; siteId: string; kind: RoomKind; capacity: number | null }[];
+  subjects: { id: string; code: string; name: string; practical: boolean }[];
 };
+type RoomKind = 'CLASSROOM' | 'WORKSHOP' | 'LAB' | 'OTHER';
+const ROOM_KINDS: Record<RoomKind, string> = { CLASSROOM: 'Salle de classe', WORKSHOP: 'Atelier', LAB: 'Laboratoire', OTHER: 'Autre' };
 const CYCLES: Record<string, string> = { COLLEGE: 'Collège', LYCEE_GENERAL: 'Lycée général', LYCEE_TECHNIQUE: 'Lycée technique', PRIMAIRE: 'Primaire', MATERNELLE: 'Maternelle' };
 
 export default function Parametres() {
   const q = useApi<Settings>('/settings');
-  const [tab, setTab] = useState('classes');
+  const [tab, setTab] = useState('etablissement');
   return (
     <>
-      <PageHeader title="Paramètres" subtitle="Structure de l’école : sites, année, niveaux, filières, classes, matières et règles de calcul." />
-      <Chips label="Rubrique" value={tab} onChange={setTab} options={[{ value: 'classes', label: 'Classes et matières' }, { value: 'structure', label: 'Sites, niveaux, filières' }, { value: 'annee', label: 'Année et périodes' }, { value: 'regles', label: 'Règles' }]} />
+      <PageHeader title="Paramètres" subtitle="Tout ce que l’école renseigne elle-même : identité officielle, classes, matières et coefficients, salles et ateliers, année, règles des bulletins." />
+      <Chips label="Rubrique" value={tab} onChange={setTab} options={[
+        { value: 'etablissement', label: 'Établissement' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
+        { value: 'structure', label: 'Sites, salles, matières' }, { value: 'annee', label: 'Année et périodes' }, { value: 'regles', label: 'Mentions et règles' },
+      ]} />
       <Loader {...q}>
         {(s) => (
           <>
+            {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} reload={q.reload} />}
             {tab === 'classes' && <Classes s={s} />}
+            {tab === 'coefficients' && <Coefficients subjects={s.subjects} />}
             {tab === 'structure' && <Structure s={s} reload={q.reload} />}
             {tab === 'annee' && <Year s={s} reload={q.reload} />}
             {tab === 'regles' && <Rules s={s} reload={q.reload} />}
@@ -145,15 +155,23 @@ function ClassSubjects({ klass, subjects, teachers, onChange }: { klass: ClassRo
   );
 }
 
+type RefEdit =
+  | { kind: 'level'; id: string; name: string; cycle: string; position: number }
+  | { kind: 'track'; id: string; code: string; name: string; cycle: string }
+  | { kind: 'room'; id: string; name: string; siteId: string; roomKind: RoomKind; capacity: number | string | null }
+  | { kind: 'subject'; id: string; code: string; name: string; practical: boolean };
+
 function Structure({ s, reload }: { s: Settings; reload: () => void }) {
   const toast = useToast();
   const { busy, run } = useAction();
   const [site, setSite] = useState({ name: '', address: '', phone: '' });
   const [level, setLevel] = useState({ name: '', cycle: 'COLLEGE', position: String(s.levels.length + 1) });
   const [track, setTrack] = useState({ code: '', name: '', cycle: 'LYCEE_TECHNIQUE' });
-  const [room, setRoom] = useState({ name: '', siteId: s.sites[0]?.id ?? '' });
-  const [subject, setSubject] = useState({ code: '', name: '' });
+  const [room, setRoom] = useState({ name: '', siteId: s.sites[0]?.id ?? '', kind: 'CLASSROOM' as RoomKind, capacity: '' });
+  const [subject, setSubject] = useState({ code: '', name: '', practical: false });
+  const [edit, setEdit] = useState<RefEdit | null>(null);
   const post = async (path: string, body: object, ok: string, reset: () => void) => { if (await run(() => api.post(path, body), toast, ok)) { reset(); reload(); } };
+  const editBtn = (label: string, e: RefEdit) => <button type="button" className="ml-1 inline-flex cursor-pointer items-center opacity-70 hover:opacity-100" aria-label={`Modifier ${label}`} onClick={() => setEdit(e)}><Pencil className="size-3" /></button>;
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -165,8 +183,25 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
           <Button type="submit" variant="outline" loading={busy}><Plus className="size-4" /> Ajouter un site</Button>
         </form>
       </Section>
+      <Section title="Salles et ateliers">
+        {s.sites.map((site) => (
+          <div key={site.id} className="mb-3">
+            <p className="mb-1 text-[13px] font-bold text-muted">{site.name}</p>
+            <div className="flex flex-wrap gap-1.5">{s.rooms.filter((x) => x.siteId === site.id).map((x) => (
+              <Badge key={x.id} tone={x.kind === 'CLASSROOM' ? undefined : 'accent'}>{x.name}{x.kind !== 'CLASSROOM' ? ` · ${ROOM_KINDS[x.kind]}` : ''}{x.capacity ? ` · ${x.capacity} pl.` : ''}{editBtn(x.name, { kind: 'room', id: x.id, name: x.name, siteId: x.siteId, roomKind: x.kind, capacity: x.capacity })}</Badge>
+            ))}</div>
+          </div>
+        ))}
+        <form className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_1fr_1fr_80px_auto]" onSubmit={(e) => { e.preventDefault(); post('/rooms', { name: room.name, siteId: room.siteId, kind: room.kind, capacity: room.capacity ? Number(room.capacity) : null }, 'Salle ajoutée', () => setRoom({ ...room, name: '', capacity: '' })); }}>
+          <Input placeholder="Ex. Atelier 3" value={room.name} onChange={(e) => setRoom({ ...room, name: e.target.value })} required aria-label="Nom de la salle" />
+          <Select value={room.siteId} onChange={(e) => setRoom({ ...room, siteId: e.target.value })} aria-label="Site">{s.sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
+          <Select value={room.kind} onChange={(e) => setRoom({ ...room, kind: e.target.value as RoomKind })} aria-label="Type">{Object.entries(ROOM_KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
+          <Input type="number" min={1} placeholder="Places" value={room.capacity} onChange={(e) => setRoom({ ...room, capacity: e.target.value })} aria-label="Capacité" />
+          <Button type="submit" variant="outline" size="icon" aria-label="Ajouter la salle"><Plus className="size-4" /></Button>
+        </form>
+      </Section>
       <Section title="Niveaux">
-        <div className="mb-3 flex flex-wrap gap-1.5">{s.levels.map((x) => <Badge key={x.id} tone="brand">{x.name} · {CYCLES[x.cycle]}</Badge>)}</div>
+        <div className="mb-3 flex flex-wrap gap-1.5">{s.levels.map((x) => <Badge key={x.id} tone="brand">{x.name} · {CYCLES[x.cycle]}{editBtn(x.name, { kind: 'level', id: x.id, name: x.name, cycle: x.cycle, position: x.position })}</Badge>)}</div>
         <form className="grid grid-cols-[1fr_1fr_70px_auto] gap-2" onSubmit={(e) => { e.preventDefault(); post('/levels', { name: level.name, cycle: level.cycle, position: Number(level.position) }, 'Niveau ajouté', () => setLevel({ ...level, name: '', position: String(Number(level.position) + 1) })); }}>
           <Input placeholder="Ex. 3e année" value={level.name} onChange={(e) => setLevel({ ...level, name: e.target.value })} required aria-label="Nom du niveau" />
           <Select value={level.cycle} onChange={(e) => setLevel({ ...level, cycle: e.target.value })} aria-label="Cycle">{Object.entries(CYCLES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
@@ -175,30 +210,64 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
         </form>
       </Section>
       <Section title="Filières">
-        <div className="mb-3 flex flex-wrap gap-1.5">{s.tracks.map((x) => <Badge key={x.id} tone="accent">{x.name}</Badge>)}</div>
+        <div className="mb-3 flex flex-wrap gap-1.5">{s.tracks.map((x) => <Badge key={x.id} tone="accent">{x.name}{editBtn(x.name, { kind: 'track', id: x.id, code: x.code, name: x.name, cycle: x.cycle })}</Badge>)}</div>
         <form className="grid grid-cols-[90px_1fr_auto] gap-2" onSubmit={(e) => { e.preventDefault(); post('/tracks', track, 'Filière ajoutée', () => setTrack({ ...track, code: '', name: '' })); }}>
           <Input placeholder="Code" value={track.code} onChange={(e) => setTrack({ ...track, code: e.target.value })} required aria-label="Code" />
           <Input placeholder="Nom de la filière" value={track.name} onChange={(e) => setTrack({ ...track, name: e.target.value })} required aria-label="Nom" />
           <Button type="submit" variant="outline" size="icon" aria-label="Ajouter la filière"><Plus className="size-4" /></Button>
         </form>
       </Section>
-      <Section title="Salles">
-        <div className="mb-3 flex flex-wrap gap-1.5">{s.rooms.map((x) => <Badge key={x.id}>{x.name} · {s.sites.find((y) => y.id === x.siteId)?.name}</Badge>)}</div>
-        <form className="grid grid-cols-[1fr_1fr_auto] gap-2" onSubmit={(e) => { e.preventDefault(); post('/rooms', room, 'Salle ajoutée', () => setRoom({ ...room, name: '' })); }}>
-          <Input placeholder="Ex. Atelier 3" value={room.name} onChange={(e) => setRoom({ ...room, name: e.target.value })} required aria-label="Nom de la salle" />
-          <Select value={room.siteId} onChange={(e) => setRoom({ ...room, siteId: e.target.value })} aria-label="Site">{s.sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select>
-          <Button type="submit" variant="outline" size="icon" aria-label="Ajouter la salle"><Plus className="size-4" /></Button>
-        </form>
-      </Section>
       <Section title="Matières" className="lg:col-span-2">
-        <div className="mb-3 flex flex-wrap gap-1.5">{s.subjects.map((x) => <Badge key={x.id} tone="brand">{x.name}</Badge>)}</div>
-        <form className="grid grid-cols-[90px_1fr_auto] gap-2 sm:max-w-lg" onSubmit={(e) => { e.preventDefault(); post('/subjects', subject, 'Matière ajoutée', () => setSubject({ code: '', name: '' })); }}>
+        <div className="mb-3 flex flex-wrap gap-1.5">{s.subjects.map((x) => <Badge key={x.id} tone={x.practical ? 'accent' : 'brand'}>{x.name}{x.practical ? ' · TP atelier' : ''}{editBtn(x.name, { kind: 'subject', id: x.id, code: x.code, name: x.name, practical: x.practical })}</Badge>)}</div>
+        <form className="grid grid-cols-[90px_1fr_auto] items-center gap-2 sm:max-w-2xl sm:grid-cols-[90px_1fr_auto_auto]" onSubmit={(e) => { e.preventDefault(); post('/subjects', subject, 'Matière ajoutée', () => setSubject({ code: '', name: '', practical: false })); }}>
           <Input placeholder="Code" value={subject.code} onChange={(e) => setSubject({ ...subject, code: e.target.value })} required aria-label="Code" />
           <Input placeholder="Ex. Technologie" value={subject.name} onChange={(e) => setSubject({ ...subject, name: e.target.value })} required aria-label="Nom" />
+          <label className="col-span-2 flex min-h-11 items-center gap-2 text-sm font-bold sm:col-span-1"><input type="checkbox" className="size-5" checked={subject.practical} onChange={(e) => setSubject({ ...subject, practical: e.target.checked })} /> Travaux pratiques d’atelier</label>
           <Button type="submit" variant="outline" size="icon" aria-label="Ajouter la matière"><Plus className="size-4" /></Button>
         </form>
       </Section>
+      <Dialog open={!!edit} onOpenChange={(o) => !o && setEdit(null)}>
+        {edit && <RefDialog edit={edit} setEdit={setEdit} sites={s.sites} done={() => { setEdit(null); reload(); }} />}
+      </Dialog>
     </div>
+  );
+}
+
+function RefDialog({ edit, setEdit, sites, done }: { edit: RefEdit; setEdit: (e: RefEdit) => void; sites: Settings['sites']; done: () => void }) {
+  const toast = useToast();
+  const { busy, run } = useAction();
+  const titles = { level: 'Modifier le niveau', track: 'Modifier la filière', room: 'Modifier la salle', subject: 'Modifier la matière' };
+  const save = async () => {
+    const body =
+      edit.kind === 'level' ? { name: edit.name, cycle: edit.cycle, position: Number(edit.position) }
+      : edit.kind === 'track' ? { code: edit.code, name: edit.name, cycle: edit.cycle }
+      : edit.kind === 'room' ? { name: edit.name, siteId: edit.siteId, kind: edit.roomKind, capacity: edit.capacity ? Number(edit.capacity) : null }
+      : { code: edit.code, name: edit.name, practical: edit.practical };
+    if (await run(() => api.patch(`/${edit.kind === 'level' ? 'levels' : edit.kind === 'track' ? 'tracks' : edit.kind === 'room' ? 'rooms' : 'subjects'}/${edit.id}`, body), toast, 'Modification enregistrée')) done();
+  };
+  return (
+    <DialogContent title={titles[edit.kind]}>
+      <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); save(); }}>
+        {'code' in edit && <Field label="Code"><Input value={edit.code} onChange={(e) => setEdit({ ...edit, code: e.target.value })} required /></Field>}
+        <Field label="Nom"><Input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} required /></Field>
+        {(edit.kind === 'level' || edit.kind === 'track') && (
+          <Field label="Cycle"><Select value={edit.cycle} onChange={(e) => setEdit({ ...edit, cycle: e.target.value })}>{Object.entries(CYCLES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select></Field>
+        )}
+        {edit.kind === 'level' && <Field label="Ordre d’affichage"><Input type="number" value={edit.position} onChange={(e) => setEdit({ ...edit, position: Number(e.target.value) })} /></Field>}
+        {edit.kind === 'room' && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Site"><Select value={edit.siteId} onChange={(e) => setEdit({ ...edit, siteId: e.target.value })}>{sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>
+            <Field label="Type"><Select value={edit.roomKind} onChange={(e) => setEdit({ ...edit, roomKind: e.target.value as RoomKind })}>{Object.entries(ROOM_KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select></Field>
+            <Field label="Nombre de places"><Input type="number" min={1} value={edit.capacity ?? ''} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} /></Field>
+          </div>
+        )}
+        {edit.kind === 'subject' && <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={edit.practical} onChange={(e) => setEdit({ ...edit, practical: e.target.checked })} /> Travaux pratiques d’atelier</label>}
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit" loading={busy}>Enregistrer</Button>
+          {edit.kind === 'room' && <Button type="button" variant="ghost" loading={busy} onClick={async () => { if (await run(() => api.del(`/rooms/${edit.id}`), toast, 'Salle supprimée')) done(); }}><Trash2 className="size-4" /> Supprimer la salle</Button>}
+        </div>
+      </form>
+    </DialogContent>
   );
 }
 
@@ -254,6 +323,7 @@ function Rules({ s, reload }: { s: Settings; reload: () => void }) {
       </Field>
       <div className="grid gap-2">
         <p className="text-[13px] font-bold text-muted">Mentions au bulletin (moyenne minimale)</p>
+        <p className="text-xs text-muted">Les seuils proposés au départ sont des exemples : saisissez ceux de l’école. Ils s’appliquent aux prochains bulletins calculés.</p>
         {r.grading.distinctions.map((d, i) => (
           <div key={i} className="grid grid-cols-[90px_1fr_auto] gap-2">
             <Input type="number" min={0} max={20} step={0.5} aria-label="Moyenne minimale" value={d.min} onChange={(e) => setR({ ...r, grading: { ...r.grading, distinctions: r.grading.distinctions.map((x, j) => (j === i ? { ...x, min: Number(e.target.value) } : x)) } })} />

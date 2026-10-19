@@ -3,7 +3,7 @@
 import { useParams, useSearchParams } from 'next/navigation';
 import { Printer } from 'lucide-react';
 import { Loader } from '@/components/espace/bits';
-import { Letterhead, PrintBar } from '@/components/print/letterhead';
+import { LegalFooter, Letterhead, PrintBar, Signatory, type SchoolIdentity } from '@/components/print/letterhead';
 import { VerifyQr } from '@/components/qr';
 import { Button } from '@/components/ui';
 import { date, note } from '@/lib/format';
@@ -14,7 +14,7 @@ type Card = {
   items: { id: string; subjectName: string; coefficient: string; average: string | null; classAverage: string | null; minAverage: string | null; maxAverage: string | null; rank: number | null; teacherName: string | null; appreciation: string | null }[];
   student: { firstName: string; lastName: string; matricule: string; birthDate: string | null; sex: string | null };
   class: { name: string; site: { name: string }; level: { name: string }; track: { name: string } | null; headTeacher: { firstName: string; lastName: string } | null };
-  term: { name: string; year: string }; tenant: { name: string };
+  term: { name: string; year: string }; tenant: { name: string }; identity: SchoolIdentity;
 };
 
 export default function Bulletin() {
@@ -35,7 +35,7 @@ function OneCard({ id }: { id: string }) {
     <Loader {...q}>
       {(c) => (
         <article className="mx-auto grid w-full max-w-[210mm] gap-4 bg-white p-6 text-[13px] text-black shadow-sm print:break-after-page print:p-0 print:shadow-none">
-          <Letterhead name={c.tenant.name} site={c.class.site.name} />
+          <Letterhead identity={c.identity} site={c.class.site.name} />
           <div className="text-center">
             <h1 className="font-display text-2xl font-bold uppercase">Bulletin de notes · {c.term.name}</h1>
             <p>Année scolaire {c.term.year}</p>
@@ -76,13 +76,14 @@ function OneCard({ id }: { id: string }) {
               <p><b>Mention :</b> {c.distinction ?? '—'}</p>
               <p><b>Appréciation du conseil :</b> {c.appreciation || '—'}</p>
               <p><b>Décision :</b> {c.councilDecision || '—'}</p>
-              <div className="mt-6 flex justify-between text-xs">
-                <span>Le professeur principal</span>
-                <span>Le chef d’établissement</span>
+              <div className="mt-4 flex items-start justify-between gap-4 text-xs">
+                <span className="pt-1 font-bold">Le professeur principal</span>
+                <Signatory identity={c.identity} className="text-xs" />
               </div>
             </div>
             <VerifyQr code={c.verifyCode} />
           </div>
+          <LegalFooter identity={c.identity} />
           <p className="text-center text-[11px] text-black/60">Document authentifiable par QR code · {c.publishedAt ? `publié le ${date(c.publishedAt)}` : 'non encore publié'}</p>
         </article>
       )}

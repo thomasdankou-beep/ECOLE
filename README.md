@@ -9,7 +9,7 @@ Pensée pour le terrain : téléphone Android d’abord, réseau 3G/4G instable,
 | Espace | Écrans |
 | --- | --- |
 | Site public | Accueil de l’école (contenu des affiches), filières, sites, pré-inscription en ligne, vérification d’un document par QR code |
-| Direction | Tableau de bord par site, élèves, pré-inscriptions, emploi du temps (ajout, déplacement, annulation avec contrôle des conflits et notification), bulletins (validation et publication), assiduité, discipline (validation), finances, documents, personnel et rôles, paramètres, journal d’audit |
+| Direction | Tableau de bord par site, élèves, pré-inscriptions, emploi du temps (ajout, déplacement, annulation avec contrôle des conflits et notification), bulletins (validation et publication), assiduité, discipline (validation), finances, frais et tarifs (grille par niveau et filière), stages en entreprise et travaux d’atelier, documents, personnel et rôles, paramètres (identité officielle, signature et cachet, classes, coefficients, salles et ateliers, mentions), journal d’audit |
 | Secrétariat | Inscription complète en une fois (élève, parents, comptes, factures), pré-inscriptions, dossiers élèves, documents officiels en lot |
 | Enseignant | Cours du jour, appel en quelques touches, saisie des notes et appréciations, publication aux familles, cahier de texte et devoirs, conseil de classe (professeur principal), proposition de sanction |
 | Vie scolaire | Absences du jour, justificatifs à examiner, appel, sanctions |
@@ -80,7 +80,7 @@ npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 30 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins)
+npm test            # 35 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).
@@ -119,17 +119,23 @@ Ces choix suivent les recommandations de l’analyse (phase 1). Ils restent modi
 
 Rien de ce qui suit n’a été inventé. Ces points sont signalés dans le code et à l’écran.
 
+**À saisir par l’école dans l’espace Direction** (les écrans existent, les valeurs réelles manquent) :
+
+| Information | Où la saisir |
+| --- | --- |
+| Montants réels des frais par niveau et filière | Frais et tarifs › Grille par niveau et filière |
+| Coefficients par matière et par classe, règle « note manquante » | Paramètres › Coefficients (par niveau) ou Classes et matières (par classe) |
+| Seuils des mentions et libellés | Paramètres › Mentions et règles |
+| Classes, enseignants, salles et ateliers, emploi du temps | Paramètres › Classes et matières, Sites, salles, matières ; Personnel ; Emploi du temps |
+| Numéro d’autorisation, mentions légales, nom, signature et cachet du chef d’établissement | Paramètres › Établissement (imprimés sur bulletins, reçus et attestations) |
+| Organisation des stages en entreprise et des travaux d’atelier | Stages et ateliers |
+
+**À fournir pour brancher les services externes** :
+
 1. **Prestataire Mobile Money** : contrat et identifiants (CinetPay, PayDunya ou autre). En attendant : mode test.
 2. **Fournisseur SMS** et nom d’expéditeur. En attendant : les SMS sont écrits dans le journal de l’API.
-3. **Montants réels des frais** de scolarité par niveau et filière (ceux de la démonstration sont fictifs).
-4. **Coefficients réels** par matière et par filière, et la règle « note manquante » (ignorée ou comptée 0).
-5. **Seuils des mentions** (16, 14, 12 sont des exemples) et libellés des décisions du conseil.
-6. **Numéro d’autorisation d’ouverture** et mentions légales à imprimer sur les documents.
-7. **Nom et signature du chef d’établissement** pour les documents officiels.
-8. **Facturation normalisée e-MECeF** (DGI Bénin) : identifiants et raccordement ; les reçus actuels sont non fiscaux.
-9. **Liste réelle** des classes, matières, enseignants, salles et emploi du temps (la démonstration en contient une partie fictive).
-10. Stages en entreprise et travaux pratiques d’atelier (présents sur les affiches, absents du cahier des charges).
-11. Nom de domaine et hébergement de production.
+3. **Facturation normalisée e-MECeF** (DGI Bénin) : identifiants et raccordement ; les reçus actuels sont non fiscaux.
+4. Nom de domaine et hébergement de production.
 
 ## Prochaines étapes proposées
 

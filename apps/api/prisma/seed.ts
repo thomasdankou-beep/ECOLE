@@ -76,12 +76,12 @@ async function main() {
         g2: await tr('G2', 'Comptabilité gestion (G2)', 'LYCEE_TECHNIQUE'),
         imi: await tr('IMI', 'Installation et maintenance informatique (IMI)', 'LYCEE_TECHNIQUE'),
       };
-      const room = async (siteId: string, name: string) => tx.room.create({ data: { tenantId: T, siteId, name } });
+      const room = async (siteId: string, name: string) => tx.room.create({ data: { tenantId: T, siteId, name, kind: name.startsWith('Atelier') ? 'WORKSHOP' : 'CLASSROOM' } });
       const R = { at1: await room(hed.id, 'Atelier 1'), at2: await room(hed.id, 'Atelier 2'), s3: await room(hed.id, 'Salle 3'), s5: await room(hed.id, 'Salle 5'), s4: await room(tog.id, 'Salle 4'), s6: await room(tog.id, 'Salle 6'), cout: await room(tog.id, 'Atelier couture') };
-      const sub = async (c: string, name: string) => tx.subject.create({ data: { tenantId: T, code: c, name } });
+      const sub = async (c: string, name: string, practical = false) => tx.subject.create({ data: { tenantId: T, code: c, name, practical } });
       const S = {
         fr: await sub('FR', 'Français'), ang: await sub('ANG', 'Anglais'), math: await sub('MATH', 'Mathématiques'), pc: await sub('PC', 'Physique-chimie'),
-        svt: await sub('SVT', 'SVT'), hg: await sub('HG', 'Histoire-géographie'), eps: await sub('EPS', 'EPS'), elec: await sub('ELEC', 'Électrotechnique'), dt: await sub('DT', 'Dessin technique'),
+        svt: await sub('SVT', 'SVT'), hg: await sub('HG', 'Histoire-géographie'), eps: await sub('EPS', 'EPS'), elec: await sub('ELEC', 'Électrotechnique', true), dt: await sub('DT', 'Dessin technique'),
       };
 
       // ---------------------------------------------------------------- Comptes (FICTIFS)
@@ -280,6 +280,7 @@ async function wipe(tenantId: string) {
       'applications', 'guardians', 'students', 'otp_codes', 'sessions', 'user_roles', 'classes', 'users', 'rooms', 'subjects', 'tracks', 'levels',
       'terms', 'academic_years', 'sites', 'counters', 'audit_logs',
     ];
+    for (const t of ['internship_placements', 'internship_periods']) await tx.$executeRawUnsafe(`DELETE FROM ${t} WHERE tenant_id = $1::uuid`, tenantId);
     for (const t of tables) await tx.$executeRawUnsafe(`DELETE FROM ${t} WHERE tenant_id = $1::uuid`, tenantId);
     await tx.$executeRawUnsafe(`DELETE FROM verification_entries WHERE tenant_id = $1::uuid`, tenantId);
     await tx.$executeRawUnsafe(`DELETE FROM payment_routes WHERE tenant_id = $1::uuid`, tenantId);

@@ -10,6 +10,8 @@ import { EvaluationService } from '../evaluation/evaluation.service';
 import { FinanceService } from '../finance/finance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { tenantSettings } from '../settings/settings.service';
+import { FilesService } from '../files/files.service';
+import { schoolIdentity } from '../settings/settings.service';
 
 /** Circuit de validation (CDC §3.3) : saisie → contrôle du professeur principal → conseil → validation → publication. */
 export const STEPS: ReportRunStatus[] = ['SAISIE', 'CONTROLE', 'CONSEIL', 'VALIDE', 'PUBLIE'];
@@ -36,6 +38,7 @@ export class ReportCardsService {
     private evaluation: EvaluationService,
     private notifications: NotificationsService,
     private finance: FinanceService,
+    private files: FilesService,
   ) {}
 
   /** État des bulletins de chaque classe visible pour une période. */
@@ -248,9 +251,10 @@ export class ReportCardsService {
       }
       const [term, tenant] = await Promise.all([
         tx.term.findUniqueOrThrow({ where: { id: c.termId }, include: { academicYear: true } }),
-        tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { name: true } }),
+        tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { name: true, settings: true } }),
       ]);
-      return { ...c, term: { name: term.name, year: term.academicYear.label }, tenant };
+      const identity = schoolIdentity(tenant, this.files);
+      return { ...c, term: { name: term.name, year: term.academicYear.label }, tenant: { name: tenant.name }, identity };
     });
   }
 }

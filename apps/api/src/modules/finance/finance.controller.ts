@@ -1,7 +1,7 @@
-import { Body, Controller, Get, Header, Param, ParseUUIDPipe, Patch, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Header, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Actor, Can, CurrentActor } from '../../common/auth';
-import { BatchInvoiceDto, CancelReceiptDto, CashClosingDto, DeskPaymentDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
+import { BatchInvoiceDto, CancelReceiptDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
 import { FinanceService } from './finance.service';
 
 @ApiTags('Finances')
@@ -16,10 +16,13 @@ export class FinanceController {
   @Get('fee-types') @Can('finance.write', 'settings.manage')
   feeTypes(@CurrentActor() a: Actor) { return this.s.feeTypes(a); }
 
-  @Post('fee-types') @Can('finance.write')
+  @Post('fee-types') @Can('finance.write', 'settings.manage')
   createFeeType(@CurrentActor() a: Actor, @Body() dto: FeeTypeDto) { return this.s.createFeeType(a, dto); }
 
-  @Patch('fee-types/:id') @Can('finance.write')
+  @Put('fee-types/grid') @Can('finance.write', 'settings.manage')
+  saveFeeGrid(@CurrentActor() a: Actor, @Body() dto: FeeGridDto) { return this.s.saveFeeGrid(a, dto); }
+
+  @Patch('fee-types/:id') @Can('finance.write', 'settings.manage')
   updateFeeType(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: FeeTypeDto) { return this.s.updateFeeType(a, id, dto); }
 
   /** Parents : factures de leurs enfants seulement (périmètre appliqué par le service). */

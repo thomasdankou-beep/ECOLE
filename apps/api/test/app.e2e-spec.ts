@@ -32,6 +32,8 @@ const as = (who: string) => ({
   get: (url: string) => http.get(`/api/v1${url}`).set('Authorization', `Bearer ${tokens[who]}`),
   post: (url: string, body?: object) => http.post(`/api/v1${url}`).set('Authorization', `Bearer ${tokens[who]}`).send(body ?? {}),
   put: (url: string, body?: object) => http.put(`/api/v1${url}`).set('Authorization', `Bearer ${tokens[who]}`).send(body ?? {}),
+  patch: (url: string, body?: object) => http.patch(`/api/v1${url}`).set('Authorization', `Bearer ${tokens[who]}`).send(body ?? {}),
+  del: (url: string) => http.delete(`/api/v1${url}`).set('Authorization', `Bearer ${tokens[who]}`),
 });
 
 /** Second établissement, pour vérifier l'étanchéité entre clients. */
@@ -296,5 +298,83 @@ describe('Notes et bulletins (CDC §3.3)', () => {
     const card = await as('parent').get(`/report-cards/${cards.body.cards[0].id}`);
     expect(card.body.items.find((i: any) => i.subjectName === 'Électrotechnique').average).toBe('14.33');
     expect(card.body.appreciation).toBe('Bon trimestre');
+  });
+});
+
+describe('Paramétrage par la direction', () => {
+  // PNG 1×1 transparent.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+
+  it("l'identité officielle saisie apparaît sur les documents, la signature n'est jamais écrasée par une saisie", async () => {
+    const up = await http.post('/api/v1/settings/identity/signature').set('Authorization', `Bearer ${tokens.direction}`).attach('file', PNG, { filename: 's.png', contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    expect(up.body.signatureUrl).toMatch(/^\/api\/v1\/files\?key=/);
+    const r = await as('direction').patch('/settings', { settings: { identity: { authorization: 'ARRÊTÉ-TEST-001', headName: 'Nom Test', signatureKey: null } } });
+    expect(r.status).toBe(200);
+    expect(r.body.identity.signatureKey).toBeTruthy();
+    const student = (await as('direction').get('/students')).body[0];
+    const doc = await as('direction').post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: student.id });
+    expect(doc.status).toBe(201);
+    const print = await as('direction').get(`/documents/print?ids=${doc.body.id}`);
+    expect(print.body.identity.authorization).toBe('ARRÊTÉ-TEST-001');
+    expect(print.body.identity.headName).toBe('Nom Test');
+    expect(print.body.identity.signatureUrl).toBeTruthy();
+    expect((await as('secretariat').patch('/settings', { settings: { identity: { headName: 'Pirate' } } })).status).toBe(403);
+  });
+
+  it('la grille des frais crée un frais par niveau et filière, puis le désactive', async () => {
+    const s = await as('direction').get('/settings');
+    const level = s.body.levels[0];
+    const track = s.body.tracks[0];
+    const save = (amount: number | null) => as('direction').put('/finance/fee-types/grid', { name: 'Frais de test grille', rows: [{ levelId: level.id, trackId: track.id, amount }] });
+    expect((await save(12345)).status).toBe(200);
+    expect((await save(23456)).body.saved).toBe(1);
+    let fees = (await as('direction').get('/finance/fee-types')).body.filter((f: any) => f.name === 'Frais de test grille');
+    expect(fees).toHaveLength(1);
+    expect(fees[0].amount).toBe(23456);
+    await save(null);
+    fees = (await as('direction').get('/finance/fee-types')).body.filter((f: any) => f.name === 'Frais de test grille');
+    expect(fees[0].active).toBe(false);
+    expect((await as('teacher').put('/finance/fee-types/grid', { name: 'x', rows: [] })).status).toBe(403);
+  });
+
+  it('un coefficient appliqué à un niveau change toutes ses classes', async () => {
+    const classes = (await as('direction').get('/classes')).body;
+    const c = classes.find((x: any) => x.subjects.length > 0);
+    const cs = c.subjects[0];
+    const r = await as('direction').put('/class-subjects/bulk', { levelId: c.levelId, trackId: c.trackId, subjectId: cs.subject.id, coefficient: 3.5 });
+    expect(r.status).toBe(200);
+    const after = (await as('direction').get('/classes')).body.filter((x: any) => x.levelId === c.levelId && x.trackId === c.trackId);
+    for (const k of after) expect(Number(k.subjects.find((y: any) => y.subject.id === cs.subject.id).coefficient)).toBe(3.5);
+  });
+
+  it('une salle peut devenir un atelier, une matière devient pratique', async () => {
+    const s = (await as('direction').get('/settings')).body;
+    const room = s.rooms[0];
+    const r = await as('direction').patch(`/rooms/${room.id}`, { kind: 'WORKSHOP', capacity: 20 });
+    expect(r.status).toBe(200);
+    expect(r.body.kind).toBe('WORKSHOP');
+    const sub = await as('direction').patch(`/subjects/${s.subjects[0].id}`, { practical: true });
+    expect(sub.body.practical).toBe(true);
+    const used = await as('direction').del(`/rooms/${s.rooms.find((x: any) => x.name === 'Atelier 1').id}`);
+    expect(used.status).toBe(409);
+  });
+
+  it('organise une période de stage et place un élève, visible sur sa fiche', async () => {
+    const s = (await as('direction').get('/settings')).body;
+    const lycee = s.levels.find((l: any) => l.cycle === 'LYCEE_TECHNIQUE') ?? s.levels[0];
+    const p = await as('direction').post('/internships/periods', { label: 'Stage test', levelId: lycee.id, startDate: '2027-03-01', endDate: '2027-03-31' });
+    expect(p.status).toBe(201);
+    const detail = await as('direction').get(`/internships/periods/${p.body.id}`);
+    expect(detail.body.students.length).toBeGreaterThan(0);
+    const student = detail.body.students[0];
+    const placed = await as('direction').put(`/internships/periods/${p.body.id}/placements`, { studentId: student.id, company: 'Entreprise test', tutorName: 'Tuteur test', status: 'IN_PROGRESS' });
+    expect(placed.status).toBe(200);
+    const mine = await as('direction').get(`/students/${student.id}/internships`);
+    expect(mine.body[0].company).toBe('Entreprise test');
+    expect((await as('direction').del(`/internships/periods/${p.body.id}`)).status).toBe(409);
+    expect((await as('teacher').post('/internships/periods', { label: 'x', startDate: '2027-01-01', endDate: '2027-01-02' })).status).toBe(403);
+    const bad = await as('direction').post('/internships/periods', { label: 'x', startDate: '2027-02-01', endDate: '2027-01-01' });
+    expect(bad.status).toBe(400);
   });
 });

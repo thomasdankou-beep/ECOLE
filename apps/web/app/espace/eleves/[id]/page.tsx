@@ -86,7 +86,28 @@ function Infos({ s }: { s: Student }) {
           {s.enrollments.map((e) => <li key={e.id}>{e.academicYear.label} · {e.class.name} ({e.class.site.name}) · <StatusBadge status={e.status} /></li>)}
         </ul>
       </Section>
+      <Internships id={s.id} />
     </div>
+  );
+}
+
+const INTERNSHIP_STATUS: Record<string, string> = { PLANNED: 'Prévu', IN_PROGRESS: 'En cours', DONE: 'Terminé', CANCELLED: 'Annulé' };
+
+/** Stages en entreprise de l'élève (affiché seulement s'il en a). */
+function Internships({ id }: { id: string }) {
+  const q = useApi<{ id: string; company: string; tutorName: string | null; tutorPhone: string | null; status: string; period: { label: string; startDate: string; endDate: string } }[]>(`/students/${id}/internships`);
+  if (!q.data?.length) return null;
+  return (
+    <Section title="Stages en entreprise" className="lg:col-span-2">
+      <ul className="grid gap-1.5 text-sm">
+        {q.data.map((x) => (
+          <li key={x.id} className="rounded-lg bg-sunk px-3 py-2">
+            <b>{x.period.label}</b> · du {date(x.period.startDate)} au {date(x.period.endDate)} · <Badge>{INTERNSHIP_STATUS[x.status] ?? x.status}</Badge>
+            <span className="block">{x.company}{x.tutorName ? ` · tuteur : ${x.tutorName}` : ''}{x.tutorPhone ? ` (${x.tutorPhone})` : ''}</span>
+          </li>
+        ))}
+      </ul>
+    </Section>
   );
 }
 

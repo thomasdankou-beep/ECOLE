@@ -1,9 +1,11 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
+import { MAX_UPLOAD_BYTES } from '../files/files.service';
 import { Actor, Can, CurrentActor } from '../../common/auth';
 import {
-  AcademicYearDto, AssignmentDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto, StaffUpdateDto,
-  SubjectDto, TenantSettingsDto, TrackDto,
+  AcademicYearDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, RoomUpdateDto,
+  SiteDto, StaffDto, StaffUpdateDto, SubjectDto, SubjectUpdateDto, TenantSettingsDto, TrackDto, TrackUpdateDto,
 } from './settings.dto';
 import { SettingsService } from './settings.service';
 
@@ -26,6 +28,18 @@ export class SettingsController {
     return this.s.updateTenantSettings(a, dto.settings);
   }
 
+  @Post('settings/identity/:kind') @Can('settings.manage')
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
+  setIdentityImage(@CurrentActor() a: Actor, @Param('kind') kind: string, @UploadedFile() file?: Express.Multer.File) {
+    return this.s.setIdentityImage(a, kind === 'stamp' ? 'stamp' : 'signature', file);
+  }
+
+  @Delete('settings/identity/:kind') @Can('settings.manage')
+  removeIdentityImage(@CurrentActor() a: Actor, @Param('kind') kind: string) {
+    return this.s.setIdentityImage(a, kind === 'stamp' ? 'stamp' : 'signature');
+  }
+
   @Post('sites') @Can('settings.manage')
   createSite(@CurrentActor() a: Actor, @Body() dto: SiteDto) { return this.s.createSite(a, dto); }
 
@@ -44,11 +58,29 @@ export class SettingsController {
   @Post('tracks') @Can('settings.manage')
   createTrack(@CurrentActor() a: Actor, @Body() dto: TrackDto) { return this.s.createTrack(a, dto); }
 
+  @Patch('levels/:id') @Can('settings.manage')
+  updateLevel(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: LevelUpdateDto) { return this.s.updateLevel(a, id, dto); }
+
+  @Patch('tracks/:id') @Can('settings.manage')
+  updateTrack(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: TrackUpdateDto) { return this.s.updateTrack(a, id, dto); }
+
   @Post('rooms') @Can('settings.manage')
   createRoom(@CurrentActor() a: Actor, @Body() dto: RoomDto) { return this.s.createRoom(a, dto); }
 
+  @Patch('rooms/:id') @Can('settings.manage')
+  updateRoom(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: RoomUpdateDto) { return this.s.updateRoom(a, id, dto); }
+
+  @Delete('rooms/:id') @Can('settings.manage')
+  removeRoom(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.removeRoom(a, id); }
+
   @Post('subjects') @Can('settings.manage')
   createSubject(@CurrentActor() a: Actor, @Body() dto: SubjectDto) { return this.s.createSubject(a, dto); }
+
+  @Patch('subjects/:id') @Can('settings.manage')
+  updateSubject(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: SubjectUpdateDto) { return this.s.updateSubject(a, id, dto); }
+
+  @Put('class-subjects/bulk') @Can('settings.manage')
+  bulkCoefficient(@CurrentActor() a: Actor, @Body() dto: BulkCoefficientDto) { return this.s.bulkCoefficient(a, dto); }
 
   @Get('classes') @Can('students.read', 'timetable.read')
   classes(@CurrentActor() a: Actor, @Query('yearId') yearId?: string) { return this.s.listClasses(a, yearId); }

@@ -21,6 +21,7 @@ import { FilesController } from './modules/files/files.controller';
 import { FilesService } from './modules/files/files.service';
 import { FinanceController } from './modules/finance/finance.controller';
 import { FinanceService } from './modules/finance/finance.service';
+import { InternshipsController, InternshipsService } from './modules/internships/internships';
 import { LessonsController, LessonsService } from './modules/lessons/lessons';
 import { NotificationsController } from './modules/notifications/notifications.controller';
 import { NotificationsService } from './modules/notifications/notifications.service';
@@ -58,13 +59,14 @@ class CoreModule {}
     HealthController, AuthController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
+    InternshipsController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
     AuthService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
-    PublicService, DashboardService,
+    PublicService, DashboardService, InternshipsService,
   ],
 })
 export class AppModule {}
