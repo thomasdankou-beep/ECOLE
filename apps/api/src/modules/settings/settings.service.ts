@@ -8,9 +8,10 @@ import { ScopeService } from '../../common/scope.service';
 import { normalizePhone, toDate } from '../../common/util';
 import { hashPassword } from '../auth/auth.service';
 import { createSmsProvider } from '../notifications/sms.provider';
+import { FilesService } from '../files/files.service';
 import { config } from '../../config';
 import {
-  AcademicYearDto, AssignmentDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto,
+  AcademicYearDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto,
   StaffUpdateDto, SubjectDto, TrackDto,
 } from './settings.dto';
 
@@ -28,7 +29,21 @@ export const DEFAULT_SETTINGS = {
   /// Bloquer l'accès au bulletin en ligne en cas d'impayé (option CDC §3.3), désactivé par défaut.
   blockReportCardIfUnpaid: false,
   notifications: { absenceSms: true },
+  /// Identité officielle imprimée sur les documents : saisie par la direction, jamais pré-remplie.
+  identity: {
+    authorization: '',
+    legalMentions: '',
+    headName: '',
+    headTitle: 'Le chef d’établissement',
+    phone: '',
+    email: '',
+    address: '',
+    signatureKey: null as string | null,
+    stampKey: null as string | null,
+  },
 };
+
+export type SchoolIdentity = ReturnType<typeof schoolIdentity>;
 
 export function tenantSettings(raw: unknown): typeof DEFAULT_SETTINGS {
   const s = (raw ?? {}) as any;
@@ -37,6 +52,27 @@ export function tenantSettings(raw: unknown): typeof DEFAULT_SETTINGS {
     ...s,
     grading: { ...DEFAULT_SETTINGS.grading, ...(s.grading ?? {}) },
     notifications: { ...DEFAULT_SETTINGS.notifications, ...(s.notifications ?? {}) },
+    identity: { ...DEFAULT_SETTINGS.identity, ...(s.authorization ? { authorization: s.authorization } : {}), ...(s.identity ?? {}) },
+  };
+}
+
+/** En-tête et signataire des documents officiels (bulletins, reçus, attestations). */
+export function schoolIdentity(tenant: { name: string; settings: unknown }, files: FilesService) {
+  const s = tenantSettings(tenant.settings);
+  const id = s.identity;
+  const pub = ((s as any).public ?? {}) as { phone?: string; slogan?: string };
+  return {
+    name: tenant.name,
+    authorization: id.authorization || null,
+    legalMentions: id.legalMentions || null,
+    headName: id.headName || null,
+    headTitle: id.headTitle || DEFAULT_SETTINGS.identity.headTitle,
+    phone: id.phone || pub.phone || null,
+    email: id.email || null,
+    address: id.address || null,
+    slogan: pub.slogan ?? null,
+    signatureUrl: id.signatureKey ? files.signedUrl(id.signatureKey, 3600) : null,
+    stampUrl: id.stampKey ? files.signedUrl(id.stampKey, 3600) : null,
   };
 }
 
@@ -54,7 +90,7 @@ function uniqueViolation(e: unknown, message: string): never {
 @Injectable()
 export class SettingsService {
   private sms = createSmsProvider(config.smsProvider);
-  constructor(private db: PrismaService, private audit: AuditService, private scope: ScopeService) {}
+  constructor(private db: PrismaService, private audit: AuditService, private scope: ScopeService, private files: FilesService) {}
 
   /** Référentiel complet pour les écrans de paramétrage et les listes déroulantes. */
   overview(actor: Actor) {
@@ -69,17 +105,39 @@ export class SettingsService {
         tx.subject.findMany({ orderBy: { name: 'asc' } }),
         tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } }),
       ]);
-      return { tenant: { id: tenant.id, name: tenant.name, settings: tenantSettings(tenant.settings) }, currentYear: year, sites, years, levels, tracks, rooms, subjects };
+      return {
+        tenant: { id: tenant.id, name: tenant.name, settings: tenantSettings(tenant.settings), identity: schoolIdentity(tenant, this.files) },
+        currentYear: year, sites, years, levels, tracks, rooms, subjects,
+      };
     });
   }
 
   updateTenantSettings(actor: Actor, settings: Record<string, unknown>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
-      const merged = tenantSettings({ ...(t.settings as object), ...settings });
+      const current = tenantSettings(t.settings);
+      // La signature et le cachet ne changent que par leur envoi de fichier dédié.
+      const incoming = settings.identity
+        ? { ...settings, identity: { ...current.identity, ...(settings.identity as object), signatureKey: current.identity.signatureKey, stampKey: current.identity.stampKey } }
+        : settings;
+      const merged = tenantSettings({ ...(t.settings as object), ...incoming });
       await tx.tenant.update({ where: { id: t.id }, data: { settings: merged as any } });
       await this.audit.log(tx, actor, 'settings.updated', 'Tenant', t.id, settings);
       return merged;
+    });
+  }
+
+  /** Signature ou cachet du chef d'établissement (image), imprimés sur les documents officiels. */
+  setIdentityImage(actor: Actor, kind: 'signature' | 'stamp', file?: { buffer: Buffer; mimetype: string; size: number }) {
+    if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une image (PNG, JPEG ou WebP)');
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
+      const current = tenantSettings(t.settings);
+      const key = file ? await this.files.save(actor.tenantId, 'etablissement', file) : null;
+      const identity = { ...current.identity, [kind === 'signature' ? 'signatureKey' : 'stampKey']: key };
+      await tx.tenant.update({ where: { id: t.id }, data: { settings: { ...current, identity } as any } });
+      await this.audit.log(tx, actor, file ? `identity.${kind}.set` : `identity.${kind}.removed`, 'Tenant', t.id);
+      return schoolIdentity({ name: t.name, settings: { ...current, identity } }, this.files);
     });
   }
 
@@ -140,6 +198,38 @@ export class SettingsService {
   }
   createSubject(actor: Actor, dto: SubjectDto) {
     return this.simpleCreate(actor, 'subject', dto, 'Ce code de matière existe déjà');
+  }
+
+  updateLevel(actor: Actor, id: string, dto: Partial<LevelDto>) {
+    return this.simpleUpdate(actor, 'level', id, dto, 'Ce niveau existe déjà');
+  }
+  updateTrack(actor: Actor, id: string, dto: Partial<TrackDto>) {
+    return this.simpleUpdate(actor, 'track', id, dto, 'Ce code de filière existe déjà');
+  }
+  updateRoom(actor: Actor, id: string, dto: Partial<RoomDto>) {
+    return this.simpleUpdate(actor, 'room', id, dto, 'Cette salle existe déjà sur ce site');
+  }
+  updateSubject(actor: Actor, id: string, dto: Partial<SubjectDto>) {
+    return this.simpleUpdate(actor, 'subject', id, dto, 'Ce code de matière existe déjà');
+  }
+
+  /** Une salle n'est supprimée que si aucun cours n'y est prévu. */
+  removeRoom(actor: Actor, id: string) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const used = await tx.timetableSlot.count({ where: { roomId: id } });
+      if (used) throw new ConflictException(`Cette salle est utilisée par ${used} cours de l’emploi du temps : retirez-les d’abord`);
+      await tx.room.delete({ where: { id } });
+      await this.audit.log(tx, actor, 'room.removed', 'room', id);
+      return { ok: true };
+    });
+  }
+
+  private simpleUpdate(actor: Actor, model: 'level' | 'track' | 'room' | 'subject', id: string, dto: object, conflict: string) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const row = await (tx[model] as any).update({ where: { id }, data: dto }).catch((e: unknown) => uniqueViolation(e, conflict));
+      await this.audit.log(tx, actor, `${model}.updated`, model, id, dto);
+      return row;
+    });
   }
 
   private simpleCreate(actor: Actor, model: 'level' | 'track' | 'room' | 'subject', dto: object, conflict: string) {
@@ -206,6 +296,37 @@ export class SettingsService {
       });
       await this.audit.log(tx, actor, 'class_subject.upserted', 'ClassSubject', cs.id, dto);
       return cs;
+    });
+  }
+
+  /** Même coefficient pour une matière dans toutes les classes d'un niveau (et d'une filière) de l'année en cours. */
+  bulkCoefficient(actor: Actor, dto: BulkCoefficientDto) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const academicYearId = await this.scope.currentYearId(tx);
+      const classes = await tx.class.findMany({
+        where: { academicYearId, levelId: dto.levelId, ...(dto.trackId !== undefined ? { trackId: dto.trackId } : {}) },
+        select: { id: true },
+      });
+      if (!classes.length) throw new BadRequestException('Aucune classe ne correspond à ce niveau et à cette filière cette année');
+      for (const c of classes) {
+        if (dto.coefficient === null) {
+          const cs = await tx.classSubject.findUnique({ where: { classId_subjectId: { classId: c.id, subjectId: dto.subjectId } } });
+          if (!cs) continue;
+          if (await tx.assessment.count({ where: { classSubjectId: cs.id } })) {
+            throw new ConflictException('Des évaluations existent déjà pour cette matière dans une des classes : elle ne peut plus être retirée');
+          }
+          await tx.teacherAssignment.deleteMany({ where: { classSubjectId: cs.id } });
+          await tx.classSubject.delete({ where: { id: cs.id } });
+        } else {
+          await tx.classSubject.upsert({
+            where: { classId_subjectId: { classId: c.id, subjectId: dto.subjectId } },
+            create: { tenantId: actor.tenantId, classId: c.id, subjectId: dto.subjectId, coefficient: dto.coefficient },
+            update: { coefficient: dto.coefficient },
+          });
+        }
+      }
+      await this.audit.log(tx, actor, 'class_subject.bulk', 'Subject', dto.subjectId, { ...dto, classes: classes.length });
+      return { classes: classes.length };
     });
   }
 

@@ -1,4 +1,4 @@
-import { Cycle, RoleCode } from '@prisma/client';
+import { Cycle, RoleCode, RoomKind } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEmail, IsEnum, IsInt, IsNumber, IsObject, IsOptional,
@@ -42,11 +42,39 @@ export class TrackDto {
 export class RoomDto {
   @IsUUID() siteId: string;
   @IsString() @MaxLength(60) name: string;
+  @IsOptional() @IsEnum(RoomKind) kind?: RoomKind;
+  @IsOptional() @IsInt() @Min(1) capacity?: number | null;
+}
+
+export class RoomUpdateDto {
+  @IsOptional() @IsUUID() siteId?: string;
+  @IsOptional() @IsString() @MaxLength(60) name?: string;
+  @IsOptional() @IsEnum(RoomKind) kind?: RoomKind;
+  @IsOptional() @IsInt() @Min(1) capacity?: number | null;
 }
 
 export class SubjectDto {
   @IsString() @MaxLength(20) code: string;
   @IsString() @MaxLength(120) name: string;
+  @IsOptional() @IsBoolean() practical?: boolean;
+}
+
+export class SubjectUpdateDto {
+  @IsOptional() @IsString() @MaxLength(20) code?: string;
+  @IsOptional() @IsString() @MaxLength(120) name?: string;
+  @IsOptional() @IsBoolean() practical?: boolean;
+}
+
+export class LevelUpdateDto {
+  @IsOptional() @IsString() @MaxLength(60) name?: string;
+  @IsOptional() @IsEnum(Cycle) cycle?: Cycle;
+  @IsOptional() @IsInt() position?: number;
+}
+
+export class TrackUpdateDto {
+  @IsOptional() @IsString() @MaxLength(20) code?: string;
+  @IsOptional() @IsString() @MaxLength(120) name?: string;
+  @IsOptional() @IsEnum(Cycle) cycle?: Cycle;
 }
 
 export class ClassDto {
@@ -61,6 +89,14 @@ export class ClassDto {
 export class ClassSubjectDto {
   @IsUUID() subjectId: string;
   @IsNumber() @Min(0) @Max(20) coefficient: number;
+}
+
+/** coefficient null : retire la matière des classes concernées. */
+export class BulkCoefficientDto {
+  @IsUUID() levelId: string;
+  @IsOptional() @IsUUID() trackId?: string | null;
+  @IsUUID() subjectId: string;
+  @IsOptional() @IsNumber() @Min(0) @Max(20) coefficient: number | null;
 }
 
 export class AssignmentDto {

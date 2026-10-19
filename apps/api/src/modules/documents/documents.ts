@@ -7,6 +7,8 @@ import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { nextNumber, pad, verifyCode } from '../../common/util';
+import { FilesService } from '../files/files.service';
+import { schoolIdentity } from '../settings/settings.service';
 
 export const DOC_LABEL: Record<DocumentKind, string> = {
   CERTIFICAT_SCOLARITE: 'Certificat de scolarité',
@@ -28,7 +30,7 @@ class BatchDto {
 /** Documents officiels avec QR de vérification publique (CDC §4.1). */
 @Injectable()
 export class DocumentsService {
-  constructor(private db: PrismaService, private scope: ScopeService, private audit: AuditService) {}
+  constructor(private db: PrismaService, private scope: ScopeService, private audit: AuditService, private files: FilesService) {}
 
   private async issueInTx(tx: Tx, actor: Actor, kind: DocumentKind, studentId: string) {
     const yearId = await this.scope.currentYearId(tx);
@@ -95,7 +97,8 @@ export class DocumentsService {
       if (!docs.length) throw new NotFoundException('Document introuvable');
       for (const d of docs) await this.scope.assertStudent(tx, actor, d.studentId);
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { name: true, settings: true } });
-      return { tenant: { name: tenant.name, authorization: (tenant.settings as any)?.authorization ?? null }, documents: docs.map((d) => ({ ...d, label: DOC_LABEL[d.kind] })) };
+      const identity = schoolIdentity(tenant, this.files);
+      return { tenant: { name: tenant.name, authorization: identity.authorization }, identity, documents: docs.map((d) => ({ ...d, label: DOC_LABEL[d.kind] })) };
     });
   }
 

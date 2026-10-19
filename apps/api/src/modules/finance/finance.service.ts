@@ -6,7 +6,9 @@ import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { fcfa, isoDay, nextNumber, pad, toDate, verifyCode } from '../../common/util';
 import { NotificationsService } from '../notifications/notifications.service';
-import { BatchInvoiceDto, CashClosingDto, DeskPaymentDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
+import { BatchInvoiceDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
+import { FilesService } from '../files/files.service';
+import { schoolIdentity } from '../settings/settings.service';
 
 const METHOD_LABEL: Record<string, string> = {
   CASH: 'Espèces', CHEQUE: 'Chèque', TRANSFER: 'Virement', MOBILE_MONEY_DESK: 'Mobile Money (au bureau)', ONLINE: 'Paiement en ligne',
@@ -19,6 +21,7 @@ export class FinanceService {
     private scope: ScopeService,
     private audit: AuditService,
     private notifications: NotificationsService,
+    private files: FilesService,
   ) {}
 
   /** Reste à payer par élève (factures non annulées). */
@@ -46,6 +49,28 @@ export class FinanceService {
       const f = await tx.feeType.create({ data: { ...dto, dueDate: dto.dueDate ? toDate(dto.dueDate) : null, tenantId: actor.tenantId, academicYearId } });
       await this.audit.log(tx, actor, 'fee_type.created', 'FeeType', f.id, dto);
       return f;
+    });
+  }
+
+  /** Grille des montants par niveau et filière : un frais par combinaison, les factures déjà émises ne changent pas. */
+  saveFeeGrid(actor: Actor, dto: FeeGridDto) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const academicYearId = await this.scope.currentYearId(tx);
+      const dueDate = dto.dueDate ? toDate(dto.dueDate) : undefined;
+      let saved = 0;
+      for (const r of dto.rows) {
+        const trackId = r.trackId ?? null;
+        const existing = await tx.feeType.findFirst({ where: { academicYearId, name: dto.name, levelId: r.levelId, trackId } });
+        if (r.amount === null || r.amount === undefined) {
+          if (existing?.active) await tx.feeType.update({ where: { id: existing.id }, data: { active: false } });
+          continue;
+        }
+        if (existing) await tx.feeType.update({ where: { id: existing.id }, data: { amount: r.amount, active: true, ...(dueDate ? { dueDate } : {}) } });
+        else await tx.feeType.create({ data: { tenantId: actor.tenantId, academicYearId, name: dto.name, levelId: r.levelId, trackId, amount: r.amount, dueDate: dueDate ?? null } });
+        saved++;
+      }
+      await this.audit.log(tx, actor, 'fee_type.grid', 'FeeType', null, { name: dto.name, rows: dto.rows.length, saved });
+      return { saved };
     });
   }
 
@@ -249,8 +274,8 @@ export class FinanceService {
       });
       if (!r) throw new NotFoundException('Reçu introuvable');
       await this.scope.assertStudent(tx, actor, r.payment.studentId);
-      const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { name: true } });
-      return { ...r, methodLabel: METHOD_LABEL[r.payment.method], tenant };
+      const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { name: true, settings: true } });
+      return { ...r, methodLabel: METHOD_LABEL[r.payment.method], tenant: { name: tenant.name }, identity: schoolIdentity(tenant, this.files) };
     });
   }
 
