@@ -23,7 +23,7 @@ Sécurité : isolation des écoles par Row Level Security PostgreSQL, mots de pa
 
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
-Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Le site se construit tout seul au démarrage (plusieurs minutes la première fois). Pour suivre l’avancement ou relancer, tapez `./demarrer.sh` dans le terminal du codespace ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.
+Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Une fois le codespace ouvert, tapez `./demarrer.sh` dans son terminal (plusieurs minutes la première fois) ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.
 
 ## Démarrer en 5 minutes avec Docker
 
