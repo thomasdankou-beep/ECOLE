@@ -14,16 +14,25 @@ port=8080
 
 if [ ! -f .env ]; then
   cp .env.docker.example .env
-  for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
-    sed -i.bak "s|^$k=.*|$k=$(secret)|" .env
-  done
-  # GitHub Codespaces : le site est servi sur une adresse publique propre au codespace.
-  if [ -n "${CODESPACE_NAME:-}" ]; then
-    sed -i.bak "s|^WEB_ORIGIN=.*|WEB_ORIGIN=https://${CODESPACE_NAME}-${port}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}|" .env
-  fi
-  rm -f .env.bak
-  echo "Fichier .env créé avec des secrets générés."
+  echo "Fichier .env créé."
 fi
+
+# GitHub Codespaces : le site est servi sur une adresse publique propre au codespace.
+if [ -n "${CODESPACE_NAME:-}" ] && grep -q '^WEB_ORIGIN=http://localhost' .env; then
+  sed -i.bak "s|^WEB_ORIGIN=.*|WEB_ORIGIN=https://${CODESPACE_NAME}-${port}.${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-app.github.dev}|" .env
+fi
+
+# Complète chaque secret vide ou absent (cas d'un .env copié à la main sans être rempli).
+for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
+  if grep -q "^$k=." .env; then continue; fi
+  if grep -q "^$k=" .env; then
+    sed -i.bak "s|^$k=.*|$k=$(secret)|" .env
+  else
+    echo "$k=$(secret)" >> .env
+  fi
+  echo "Secret $k généré."
+done
+rm -f .env.bak
 
 echo "Construction et démarrage des services (le premier lancement prend plusieurs minutes)..."
 docker compose up -d --build
