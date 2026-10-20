@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { Phone } from 'lucide-react';
+import { SiteNames } from './site-names';
 
 export const SCHOOL = {
   name: 'Lycée privé Saint Kisito-GESA',
@@ -15,7 +16,7 @@ export function SiteHeader() {
           <img src="/logo.png" alt="" width={44} height={44} className="size-11 flex-none rounded-full" />
           <span className="min-w-0 leading-tight">
             <span className="block truncate font-display text-lg font-bold text-brand">{SCHOOL.short}</span>
-            <span className="block truncate text-xs text-muted">Hêdomey · Togbin</span>
+            <span className="block min-h-4 truncate text-xs text-muted"><SiteNames /></span>
           </span>
         </Link>
         <nav className="flex items-center gap-1.5 text-sm font-bold">

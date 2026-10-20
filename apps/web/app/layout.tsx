@@ -10,7 +10,7 @@ const nunito = Nunito_Sans({ subsets: ['latin'], variable: '--font-nunito', disp
 
 export const metadata: Metadata = {
   title: { default: 'Lycée privé Saint Kisito-GESA', template: '%s · Saint Kisito-GESA' },
-  description: 'Lycée privé Saint Kisito-GESA, Hêdomey et Togbin : collège général et lycée technique. Éduquer · Former · Réussir.',
+  description: 'Lycée privé Saint Kisito-GESA : collège général et lycée technique. Éduquer · Former · Réussir.',
   manifest: '/manifest.webmanifest',
   icons: { icon: '/favicon.png', apple: '/icon-192.png' },
 };
