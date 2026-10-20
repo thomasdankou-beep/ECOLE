@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'crypto';
-import { config } from '../../config';
+import { config, tenantOrigin } from '../../config';
 import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
@@ -44,7 +44,7 @@ export class PaymentsService {
         transactionId, amount: dto.amount, currency: 'XOF', description: `${payment.label} ${payment.studentName}`,
         payerPhone: payment.payerPhone ?? undefined, operator: dto.operator, customerName: actor.name,
         notifyUrl: `${config.publicApiUrl}/api/v1/payments/webhook/${this.provider.name}`,
-        returnUrl: `${config.webOrigin}/espace/frais?paiement=${payment.id}`,
+        returnUrl: `${tenantOrigin(await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } }))}/espace/frais?paiement=${payment.id}`,
       });
       await this.db.forTenant(actor.tenantId, (tx) => tx.payment.update({ where: { id: payment.id }, data: { status: 'PENDING', providerRef: r.providerRef } }));
       return { paymentId: payment.id, transactionId, status: 'PENDING', ...r };

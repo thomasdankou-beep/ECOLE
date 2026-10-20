@@ -390,3 +390,99 @@ describe('Paramétrage par la direction', () => {
     expect(bad.status).toBe(400);
   });
 });
+
+describe('Plateforme : plusieurs écoles sur un même serveur', () => {
+  const email = 'superadmin@test.local';
+  const slug = `pf-${Date.now().toString(36)}`;
+  let cookie: string;
+  let tenantId: string;
+  let director: { identifier: string; temporaryPassword: string };
+
+  beforeAll(async () => {
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Super Admin Test"`, { env: process.env, cwd: `${__dirname}/..` });
+    // Mot de passe connu pour le test, sans passer par la sortie de la commande.
+    const argon2 = await import('argon2');
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Test-2026'), mustChangePassword: false } });
+  });
+
+  it('le rôle applicatif des écoles ne lit pas les comptes de la plateforme', async () => {
+    await expect(app_.$queryRaw`SELECT count(*) FROM platform_admins`).rejects.toThrow();
+  });
+
+  it("refuse l'accès sans connexion Super Admin, et le jeton d'une école ne suffit pas", async () => {
+    expect((await http.get('/api/v1/platform/tenants')).status).toBe(401);
+    expect((await http.get('/api/v1/platform/tenants').set('Authorization', `Bearer ${tokens.direction}`)).status).toBe(401);
+    expect((await http.post('/api/v1/platform/auth/login').send({ email, password: 'mauvais' })).status).toBe(401);
+  });
+
+  it('le Super Admin crée une école avec son premier compte Direction', async () => {
+    const r = await http.post('/api/v1/platform/auth/login').send({ email, password: 'Plateforme-Test-2026' });
+    expect(r.status).toBe(201);
+    cookie = (r.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('erp_pt='))!.split(';')[0];
+    const reserved = await http.post('/api/v1/platform/tenants').set('Cookie', cookie)
+      .send({ slug: 'admin', name: 'École réservée', matriculePrefix: 'RES', siteName: 'Centre', director: { firstName: 'A', lastName: 'B', phone: '0190001111' } });
+    expect(reserved.status).toBe(400);
+    const c = await http.post('/api/v1/platform/tenants').set('Cookie', cookie)
+      .send({ slug, name: 'Collège Plateforme Test', matriculePrefix: 'CPT', siteName: 'Centre', director: { firstName: 'Awa', lastName: 'Test', phone: '0190001111' } });
+    expect(c.status).toBe(201);
+    tenantId = c.body.tenant.id;
+    director = c.body.director;
+    const list = await http.get('/api/v1/platform/tenants').set('Cookie', cookie);
+    expect(list.body.find((t: any) => t.slug === slug)).toMatchObject({ status: 'ACTIVE', sites: 1, students: 0 });
+  });
+
+  it('la nouvelle école est vide et étanche : elle ne voit rien de Saint Kisito', async () => {
+    const r = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: director.identifier, password: director.temporaryPassword });
+    expect(r.status).toBe(200);
+    expect(r.body.mustChangePassword).toBe(true);
+    const t = r.body.accessToken;
+    const students = await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`);
+    expect(students.status === 404 || (students.status === 200 && (students.body.items ?? students.body).length === 0)).toBe(true);
+    const settings = await http.get('/api/v1/settings').set('Authorization', `Bearer ${t}`);
+    expect(settings.body.sites.map((s: any) => s.name)).toEqual(['Centre']);
+    const year = await http.post('/api/v1/academic-years').set('Authorization', `Bearer ${t}`)
+      .send({ label: '2026-2027', startDate: '2026-09-15', endDate: '2027-07-15', terms: [{ name: 'Trimestre 1', startDate: '2026-09-15', endDate: '2026-12-20' }] });
+    expect(year.status).toBe(201);
+    expect(year.body.isCurrent).toBe(true);
+    // Le même identifiant ne permet pas d'entrer dans Saint Kisito.
+    expect((await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: director.identifier, password: director.temporaryPassword })).status).toBe(401);
+  });
+
+  it("la direction renomme son école et choisit sa couleur ; l'école publique les affiche", async () => {
+    const r = await as('direction').patch('/settings', { name: 'Lycée privé Saint Kisito-GESA', settings: { branding: { primaryColor: '#1d4ed8', logoKey: '../../etc/passwd' } } });
+    expect(r.status).toBe(200);
+    const pub = await http.get('/api/v1/public/saint-kisito');
+    expect(pub.body.branding.primaryColor).toBe('#1d4ed8');
+    expect(pub.body.branding.logoUrl).toBe('/logo.png');
+    // 1 pixel PNG : le logo envoyé remplace celui de l'installation et se lit sans connexion.
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+    const up = await http.post('/api/v1/settings/identity/logo').set('Authorization', `Bearer ${tokens.direction}`).attach('file', png, { filename: 'logo.png', contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    expect(up.body.logoUrl).toMatch(/^\/api\/v1\/public\/saint-kisito\/logo\?v=/);
+    const img = await http.get(up.body.logoUrl);
+    expect(img.status).toBe(200);
+    expect(img.headers['content-type']).toBe('image/png');
+    await http.delete('/api/v1/settings/identity/logo').set('Authorization', `Bearer ${tokens.direction}`);
+    expect((await http.get('/api/v1/public/saint-kisito')).body.branding.logoUrl).toBe('/logo.png');
+    const bad = await as('direction').patch('/settings', { settings: { branding: { primaryColor: 'red;background:url(x)' } } });
+    expect(bad.status).toBe(200);
+    expect((await http.get('/api/v1/public/saint-kisito')).body.branding.primaryColor).toBeNull();
+  });
+
+  it("une école suspendue ne peut plus se connecter, et la réactivation rétablit l'accès", async () => {
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ status: 'SUSPENDED' })).status).toBe(200);
+    const blocked = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: director.identifier, password: director.temporaryPassword });
+    expect(blocked.status).toBe(403);
+    expect((await http.get(`/api/v1/public/${slug}`)).body.suspended).toBe(true);
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ status: 'ACTIVE' })).status).toBe(200);
+    expect((await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: director.identifier, password: director.temporaryPassword })).status).toBe(200);
+    const audit = await http.get('/api/v1/platform/audit').set('Cookie', cookie);
+    expect(audit.body.map((a: any) => a.action)).toEqual(expect.arrayContaining(['platform.tenant.created', 'platform.tenant.suspended', 'platform.tenant.reactivated']));
+  });
+
+  it("trouve l'école d'après l'adresse : domaine propre, sinon école par défaut", async () => {
+    await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ domain: `${slug}.example.org` });
+    expect((await http.get(`/api/v1/platform/resolve?host=${slug}.example.org`)).body.slug).toBe(slug);
+    expect((await http.get('/api/v1/platform/resolve?host=localhost:3000')).body.slug).toBe('saint-kisito');
+  });
+});

@@ -1,6 +1,7 @@
 import { Cycle, RoleCode, RoomKind } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
+  MinLength,
   ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEmail, IsEnum, IsInt, IsNumber, IsObject, IsOptional,
   IsString, IsUUID, Max, MaxLength, Min, ValidateNested,
 } from 'class-validator';
@@ -127,5 +128,8 @@ export class StaffUpdateDto {
 }
 
 export class TenantSettingsDto {
-  @IsObject() settings: Record<string, unknown>;
+  @IsOptional() @IsObject() settings?: Record<string, unknown>;
+  /// Nom de l'école tel qu'il s'affiche partout (site public, en-têtes, documents).
+  @IsOptional() @IsString() @MinLength(3) @MaxLength(160) name?: string;
+  @IsOptional() @IsString() @MaxLength(60) shortName?: string;
 }

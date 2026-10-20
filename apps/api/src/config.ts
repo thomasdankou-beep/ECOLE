@@ -35,8 +35,19 @@ export const config = {
     paydunya: { masterKey: env.PAYDUNYA_MASTER_KEY ?? '', privateKey: env.PAYDUNYA_PRIVATE_KEY ?? '', token: env.PAYDUNYA_TOKEN ?? '' },
   },
   smsProvider: env.SMS_PROVIDER ?? 'console',
+  /// Domaine de la plateforme : chaque école est servie sur <slug>.<domaine> (ou sur son propre domaine).
+  platformDomain: (env.PLATFORM_DOMAIN ?? '').toLowerCase(),
+  /// École servie quand l'adresse ne désigne aucune école (installation à une seule école, développement).
+  defaultTenant: env.DEFAULT_TENANT ?? env.TENANT_SLUG ?? '',
   gotenbergUrl: env.GOTENBERG_URL ?? '',
   isProd: env.NODE_ENV === 'production',
   /// Cookie de session réservé au HTTPS ; COOKIE_SECURE=false seulement pour un essai local en http.
   cookieSecure: env.COOKIE_SECURE ? env.COOKIE_SECURE === 'true' : env.NODE_ENV === 'production',
 };
+
+/** Adresse publique d'une école : son domaine propre, sinon son sous-domaine de la plateforme, sinon l'adresse de l'installation. */
+export function tenantOrigin(tenant: { slug: string; domain?: string | null }) {
+  if (tenant.domain) return `https://${tenant.domain}`;
+  if (config.platformDomain) return `https://${tenant.slug}.${config.platformDomain}`;
+  return config.webOrigin;
+}

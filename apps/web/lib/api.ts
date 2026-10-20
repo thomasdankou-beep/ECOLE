@@ -4,8 +4,6 @@
  * Client de l'API : jeton d'accès en mémoire (jamais dans le stockage du navigateur),
  * renouvellement silencieux par le cookie httpOnly, rôle actif transmis à chaque appel.
  */
-export const TENANT = process.env.NEXT_PUBLIC_TENANT ?? 'saint-kisito';
-
 let accessToken: string | null = null;
 let activeRole: string | null = null;
 let refreshing: Promise<boolean> | null = null;

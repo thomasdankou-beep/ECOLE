@@ -1,5 +1,6 @@
 'use client';
 
+import { BrandStyle, SchoolLogo } from '@/components/site/brand';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -19,6 +20,10 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
   const [unread, setUnread] = useState(0);
 
   useEffect(() => setOpen(false), [path]);
+  // Mot de passe provisoire : rien d'autre n'est accessible tant qu'il n'a pas été changé.
+  useEffect(() => {
+    if (auth.me?.user.mustChangePassword && !path.startsWith('/espace/compte')) router.replace('/espace/compte?premiere=1');
+  }, [auth.me, path, router]);
   useEffect(() => {
     if (!auth.me) return;
     const tick = () => api.get<{ unreadCount: number }>('/notifications?unread=true').then((r) => setUnread(r.unreadCount)).catch(() => {});
@@ -72,10 +77,11 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[264px_1fr]">
+      <BrandStyle color={me.tenant.primaryColor} />
       {/* Barre latérale (ordinateur) */}
       <aside className="sticky top-0 hidden h-dvh flex-col gap-4 overflow-y-auto border-r border-line bg-surface p-4 lg:flex no-print">
         <Link href="/espace" className="flex items-center gap-2.5">
-          <img src="/logo.png" alt="" width={40} height={40} className="size-10 rounded-full" />
+          <SchoolLogo url={me.tenant.logoUrl} name={me.tenant.shortName ?? me.tenant.name} size={40} />
           <span className="leading-tight">
             <span className="block font-display text-lg font-bold text-brand">{me.tenant.shortName ?? me.tenant.name}</span>
             <span className="block text-xs text-muted">Année {me.year?.label ?? '—'}</span>
@@ -99,8 +105,8 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
             <Menu className="size-6" />
           </button>
           <Link href="/espace" className="flex min-w-0 flex-1 items-center gap-2">
-            <img src="/logo.png" alt="" width={32} height={32} className="size-8 rounded-full" />
-            <span className="truncate font-display text-lg font-bold text-brand">{me.tenant.shortName}</span>
+            <SchoolLogo url={me.tenant.logoUrl} name={me.tenant.shortName ?? me.tenant.name} size={32} />
+            <span className="truncate font-display text-lg font-bold text-brand">{me.tenant.shortName ?? me.tenant.name}</span>
           </Link>
           <Link href="/espace/notifications" className="relative grid size-11 place-items-center rounded-lg hover:bg-sunk" aria-label={`Notifications, ${unread} non lues`}>
             <Bell className="size-6" />
@@ -130,6 +136,11 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
 
         <main className="mx-auto grid max-w-6xl gap-5 px-4 pt-4 sm:pt-6">
           {childSwitch && <div className="no-print">{childSwitch}</div>}
+          {!me.year && auth.role === 'DIRECTION' && !path.startsWith('/espace/parametres') && (
+            <Link href="/espace/parametres?rubrique=annee" className="no-print rounded-xl bg-warn-soft p-4 font-bold text-warn hover:underline">
+              Pour commencer, créez l’année scolaire et ses périodes dans Paramètres. Ajoutez ensuite vos classes, matières et frais.
+            </Link>
+          )}
           {isFamily(auth.role) && !auth.child ? (
             <p className="rounded-xl bg-warn-soft p-4 font-bold text-warn">Aucun élève n’est rattaché à ce compte. Contactez le secrétariat.</p>
           ) : (

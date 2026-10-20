@@ -9,7 +9,7 @@ import { normalizePhone, toDate } from '../../common/util';
 import { hashPassword } from '../auth/auth.service';
 import { createSmsProvider } from '../notifications/sms.provider';
 import { FilesService } from '../files/files.service';
-import { config } from '../../config';
+import { config, tenantOrigin } from '../../config';
 import {
   AcademicYearDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto,
   StaffUpdateDto, SubjectDto, TrackDto,
@@ -41,6 +41,13 @@ export const DEFAULT_SETTINGS = {
     signatureKey: null as string | null,
     stampKey: null as string | null,
   },
+  /// Image de l'école sur le site public et les documents : logo envoyé par la direction et couleur principale.
+  branding: {
+    logoKey: null as string | null,
+    /// Logo fourni avec l'installation (fichier statique), utilisé tant qu'aucun logo n'a été envoyé.
+    logoUrl: null as string | null,
+    primaryColor: null as string | null,
+  },
 };
 
 export type SchoolIdentity = ReturnType<typeof schoolIdentity>;
@@ -53,11 +60,19 @@ export function tenantSettings(raw: unknown): typeof DEFAULT_SETTINGS {
     grading: { ...DEFAULT_SETTINGS.grading, ...(s.grading ?? {}) },
     notifications: { ...DEFAULT_SETTINGS.notifications, ...(s.notifications ?? {}) },
     identity: { ...DEFAULT_SETTINGS.identity, ...(s.authorization ? { authorization: s.authorization } : {}), ...(s.identity ?? {}) },
+    branding: { ...DEFAULT_SETTINGS.branding, ...(s.branding ?? {}) },
   };
 }
 
+/** Adresse publique du logo : celui envoyé par la direction, sinon celui de l'installation, sinon aucun. */
+export function logoUrl(tenant: { slug?: string; settings: unknown }) {
+  const b = tenantSettings(tenant.settings).branding;
+  if (b.logoKey && tenant.slug) return `/api/v1/public/${tenant.slug}/logo?v=${b.logoKey.split('/').pop()!.slice(0, 8)}`;
+  return b.logoUrl || null;
+}
+
 /** En-tête et signataire des documents officiels (bulletins, reçus, attestations). */
-export function schoolIdentity(tenant: { name: string; settings: unknown }, files: FilesService) {
+export function schoolIdentity(tenant: { name: string; slug?: string; settings: unknown }, files: FilesService) {
   const s = tenantSettings(tenant.settings);
   const id = s.identity;
   const pub = ((s as any).public ?? {}) as { phone?: string; slogan?: string };
@@ -73,13 +88,28 @@ export function schoolIdentity(tenant: { name: string; settings: unknown }, file
     slogan: pub.slogan ?? null,
     signatureUrl: id.signatureKey ? files.signedUrl(id.signatureKey, 3600) : null,
     stampUrl: id.stampKey ? files.signedUrl(id.stampKey, 3600) : null,
+    logoUrl: logoUrl(tenant),
+    primaryColor: s.branding.primaryColor,
   };
 }
 
 /** Mot de passe provisoire lisible, à changer à la première connexion. */
 export function temporaryPassword() {
-  const words = ['Kisito', 'Togbin', 'Hedomey', 'Ecole', 'Savoir', 'Reussir'];
+  const words = ['Ecole', 'Savoir', 'Reussir', 'Cahier', 'Classe', 'Lecon'];
   return `${words[randomInt(words.length)]}${randomInt(1000, 10000)}`;
+}
+
+/** Textes du site public : chaînes et listes courtes uniquement ; les images restent celles fournies avec l'installation. */
+function publicTexts(raw: unknown, current: Record<string, unknown> = {}) {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const str = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+  const list = (v: unknown) => (Array.isArray(v) ? v.map((x) => str(x, 160)).filter(Boolean).slice(0, 10) : undefined);
+  return {
+    heroImage: current.heroImage, trackImages: current.trackImages,
+    slogan: str(r.slogan, 120), tagline: str(r.tagline, 160), phone: str(r.phone, 40), motto: str(r.motto, 160),
+    rentree: typeof r.rentree === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.rentree) ? r.rentree : undefined,
+    highlights: list(r.highlights), reasons: list(r.reasons),
+  };
 }
 
 function uniqueViolation(e: unknown, message: string): never {
@@ -106,38 +136,52 @@ export class SettingsService {
         tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } }),
       ]);
       return {
-        tenant: { id: tenant.id, name: tenant.name, settings: tenantSettings(tenant.settings), identity: schoolIdentity(tenant, this.files) },
+        tenant: { id: tenant.id, name: tenant.name, shortName: tenant.shortName, settings: tenantSettings(tenant.settings), identity: schoolIdentity(tenant, this.files) },
         currentYear: year, sites, years, levels, tracks, rooms, subjects,
       };
     });
   }
 
-  updateTenantSettings(actor: Actor, settings: Record<string, unknown>) {
+  updateTenantSettings(actor: Actor, settings: Record<string, unknown>, names: { name?: string; shortName?: string } = {}) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
       const current = tenantSettings(t.settings);
       // La signature et le cachet ne changent que par leur envoi de fichier dédié.
-      const incoming = settings.identity
+      const incoming: Record<string, unknown> = settings.identity
         ? { ...settings, identity: { ...current.identity, ...(settings.identity as object), signatureKey: current.identity.signatureKey, stampKey: current.identity.stampKey } }
-        : settings;
+        : { ...settings };
+      // Le logo ne change que par son envoi de fichier ; la couleur doit être une couleur hexadécimale.
+      if (incoming.branding) {
+        const b = incoming.branding as { primaryColor?: unknown };
+        const color = typeof b.primaryColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(b.primaryColor) ? b.primaryColor : null;
+        incoming.branding = { ...current.branding, primaryColor: color };
+      }
+      if ('demo' in incoming) delete incoming.demo;
+      if (incoming.public) incoming.public = publicTexts(incoming.public, (current as any).public);
       const merged = tenantSettings({ ...(t.settings as object), ...incoming });
-      await tx.tenant.update({ where: { id: t.id }, data: { settings: merged as any } });
-      await this.audit.log(tx, actor, 'settings.updated', 'Tenant', t.id, settings);
+      const rename = {
+        ...(names.name?.trim() ? { name: names.name.trim() } : {}),
+        ...(names.shortName !== undefined ? { shortName: names.shortName.trim() || null } : {}),
+      };
+      await tx.tenant.update({ where: { id: t.id }, data: { settings: merged as any, ...rename } });
+      await this.audit.log(tx, actor, 'settings.updated', 'Tenant', t.id, { ...settings, ...rename });
       return merged;
     });
   }
 
-  /** Signature ou cachet du chef d'établissement (image), imprimés sur les documents officiels. */
-  setIdentityImage(actor: Actor, kind: 'signature' | 'stamp', file?: { buffer: Buffer; mimetype: string; size: number }) {
+  /** Signature, cachet (imprimés sur les documents officiels) ou logo de l'école. */
+  setIdentityImage(actor: Actor, kind: 'signature' | 'stamp' | 'logo', file?: { buffer: Buffer; mimetype: string; size: number }) {
     if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une image (PNG, JPEG ou WebP)');
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
       const current = tenantSettings(t.settings);
       const key = file ? await this.files.save(actor.tenantId, 'etablissement', file) : null;
-      const identity = { ...current.identity, [kind === 'signature' ? 'signatureKey' : 'stampKey']: key };
-      await tx.tenant.update({ where: { id: t.id }, data: { settings: { ...current, identity } as any } });
+      const next = kind === 'logo'
+        ? { ...current, branding: { ...current.branding, logoKey: key } }
+        : { ...current, identity: { ...current.identity, [kind === 'signature' ? 'signatureKey' : 'stampKey']: key } };
+      await tx.tenant.update({ where: { id: t.id }, data: { settings: next as any } });
       await this.audit.log(tx, actor, file ? `identity.${kind}.set` : `identity.${kind}.removed`, 'Tenant', t.id);
-      return schoolIdentity({ name: t.name, settings: { ...current, identity } }, this.files);
+      return schoolIdentity({ name: t.name, slug: t.slug, settings: next }, this.files);
     });
   }
 
@@ -162,11 +206,13 @@ export class SettingsService {
   createYear(actor: Actor, dto: AcademicYearDto) {
     if (!dto.terms.length) throw new BadRequestException('Ajoutez au moins une période (trimestre ou semestre)');
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      if (dto.isCurrent) await tx.academicYear.updateMany({ data: { isCurrent: false } });
+      // La première année d'une nouvelle école devient l'année en cours.
+      const isCurrent = !!dto.isCurrent || !(await tx.academicYear.findFirst({ where: { isCurrent: true }, select: { id: true } }));
+      if (isCurrent) await tx.academicYear.updateMany({ data: { isCurrent: false } });
       const year = await tx.academicYear
         .create({
           data: {
-            tenantId: actor.tenantId, label: dto.label, startDate: toDate(dto.startDate), endDate: toDate(dto.endDate), isCurrent: !!dto.isCurrent,
+            tenantId: actor.tenantId, label: dto.label, startDate: toDate(dto.startDate), endDate: toDate(dto.endDate), isCurrent,
             terms: { create: dto.terms.map((t, i) => ({ tenantId: actor.tenantId, name: t.name, position: i + 1, weight: t.weight ?? 1, startDate: toDate(t.startDate), endDate: toDate(t.endDate) })) },
           },
           include: { terms: true },
@@ -432,6 +478,6 @@ export class SettingsService {
   async sendCredentials(tx: Tx, actor: Actor, phone: string, password: string) {
     const tenant = await tx.tenant.findUnique({ where: { id: actor.tenantId } });
     if (!tenant) throw new NotFoundException();
-    await this.sms.send(phone, `${tenant.shortName ?? tenant.name} : votre compte est prêt. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Connectez-vous sur ${config.webOrigin}/connexion`);
+    await this.sms.send(phone, `${tenant.shortName ?? tenant.name} : votre compte est prêt. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Connectez-vous sur ${tenantOrigin(tenant)}/connexion`);
   }
 }

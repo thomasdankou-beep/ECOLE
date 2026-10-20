@@ -254,6 +254,7 @@ function settings() {
   return {
     demo: true,
     matriculePrefix: 'SKG',
+    branding: { logoKey: null, logoUrl: '/logo.png', primaryColor: null },
     public: {
       slogan: 'Éduquer · Former · Réussir',
       tagline: 'La référence de l’excellence professionnelle',
@@ -262,6 +263,8 @@ function settings() {
       highlights: ['100 % pratique', 'Garantie de stage', 'Obtention de CQM, CAP et DT'],
       reasons: ['Enseignants qualifiés', 'Formation pratique et professionnelle', 'Stages en entreprise garantis', 'Obtention du CQP, CAP et DT', 'Matériels modernes et ateliers équipés'],
       motto: 'Oser, apprendre, garantir son avenir !',
+      heroImage: '/img/electrotechnique.jpg',
+      trackImages: { F3: '/img/electrotechnique.jpg', F4: '/img/genie-civil.jpg', OG: '/img/geometre.jpg', HR: '/img/hotellerie.jpg', MMV: '/img/mode.jpg' },
     },
   };
 }

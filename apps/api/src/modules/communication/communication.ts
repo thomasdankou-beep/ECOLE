@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Injectable, NotFoundException, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Injectable, NotFoundException, Param, Post, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Audience, Prisma } from '@prisma/client';
 import { IsBoolean, IsEnum, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
@@ -6,7 +7,9 @@ import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { logoUrl, tenantSettings } from '../settings/settings.service';
 
 class AnnouncementDto {
   @IsString() @MaxLength(160) title: string;
@@ -77,19 +80,34 @@ export class CommunicationService {
 /** Informations publiques de l'établissement pour le site vitrine. */
 @Injectable()
 export class PublicService {
-  constructor(private db: PrismaService) {}
+  constructor(private db: PrismaService, private files: FilesService) {}
 
   async school(slug: string) {
     const t = await this.db.tenant.findUnique({ where: { slug } });
     if (!t) throw new NotFoundException('Établissement inconnu');
+    const s = tenantSettings(t.settings);
+    const branding = { logoUrl: logoUrl(t), primaryColor: s.branding.primaryColor };
+    if (t.status === 'SUSPENDED') return { name: t.name, shortName: t.shortName, suspended: true, branding };
     return this.db.forTenant(t.id, async (tx) => {
       const [sites, tracks, levels] = await Promise.all([
         tx.site.findMany({ where: { active: true }, select: { id: true, name: true, address: true, phone: true }, orderBy: { name: 'asc' } }),
         tx.track.findMany({ select: { code: true, name: true, cycle: true }, orderBy: { name: 'asc' } }),
         tx.level.findMany({ select: { name: true, cycle: true }, orderBy: { position: 'asc' } }),
       ]);
-      return { name: t.name, shortName: t.shortName, country: t.country, public: (t.settings as any)?.public ?? {}, sites, tracks, levels };
+      return {
+        name: t.name, shortName: t.shortName, country: t.country, suspended: false, branding,
+        /// Comptes de démonstration affichés à la connexion uniquement pour l'école de démonstration.
+        demo: (t.settings as any)?.demo === true,
+        public: (t.settings as any)?.public ?? {}, sites, tracks, levels,
+      };
     });
+  }
+
+  async logo(slug: string) {
+    const t = await this.db.tenant.findUnique({ where: { slug } });
+    const key = t && tenantSettings(t.settings).branding.logoKey;
+    if (!key) throw new NotFoundException('Aucun logo');
+    return this.files.readKey(key);
   }
 }
 
@@ -109,4 +127,14 @@ export class CommunicationController {
   @Public()
   @Get('public/:tenant')
   school(@Param('tenant') tenant: string) { return this.pub.school(tenant); }
+
+  @Public()
+  @Get('public/:tenant/logo')
+  async logo(@Param('tenant') tenant: string, @Res() res: Response) {
+    const f = await this.pub.logo(tenant);
+    res.setHeader('Content-Type', f.mime);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(f.buffer);
+  }
 }

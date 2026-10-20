@@ -1,3 +1,5 @@
+import { SchoolLogo } from '@/components/site/brand';
+
 /** Identité officielle saisie par la direction (Paramètres › Établissement). */
 export type SchoolIdentity = {
   name: string;
@@ -11,6 +13,8 @@ export type SchoolIdentity = {
   slogan: string | null;
   signatureUrl: string | null;
   stampUrl: string | null;
+  logoUrl?: string | null;
+  primaryColor?: string | null;
 };
 
 /** En-tête officiel des documents imprimés. Les mentions légales non renseignées restent signalées. */
@@ -18,7 +22,7 @@ export function Letterhead({ identity, name, site }: { identity?: SchoolIdentity
   const contact = [identity?.address, identity?.phone ? `Tél. ${identity.phone}` : null, identity?.email].filter(Boolean).join(' · ');
   return (
     <div className="flex items-center gap-4 border-b-4 border-double border-brand pb-3">
-      <img src="/logo.png" alt="" width={72} height={72} className="size-[72px] rounded-full" />
+      <SchoolLogo url={identity?.logoUrl} name={identity?.name ?? name} size={72} />
       <div className="min-w-0 flex-1">
         <p className="font-display text-2xl font-bold uppercase leading-tight text-brand">{identity?.name ?? name}</p>
         <p className="text-sm">{site ? `Site de ${site}` : ''}{site && contact ? ' · ' : ''}{contact}</p>

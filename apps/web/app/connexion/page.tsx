@@ -6,7 +6,9 @@ import { useEffect, useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 import { AuthShell } from '@/components/site/auth-shell';
 import { Button, ErrorNote, Field, Input } from '@/components/ui';
-import { publicPost, setSession, TENANT } from '@/lib/api';
+import { publicPost, setSession } from '@/lib/api';
+import { usePublicSchool } from '@/lib/public-school';
+import { tenantOrThrow } from '@/lib/tenant';
 import { useAuth } from '@/lib/auth';
 
 type LoginResult = { twoFactorRequired: true; challenge: string } | { twoFactorRequired: false; accessToken: string; mustChangePassword: boolean; mustSetupTwoFactor?: boolean };
@@ -42,7 +44,7 @@ export default function Connexion() {
     setError(null);
     try {
       if (challenge) await finish(await publicPost<LoginResult>('/auth/2fa/verify', { challenge, code: code.trim() }));
-      else await finish(await publicPost<LoginResult>('/auth/login', { tenant: TENANT, identifier: identifier.trim(), password }));
+      else await finish(await publicPost<LoginResult>('/auth/login', { tenant: await tenantOrThrow(), identifier: identifier.trim(), password }));
     } catch (err) {
       setError(err);
     } finally {
@@ -97,7 +99,9 @@ const DEMO = [
 ] as const;
 
 function DemoAccounts({ onPick }: { onPick: (id: string) => void }) {
-  if (process.env.NEXT_PUBLIC_DEMO === 'false') return null;
+  const school = usePublicSchool();
+  // Seule l'école de démonstration (réglage « demo » posé par le jeu de données) affiche ces comptes.
+  if (process.env.NEXT_PUBLIC_DEMO === 'false' || !school?.demo) return null;
   return (
     <details className="mt-5 rounded-lg bg-sunk p-3 text-sm">
       <summary className="cursor-pointer font-bold">Comptes de démonstration</summary>

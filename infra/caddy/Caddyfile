@@ -1,6 +1,19 @@
 # Point d'entrée unique : le site et l'API partagent la même origine (cookie de session « strict »).
-# Remplacez :80 par le nom de domaine de l'école pour obtenir automatiquement un certificat HTTPS.
+#
+# Une seule école : SITE_ADDRESS = son nom de domaine (ex. ecole.exemple.bj), certificat HTTPS automatique.
+# Plateforme multi-écoles : SITE_ADDRESS = https:// (toutes les adresses) et PLATFORM_DOMAIN = domaine de la plateforme.
+# Chaque école est alors servie sur <identifiant>.<domaine> ou sur son propre domaine ; le certificat n'est
+# délivré qu'aux adresses qui désignent réellement une école (vérification par l'API ci-dessous).
+{
+	on_demand_tls {
+		ask http://api:4000/api/v1/platform/tls-check
+	}
+}
+
 {$SITE_ADDRESS::80} {
+	tls {
+		on_demand
+	}
 	encode zstd gzip
 	handle /api/* {
 		reverse_proxy api:4000

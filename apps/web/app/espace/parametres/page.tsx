@@ -8,12 +8,14 @@ import { api } from '@/lib/api';
 import { date, note } from '@/lib/format';
 import type { ClassRow } from '@/lib/types';
 import { useAction, useApi } from '@/lib/use-api';
+import { useAuth } from '@/lib/auth';
 import type { SchoolIdentity } from '@/components/print/letterhead';
 import { Coefficients } from './coefficients';
 import { Etablissement, type IdentitySettings } from './etablissement';
+import { ImageEcole, type PublicTexts } from './image';
 
 type Settings = {
-  tenant: { name: string; identity: SchoolIdentity; settings: { grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero' }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
+  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero' }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean }[];
@@ -29,17 +31,22 @@ const CYCLES: Record<string, string> = { COLLEGE: 'Collège', LYCEE_GENERAL: 'Ly
 export default function Parametres() {
   const q = useApi<Settings>('/settings');
   const [tab, setTab] = useState('etablissement');
+  useEffect(() => {
+    const r = new URLSearchParams(window.location.search).get('rubrique');
+    if (r) setTab(r);
+  }, []);
   return (
     <>
-      <PageHeader title="Paramètres" subtitle="Tout ce que l’école renseigne elle-même : identité officielle, classes, matières et coefficients, salles et ateliers, année, règles des bulletins." />
+      <PageHeader title="Paramètres" subtitle="Tout ce que l’école renseigne elle-même : identité officielle, logo et site public, classes, matières et coefficients, salles et ateliers, année, règles des bulletins." />
       <Chips label="Rubrique" value={tab} onChange={setTab} options={[
-        { value: 'etablissement', label: 'Établissement' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
+        { value: 'etablissement', label: 'Établissement' }, { value: 'image', label: 'Logo et site public' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
         { value: 'structure', label: 'Sites, salles, matières' }, { value: 'annee', label: 'Année et périodes' }, { value: 'regles', label: 'Mentions et règles' },
       ]} />
       <Loader {...q}>
         {(s) => (
           <>
             {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} reload={q.reload} />}
+            {tab === 'image' && <ImageEcole name={s.tenant.name} shortName={s.tenant.shortName} logoUrl={s.tenant.identity.logoUrl} primaryColor={s.tenant.settings.branding.primaryColor} texts={s.tenant.settings.public ?? {}} reload={q.reload} />}
             {tab === 'classes' && <Classes s={s} />}
             {tab === 'coefficients' && <Coefficients subjects={s.subjects} />}
             {tab === 'structure' && <Structure s={s} reload={q.reload} />}
@@ -287,7 +294,10 @@ function RefDialog({ edit, setEdit, sites, done }: { edit: RefEdit; setEdit: (e:
   );
 }
 
-function Year({ s, reload }: { s: Settings; reload: () => void }) {
+function Year({ s, reload: reloadSettings }: { s: Settings; reload: () => void }) {
+  const auth = useAuth();
+  // L'année en cours figure aussi dans l'en-tête de l'espace : on la relit après chaque changement.
+  const reload = () => { reloadSettings(); auth.reload(); };
   const toast = useToast();
   const { busy, run } = useAction();
   const [f, setF] = useState({ label: '', startDate: '', endDate: '', terms: [{ name: 'Trimestre 1', startDate: '', endDate: '' }, { name: 'Trimestre 2', startDate: '', endDate: '' }, { name: 'Trimestre 3', startDate: '', endDate: '' }] });

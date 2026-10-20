@@ -44,6 +44,8 @@ services:
       CINETPAY_SITE_ID: ${CINETPAY_SITE_ID:-}
       CINETPAY_SECRET_KEY: ${CINETPAY_SECRET_KEY:-}
       SMS_PROVIDER: ${SMS_PROVIDER:-console}
+      TENANT_SLUG: ${TENANT_SLUG-saint-kisito}
+      PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
       STORAGE_DIR: /repo/apps/api/storage
     volumes:
       - uploads:/repo/apps/api/storage
@@ -54,7 +56,7 @@ services:
       dockerfile: apps/web/Dockerfile
       args:
         API_URL: http://api:4000
-        NEXT_PUBLIC_TENANT: ${TENANT_SLUG:-saint-kisito}
+        NEXT_PUBLIC_TENANT: ${TENANT_SLUG-saint-kisito}
         NEXT_PUBLIC_DEMO: ${SHOW_DEMO_ACCOUNTS:-true}
     restart: unless-stopped
     depends_on: [api]

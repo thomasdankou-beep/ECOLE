@@ -66,7 +66,7 @@ export class SandboxProvider implements PaymentProvider {
   async initiate(input: InitiateInput): Promise<InitiateResult> {
     SandboxProvider.amounts.set(input.transactionId, input.amount);
     return {
-      checkoutUrl: `${config.webOrigin}/paiement/simulation/${encodeURIComponent(input.transactionId)}`,
+      checkoutUrl: `/paiement/simulation/${encodeURIComponent(input.transactionId)}`,
       instructions: `Validez le paiement de ${input.amount} FCFA sur votre téléphone (${input.operator ?? 'Mobile Money'}).`,
       providerRef: `SBX-${input.transactionId.slice(-8)}`,
     };

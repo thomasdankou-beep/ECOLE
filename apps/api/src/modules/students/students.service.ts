@@ -84,7 +84,7 @@ export class StudentsService {
 
     const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
     const year = await tx.academicYear.findUniqueOrThrow({ where: { id: yearId } });
-    const prefix = ((tenant.settings as any)?.matriculePrefix as string) ?? 'SKG';
+    const prefix = ((tenant.settings as any)?.matriculePrefix as string) || tenant.slug.replace(/[^a-z]/gi, '').slice(0, 3).toUpperCase() || 'ELV';
     const yy = String(year.startDate.getUTCFullYear()).slice(2);
     const matricule = `${prefix}-${yy}-${pad(await nextNumber(tx, actor.tenantId, `matricule-${yy}`), 4)}`;
 

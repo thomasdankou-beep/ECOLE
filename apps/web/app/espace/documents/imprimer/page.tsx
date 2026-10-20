@@ -1,5 +1,6 @@
 'use client';
 
+import { SchoolLogo } from '@/components/site/brand';
 import { useSearchParams } from 'next/navigation';
 import { Printer } from 'lucide-react';
 import { Loader } from '@/components/espace/bits';
@@ -20,7 +21,7 @@ export default function ImprimerDocuments() {
       <Loader {...q}>
         {({ tenant, identity, documents }) => (
           <div className="grid gap-6 print:block">
-            {documents.map((d) => d.kind === 'CARTE_SCOLAIRE' ? <Card key={d.id} d={d} school={tenant.name} /> : <Letter key={d.id} d={d} identity={identity} />)}
+            {documents.map((d) => d.kind === 'CARTE_SCOLAIRE' ? <Card key={d.id} d={d} school={tenant.name} logo={identity.logoUrl} /> : <Letter key={d.id} d={d} identity={identity} />)}
           </div>
         )}
       </Loader>
@@ -59,12 +60,12 @@ function Letter({ d, identity }: { d: Doc; identity: SchoolIdentity }) {
   );
 }
 
-function Card({ d, school }: { d: Doc; school: string }) {
+function Card({ d, school, logo }: { d: Doc; school: string; logo?: string | null }) {
   const s = d.data.student;
   return (
     <article className="mx-auto w-[86mm] overflow-hidden rounded-xl border-2 border-brand bg-white text-black print:mb-4 print:break-inside-avoid">
       <div className="flex items-center gap-2 bg-brand px-3 py-2 text-white">
-        <img src="/logo.png" alt="" width={32} height={32} className="size-8 rounded-full bg-white" />
+        <SchoolLogo url={logo} name={school} size={32} className="bg-white" />
         <div className="leading-tight">
           <p className="font-display text-sm font-bold uppercase">{school}</p>
           <p className="text-[10px]">Carte scolaire {d.data.year}</p>

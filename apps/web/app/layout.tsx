@@ -9,8 +9,8 @@ const barlow = Barlow_Condensed({ subsets: ['latin'], weight: ['500', '600', '70
 const nunito = Nunito_Sans({ subsets: ['latin'], variable: '--font-nunito', display: 'swap' });
 
 export const metadata: Metadata = {
-  title: { default: 'Lycée privé Saint Kisito-GESA', template: '%s · Saint Kisito-GESA' },
-  description: 'Lycée privé Saint Kisito-GESA : collège général et lycée technique. Éduquer · Former · Réussir.',
+  title: { default: 'Espace école', template: '%s · Espace école' },
+  description: 'Notes, absences, emploi du temps, frais scolaires et paiement Mobile Money.',
   manifest: '/manifest.webmanifest',
   icons: { icon: '/favicon.png', apple: '/icon-192.png' },
 };

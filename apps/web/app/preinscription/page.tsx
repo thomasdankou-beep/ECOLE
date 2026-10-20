@@ -5,7 +5,8 @@ import { useEffect, useState } from 'react';
 import { CheckCircle2 } from 'lucide-react';
 import { SiteFooter, SiteHeader } from '@/components/site/chrome';
 import { Button, Card, ErrorNote, Field, Input, Select, Textarea } from '@/components/ui';
-import { publicGet, publicPost, TENANT } from '@/lib/api';
+import { publicGet, publicPost } from '@/lib/api';
+import { tenantOrThrow } from '@/lib/tenant';
 
 type School = { sites: { name: string }[]; tracks: { name: string; cycle: string }[]; levels: { name: string; cycle: string }[] };
 
@@ -17,7 +18,7 @@ export default function Preinscription() {
   const [reference, setReference] = useState<string | null>(null);
 
   useEffect(() => {
-    publicGet<School>(`/public/${TENANT}`).then(setSchool).catch(setError);
+    tenantOrThrow().then((t) => publicGet<School>(`/public/${t}`)).then(setSchool).catch(setError);
   }, []);
 
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => setF({ ...f, [k]: e.target.value });
@@ -28,7 +29,7 @@ export default function Preinscription() {
     setError(null);
     try {
       const body = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== ''));
-      const r = await publicPost<{ reference: string }>(`/public/${TENANT}/applications`, body);
+      const r = await publicPost<{ reference: string }>(`/public/${await tenantOrThrow()}/applications`, body);
       setReference(r.reference);
       window.scrollTo({ top: 0 });
     } catch (err) {

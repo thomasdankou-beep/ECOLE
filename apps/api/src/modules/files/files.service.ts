@@ -46,6 +46,15 @@ export class FilesService {
     return `/api/v1/files?key=${encodeURIComponent(key)}&exp=${exp}&sig=${this.sign(key, exp)}`;
   }
 
+  /** Lecture directe d'un fichier déjà autorisé par l'appelant (logo public d'une école). */
+  async readKey(key: string) {
+    const path = normalize(join(this.root, key));
+    if (!path.startsWith(normalize(this.root))) throw new NotFoundException();
+    const ext = key.split('.').pop()!;
+    const mime = Object.entries(ALLOWED).find(([, v]) => v === ext)?.[0] ?? 'application/octet-stream';
+    return { buffer: await fs.readFile(path).catch(() => { throw new NotFoundException(); }), mime };
+  }
+
   async read(key: string, exp: string, sig: string) {
     const e = Number(exp);
     const expected = this.sign(key, e);

@@ -64,7 +64,9 @@ export function Etablissement({ settings, identity, reload }: { settings: Identi
   );
 }
 
-function ImageSlot({ kind, label, url, onChange }: { kind: 'signature' | 'stamp'; label: string; url: string | null; onChange: () => void }) {
+const DONE = { signature: ['Signature enregistrée', 'Signature retirée'], stamp: ['Cachet enregistré', 'Cachet retiré'], logo: ['Logo enregistré', 'Logo retiré'] } as const;
+
+export function ImageSlot({ kind, label, url, onChange, removable = true }: { kind: 'signature' | 'stamp' | 'logo'; label: string; url: string | null | undefined; onChange: () => void; removable?: boolean }) {
   const toast = useToast();
   const { busy, run } = useAction();
   const input = useRef<HTMLInputElement>(null);
@@ -80,11 +82,11 @@ function ImageSlot({ kind, label, url, onChange }: { kind: 'signature' | 'stamp'
         if (!file) return;
         const body = new FormData();
         body.append('file', file);
-        if (await run(() => api.post(`/settings/identity/${kind}`, body), toast, kind === 'stamp' ? 'Cachet enregistré' : 'Signature enregistrée')) onChange();
+        if (await run(() => api.post(`/settings/identity/${kind}`, body), toast, DONE[kind][0])) onChange();
       }} />
       <div className="flex gap-2">
         <Button type="button" size="sm" variant="outline" loading={busy} onClick={() => input.current?.click()}><ImageUp className="size-4" /> {url ? 'Remplacer' : 'Envoyer'}</Button>
-        {url && <Button type="button" size="sm" variant="ghost" aria-label={kind === 'stamp' ? 'Retirer le cachet' : 'Retirer la signature'} onClick={async () => { if (await run(() => api.del(`/settings/identity/${kind}`), toast, kind === 'stamp' ? 'Cachet retiré' : 'Signature retirée')) onChange(); }}><Trash2 className="size-4" /></Button>}
+        {url && removable && <Button type="button" size="sm" variant="ghost" aria-label={`Retirer : ${label.toLowerCase()}`} onClick={async () => { if (await run(() => api.del(`/settings/identity/${kind}`), toast, DONE[kind][1])) onChange(); }}><Trash2 className="size-4" /></Button>}
       </div>
     </div>
   );
