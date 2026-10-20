@@ -1,20 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
 import { ArrowRight, BadgeCheck, CalendarDays, CreditCard, GraduationCap, MapPin, MessageSquareText, Phone, Wrench } from 'lucide-react';
 import { SiteFooter, SiteHeader, SCHOOL } from '@/components/site/chrome';
-import { publicGet, TENANT } from '@/lib/api';
+import { siteList, usePublicSchool, type PublicSchool } from '@/lib/public-school';
 import { date } from '@/lib/format';
 
-type School = {
-  name: string;
-  public: { slogan?: string; tagline?: string; phone?: string; rentree?: string; highlights?: string[]; reasons?: string[]; motto?: string };
-  sites: { id: string; name: string; address: string | null; phone: string | null }[];
-  tracks: { code: string; name: string; cycle: string }[];
-};
+type School = PublicSchool;
 
-/* Contenu repris des affiches de l'école ; remplacé par les réglages publics de l'API dès qu'ils sont chargés. */
+/* Textes repris des affiches de l'école, remplacés par les réglages publics de l'API dès qu'ils sont chargés. Les sites viennent toujours de la base. */
 const FALLBACK: School = {
   name: SCHOOL.name,
   public: {
@@ -26,10 +20,7 @@ const FALLBACK: School = {
     reasons: ['Enseignants qualifiés', 'Formation pratique et professionnelle', 'Stages en entreprise garantis', 'Obtention du CQP, CAP et DT', 'Matériels modernes et ateliers équipés'],
     motto: 'Oser, apprendre, garantir son avenir !',
   },
-  sites: [
-    { id: 'h', name: 'Hêdomey', address: 'Hêdomey Carrefour, 2e von à gauche après le carrefour', phone: SCHOOL.phone },
-    { id: 't', name: 'Togbin', address: 'Togbin Kpèvi, immeuble Kpondjou', phone: SCHOOL.phone },
-  ],
+  sites: [],
   tracks: [],
 };
 
@@ -45,10 +36,8 @@ const TRACKS_FALLBACK = [
 ];
 
 export default function Home() {
-  const [s, setS] = useState<School>(FALLBACK);
-  useEffect(() => {
-    publicGet<School>(`/public/${TENANT}`).then((d) => setS({ ...FALLBACK, ...d, public: { ...FALLBACK.public, ...d.public } })).catch(() => {});
-  }, []);
+  const d = usePublicSchool();
+  const s: School = d ? { ...FALLBACK, ...d, public: { ...FALLBACK.public, ...d.public } } : FALLBACK;
   const p = s.public;
   const tech = s.tracks.filter((t) => t.cycle === 'LYCEE_TECHNIQUE');
   const tracks = [...(tech.length ? tech : TRACKS_FALLBACK)].sort((a, b) => Number(!TRACK_IMG[a.code]) - Number(!TRACK_IMG[b.code]));
@@ -73,7 +62,7 @@ export default function Home() {
                 Lycée privé <span className="text-yellow">Saint Kisito</span>-GESA
               </h1>
               <p className="mt-3 text-xl font-bold text-orange">{p.tagline}</p>
-              <p className="mt-2 max-w-xl text-lg opacity-90">Collège général de la 6e à la 3e et lycée technique sur deux sites, Hêdomey et Togbin.</p>
+              <p className="mt-2 max-w-xl text-lg opacity-90">Collège général de la 6e à la 3e et lycée technique{s.sites.length > 1 ? ` sur ${["", "un", "deux", "trois", "quatre", "cinq"][s.sites.length] ?? s.sites.length} sites, ${siteList(s.sites.map((x) => x.name))}` : s.sites.length === 1 ? ` à ${s.sites[0].name}` : ''}.</p>
               <div className="mt-6 flex flex-wrap gap-3">
                 <Link href="/preinscription" className="inline-flex min-h-12 items-center gap-2 rounded-lg bg-orange px-5 font-extrabold text-[#1b1206] hover:brightness-95">
                   Pré-inscrire mon enfant <ArrowRight className="size-5" />
@@ -170,7 +159,7 @@ export default function Home() {
 
         {/* Sites */}
         <section id="sites" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
-          <h2 className="text-4xl font-bold">Nos deux sites</h2>
+          <h2 className="text-4xl font-bold">{s.sites.length === 1 ? "Notre site" : "Nos sites"}</h2>
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
             {s.sites.map((site) => (
               <div key={site.id} className="rounded-xl border border-line bg-surface p-5">

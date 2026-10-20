@@ -322,6 +322,18 @@ describe('Paramétrage par la direction', () => {
     expect((await as('secretariat').patch('/settings', { settings: { identity: { headName: 'Pirate' } } })).status).toBe(403);
   });
 
+  it('un site modifié ou désactivé par la direction se reflète sur la page publique', async () => {
+    const site = (await as('direction').get('/settings')).body.sites[0];
+    const r = await as('direction').patch(`/sites/${site.id}`, { name: site.name, address: 'Adresse de test', active: false });
+    expect(r.status).toBe(200);
+    let pub = (await http.get('/api/v1/public/saint-kisito')).body;
+    expect(pub.sites.find((x: any) => x.id === site.id)).toBeUndefined();
+    await as('direction').patch(`/sites/${site.id}`, { name: site.name, address: site.address ?? undefined, active: true }).expect(200);
+    pub = (await http.get('/api/v1/public/saint-kisito')).body;
+    expect(pub.sites.find((x: any) => x.id === site.id)).toBeTruthy();
+    expect((await as('secretariat').patch(`/sites/${site.id}`, { name: 'Pirate' })).status).toBe(403);
+  });
+
   it('la grille des frais crée un frais par niveau et filière, puis le désactive', async () => {
     const s = await as('direction').get('/settings');
     const level = s.body.levels[0];

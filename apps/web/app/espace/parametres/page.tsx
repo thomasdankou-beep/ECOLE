@@ -67,7 +67,7 @@ function Classes({ s }: { s: Settings }) {
 
   return (
     <>
-      <div><Button onClick={() => setEdit({ name: '', siteId: s.sites[0]?.id, levelId: s.levels[0]?.id, trackId: '', capacity: 40, headTeacherId: '' })}><Plus className="size-4" /> Nouvelle classe</Button></div>
+      <div><Button onClick={() => setEdit({ name: '', siteId: s.sites.find((x) => x.active)?.id, levelId: s.levels[0]?.id, trackId: '', capacity: 40, headTeacherId: '' })}><Plus className="size-4" /> Nouvelle classe</Button></div>
       <Card>
         <Loader {...classes}>
           {(rows) => rows.length === 0 ? <Empty title="Aucune classe" /> : (
@@ -102,7 +102,7 @@ function Classes({ s }: { s: Settings }) {
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Nom"><Input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} required placeholder="Ex. 2e année F4" /></Field>
                 <Field label="Capacité"><Input type="number" min={1} value={edit.capacity} onChange={(e) => setEdit({ ...edit, capacity: e.target.value })} /></Field>
-                <Field label="Site"><Select value={edit.siteId} onChange={(e) => setEdit({ ...edit, siteId: e.target.value })}>{s.sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>
+                <Field label="Site"><Select value={edit.siteId} onChange={(e) => setEdit({ ...edit, siteId: e.target.value })}>{s.sites.filter((x) => x.active || x.id === edit.siteId).map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>
                 <Field label="Niveau"><Select value={edit.levelId} onChange={(e) => setEdit({ ...edit, levelId: e.target.value })}>{s.levels.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>
                 <Field label="Filière"><Select value={edit.trackId} onChange={(e) => setEdit({ ...edit, trackId: e.target.value })}><option value="">Aucune</option>{s.tracks.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>
                 <Field label="Professeur principal"><Select value={edit.headTeacherId} onChange={(e) => setEdit({ ...edit, headTeacherId: e.target.value })}><option value="">Aucun</option>{teachers.map((t) => <option key={t.id} value={t.id}>{t.lastName} {t.firstName}</option>)}</Select></Field>
@@ -156,6 +156,7 @@ function ClassSubjects({ klass, subjects, teachers, onChange }: { klass: ClassRo
 }
 
 type RefEdit =
+  | { kind: 'site'; id: string; name: string; address: string; phone: string; active: boolean }
   | { kind: 'level'; id: string; name: string; cycle: string; position: number }
   | { kind: 'track'; id: string; code: string; name: string; cycle: string }
   | { kind: 'room'; id: string; name: string; siteId: string; roomKind: RoomKind; capacity: number | string | null }
@@ -176,7 +177,13 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Section title="Sites">
-        <ul className="mb-3 grid gap-1.5">{s.sites.map((x) => <li key={x.id} className="rounded-lg bg-sunk px-3 py-2"><b>{x.name}</b>{!x.active && <Badge className="ml-2">Inactif</Badge>}<span className="block text-sm text-muted">{x.address}{x.phone ? ` · ${x.phone}` : ''}</span></li>)}</ul>
+        <p className="mb-2 text-sm text-muted">Les sites actifs sont affichés sur la page d’accueil publique de l’école.</p>
+        <ul className="mb-3 grid gap-1.5">{s.sites.map((x) => (
+          <li key={x.id} className="flex items-start justify-between gap-2 rounded-lg bg-sunk px-3 py-2">
+            <span><b>{x.name}</b>{!x.active && <Badge className="ml-2">Inactif</Badge>}<span className="block text-sm text-muted">{x.address}{x.phone ? ` · ${x.phone}` : ''}</span></span>
+            <Button size="sm" variant="ghost" onClick={() => setEdit({ kind: 'site', id: x.id, name: x.name, address: x.address ?? '', phone: x.phone ?? '', active: x.active })}>Modifier</Button>
+          </li>
+        ))}</ul>
         <form className="grid gap-2" onSubmit={(e) => { e.preventDefault(); post('/sites', { name: site.name, address: site.address || undefined, phone: site.phone || undefined }, 'Site ajouté', () => setSite({ name: '', address: '', phone: '' })); }}>
           <div className="grid grid-cols-2 gap-2"><Input placeholder="Nom du site" value={site.name} onChange={(e) => setSite({ ...site, name: e.target.value })} required /><Input placeholder="Téléphone" value={site.phone} onChange={(e) => setSite({ ...site, phone: e.target.value })} /></div>
           <Input placeholder="Adresse" value={site.address} onChange={(e) => setSite({ ...site, address: e.target.value })} />
@@ -236,20 +243,29 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
 function RefDialog({ edit, setEdit, sites, done }: { edit: RefEdit; setEdit: (e: RefEdit) => void; sites: Settings['sites']; done: () => void }) {
   const toast = useToast();
   const { busy, run } = useAction();
-  const titles = { level: 'Modifier le niveau', track: 'Modifier la filière', room: 'Modifier la salle', subject: 'Modifier la matière' };
+  const titles = { site: 'Modifier le site', level: 'Modifier le niveau', track: 'Modifier la filière', room: 'Modifier la salle', subject: 'Modifier la matière' };
   const save = async () => {
     const body =
-      edit.kind === 'level' ? { name: edit.name, cycle: edit.cycle, position: Number(edit.position) }
+      edit.kind === 'site' ? { name: edit.name, address: edit.address || undefined, phone: edit.phone || undefined, active: edit.active }
+      : edit.kind === 'level' ? { name: edit.name, cycle: edit.cycle, position: Number(edit.position) }
       : edit.kind === 'track' ? { code: edit.code, name: edit.name, cycle: edit.cycle }
       : edit.kind === 'room' ? { name: edit.name, siteId: edit.siteId, kind: edit.roomKind, capacity: edit.capacity ? Number(edit.capacity) : null }
       : { code: edit.code, name: edit.name, practical: edit.practical };
-    if (await run(() => api.patch(`/${edit.kind === 'level' ? 'levels' : edit.kind === 'track' ? 'tracks' : edit.kind === 'room' ? 'rooms' : 'subjects'}/${edit.id}`, body), toast, 'Modification enregistrée')) done();
+    if (await run(() => api.patch(`/${edit.kind === 'site' ? 'sites' : edit.kind === 'level' ? 'levels' : edit.kind === 'track' ? 'tracks' : edit.kind === 'room' ? 'rooms' : 'subjects'}/${edit.id}`, body), toast, 'Modification enregistrée')) done();
   };
   return (
     <DialogContent title={titles[edit.kind]}>
       <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); save(); }}>
         {'code' in edit && <Field label="Code"><Input value={edit.code} onChange={(e) => setEdit({ ...edit, code: e.target.value })} required /></Field>}
         <Field label="Nom"><Input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} required /></Field>
+        {edit.kind === 'site' && (
+          <>
+            <Field label="Adresse"><Input value={edit.address} onChange={(e) => setEdit({ ...edit, address: e.target.value })} maxLength={300} /></Field>
+            <Field label="Téléphone"><Input value={edit.phone} onChange={(e) => setEdit({ ...edit, phone: e.target.value })} maxLength={40} /></Field>
+            <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={edit.active} onChange={(e) => setEdit({ ...edit, active: e.target.checked })} /> Site actif</label>
+            {!edit.active && <p className="text-sm text-muted">Un site inactif n’apparaît plus sur la page d’accueil ni dans le choix du site d’une nouvelle classe. Ses classes, salles et élèves sont conservés.</p>}
+          </>
+        )}
         {(edit.kind === 'level' || edit.kind === 'track') && (
           <Field label="Cycle"><Select value={edit.cycle} onChange={(e) => setEdit({ ...edit, cycle: e.target.value })}>{Object.entries(CYCLES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select></Field>
         )}
