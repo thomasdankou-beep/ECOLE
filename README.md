@@ -8,8 +8,8 @@ Pensée pour le terrain : téléphone Android d’abord, réseau 3G/4G instable,
 
 | Espace | Écrans |
 | --- | --- |
-| Site public | Accueil de l’école (contenu des affiches), filières, sites, pré-inscription en ligne, vérification d’un document par QR code |
-| Direction | Tableau de bord par site, élèves, pré-inscriptions, emploi du temps (ajout, déplacement, annulation avec contrôle des conflits et notification), bulletins (validation et publication), assiduité, discipline (validation), finances, frais et tarifs (grille par niveau et filière), stages en entreprise et travaux d’atelier, documents, personnel et rôles, paramètres (identité officielle, signature et cachet, classes, coefficients, salles et ateliers, mentions), journal d’audit |
+| Site public | Accueil de l’école (nom, logo, couleur et textes saisis par l’école), filières, sites, pré-inscription en ligne, vérification d’un document par QR code |
+| Direction | Tableau de bord par site, élèves, pré-inscriptions, emploi du temps (ajout, déplacement, annulation avec contrôle des conflits et notification), bulletins (validation et publication), assiduité, discipline (validation), finances, frais et tarifs (grille par niveau et filière), stages en entreprise et travaux d’atelier, documents, personnel et rôles, paramètres (identité officielle, signature et cachet, logo, couleur et textes du site public, classes, coefficients, salles et ateliers, mentions), journal d’audit |
 | Secrétariat | Inscription complète en une fois (élève, parents, comptes, factures), pré-inscriptions, dossiers élèves, documents officiels en lot |
 | Enseignant | Cours du jour, appel en quelques touches, saisie des notes et appréciations, publication aux familles, cahier de texte et devoirs, conseil de classe (professeur principal), proposition de sanction |
 | Vie scolaire | Absences du jour, justificatifs à examiner, appel, sanctions |
@@ -17,9 +17,22 @@ Pensée pour le terrain : téléphone Android d’abord, réseau 3G/4G instable,
 | Parent | Enfant suivi (plusieurs enfants), notes, bulletins, absences et justification avec photo, devoirs, emploi du temps, frais et **paiement Mobile Money**, reçus, documents |
 | Élève | Notes, bulletins, emploi du temps, devoirs, absences, documents |
 
+| Plateforme (Super Admin) | Création d’une école avec son adresse et son premier compte Direction, liste des écoles avec leur activité, suspension et réactivation, nouveau mot de passe Direction, journal des actions |
+
 Documents imprimables (format A4, QR code vérifiable) : bulletin, reçu, certificat de scolarité, attestations d’inscription et de paiement, carte scolaire.
 
 Sécurité : isolation des écoles par Row Level Security PostgreSQL, mots de passe argon2id, session courte avec renouvellement par cookie httpOnly, verrouillage après 5 échecs, double authentification (TOTP), droits par rôle et par site, notes et paiements jamais supprimés, journal d’audit en ajout seul.
+
+## Vendre le logiciel à d’autres écoles (plateforme multi-écoles)
+
+Un seul serveur sert toutes les écoles clientes. Chaque école a sa propre adresse (`<identifiant>.<domaine de la plateforme>`, ou son propre nom de domaine), ses données séparées par la Row Level Security, et saisit elle-même son nom, son logo, sa couleur et les textes de son site.
+
+1. Dans `.env` : `PLATFORM_DOMAIN=` le domaine de la plateforme, `SITE_ADDRESS=https://`, `TENANT_SLUG=` vide, `SHOW_DEMO_ACCOUNTS=false`. Le DNS doit envoyer `*.<domaine>` vers le serveur ; Caddy obtient un certificat HTTPS pour chaque école réelle, et seulement pour elles.
+2. Créer le premier compte Super Admin (le mot de passe provisoire s’affiche une seule fois) :
+   `docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`
+3. Se connecter sur `https://<domaine>/plateforme/connexion`, choisir son mot de passe, puis « Nouvelle école ». Le chef d’établissement reçoit son mot de passe provisoire par SMS et l’écran l’affiche une fois.
+
+Sans `PLATFORM_DOMAIN`, l’installation sert une seule école (`TENANT_SLUG`), comme avant. Le domaine de la plateforme et la tarification des abonnements restent à décider (voir INFORMATION MANQUANTE).
 
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
@@ -80,7 +93,7 @@ npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 35 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins)
+npm test            # 43 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins, plateforme)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).
@@ -109,7 +122,7 @@ Ces choix suivent les recommandations de l’analyse (phase 1). Ils restent modi
 | --- | --- | --- |
 | D1 | Périmètre d’un établissement | Un groupe scolaire avec ses sites (Hêdomey et Togbin dans le même espace) |
 | D2 | Périmètre du MVP | MVP resserré : inscriptions, vie scolaire, notes et bulletins, finances, communication |
-| D3 | Administration de la plateforme | Plateforme Super Admin séparée, **non construite dans cette version** |
+| D3 | Administration de la plateforme | Plateforme unique avec espace Super Admin (`/plateforme`), une adresse par école |
 | D4 | Mobile | Application web installable (PWA) d’abord ; application Expo plus tard |
 | D5 | Authentification | Interne à l’API NestJS (pas de service externe) |
 | D6 | Hors ligne | Prévu en V1.1 (le service worker met déjà en cache l’enveloppe du site) |
@@ -128,6 +141,7 @@ Rien de ce qui suit n’a été inventé. Ces points sont signalés dans le code
 | Seuils des mentions et libellés | Paramètres › Mentions et règles |
 | Classes, enseignants, salles et ateliers, emploi du temps | Paramètres › Classes et matières, Sites, salles, matières ; Personnel ; Emploi du temps |
 | Numéro d’autorisation, mentions légales, nom, signature et cachet du chef d’établissement | Paramètres › Établissement (imprimés sur bulletins, reçus et attestations) |
+| Nom de l’école, logo, couleur, textes du site public | Paramètres › Logo et site public |
 | Organisation des stages en entreprise et des travaux d’atelier | Stages et ateliers |
 
 **À fournir pour brancher les services externes** :
@@ -135,13 +149,14 @@ Rien de ce qui suit n’a été inventé. Ces points sont signalés dans le code
 1. **Prestataire Mobile Money** : contrat et identifiants (CinetPay, PayDunya ou autre). En attendant : mode test.
 2. **Fournisseur SMS** et nom d’expéditeur. En attendant : les SMS sont écrits dans le journal de l’API.
 3. **Facturation normalisée e-MECeF** (DGI Bénin) : identifiants et raccordement ; les reçus actuels sont non fiscaux.
-4. Nom de domaine et hébergement de production.
+4. Nom de domaine de la plateforme (et des écoles qui ont le leur) et hébergement de production.
+5. Tarifs et facturation des abonnements des écoles clientes : non construits, à définir avant la vente.
 
 ## Prochaines étapes proposées
 
 - Validation des écrans par l’école sur des téléphones réels, puis saisie des vraies données.
 - Branchement du prestataire de paiement et du fournisseur SMS dès que les contrats existent.
-- V1.1 : mode hors ligne (appel et notes), plateforme Super Admin, PDF serveur, e-MECeF, application mobile.
+- V1.1 : mode hors ligne (appel et notes), facturation des abonnements, PDF serveur, e-MECeF, application mobile.
 
 ## Conventions
 

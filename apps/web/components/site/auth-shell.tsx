@@ -1,15 +1,21 @@
+'use client';
+
 import Link from 'next/link';
+import { usePublicSchool } from '@/lib/public-school';
+import { BrandStyle, SchoolLogo } from './brand';
 
 /** Mise en page des écrans publics courts (connexion, mot de passe, vérification). */
 export function AuthShell({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+  const school = usePublicSchool();
   return (
     <main className="grid min-h-dvh place-items-center px-4 py-10">
+      <BrandStyle color={school?.branding.primaryColor} />
       <div className="w-full max-w-md">
-        <Link href="/" className="mb-6 flex items-center justify-center gap-3">
-          <img src="/logo.png" alt="" width={56} height={56} className="size-14 rounded-full" />
+        <Link href="/" className="mb-6 flex min-h-14 items-center justify-center gap-3">
+          {school && <SchoolLogo url={school.branding.logoUrl} name={school.shortName ?? school.name} size={56} />}
           <span className="font-display text-2xl font-bold leading-none text-brand">
-            Saint Kisito-GESA
-            <span className="block text-sm font-semibold tracking-wide text-muted">Éduquer · Former · Réussir</span>
+            {school?.shortName ?? school?.name}
+            {school?.public.slogan && <span className="block text-sm font-semibold tracking-wide text-muted">{school.public.slogan}</span>}
           </span>
         </Link>
         <div className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-6">

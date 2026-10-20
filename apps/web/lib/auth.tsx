@@ -8,7 +8,7 @@ export type Role = 'DIRECTION' | 'SECRETARIAT' | 'ENSEIGNANT' | 'VIE_SCOLAIRE' |
 export type Child = { id: string; firstName: string; lastName: string; className: string | null };
 export type Me = {
   user: { id: string; firstName: string; lastName: string; phone: string; email: string | null; totpEnabled: boolean; mustChangePassword: boolean; roles: { role: Role; siteId: string | null }[] };
-  tenant: { id: string; slug: string; name: string; shortName: string | null; country: string; currency: string };
+  tenant: { id: string; slug: string; name: string; shortName: string | null; country: string; currency: string; logoUrl: string | null; primaryColor: string | null };
   sites: { id: string; name: string }[];
   year: { id: string; label: string } | null;
   children: Child[];

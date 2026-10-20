@@ -5,6 +5,7 @@ import * as argon2 from 'argon2';
 import { createHash, randomBytes, randomInt } from 'crypto';
 import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
+import { logoUrl, tenantSettings } from '../settings/settings.service';
 import { config } from '../../config';
 import { AccessTokenPayload, Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
@@ -60,6 +61,7 @@ export class AuthService {
   async tenantBySlug(slug: string) {
     const t = await this.db.tenant.findUnique({ where: { slug } });
     if (!t) throw new UnauthorizedException('Établissement inconnu');
+    if (t.status === 'SUSPENDED') throw new ForbiddenException('Cet établissement est suspendu. Contactez l’éditeur de la plateforme.');
     return t;
   }
 
@@ -175,6 +177,8 @@ export class AuthService {
     return settle(this.db.forTenant(tenantId, async (tx) => {
       const s = await tx.session.findUnique({ where: { id: sessionId }, include: { user: { include: { roles: true } } } });
       if (!s || s.revokedAt || s.expiresAt < new Date() || s.user.status !== 'ACTIVE') throw new UnauthorizedException('Session expirée');
+      const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { status: true } });
+      if (tenant?.status !== 'ACTIVE') throw new ForbiddenException('Cet établissement est suspendu. Contactez l’éditeur de la plateforme.');
       if (s.refreshTokenHash !== sha256(token)) {
         await tx.session.update({ where: { id: s.id }, data: { revokedAt: new Date() } });
         await this.audit.log(tx, null, 'auth.refresh_reuse', 'Session', s.id, { tenantId, ip: meta.ip });
@@ -223,7 +227,9 @@ export class AuthService {
         where: { id: actor.userId },
         select: { id: true, firstName: true, lastName: true, phone: true, email: true, totpEnabled: true, mustChangePassword: true, roles: { select: { role: true, siteId: true } } },
       });
-      const tenant = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { id: true, slug: true, name: true, shortName: true, country: true, currency: true } });
+      const t = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { id: true, slug: true, name: true, shortName: true, country: true, currency: true, settings: true } });
+      const { settings, ...rest } = t;
+      const tenant = { ...rest, logoUrl: logoUrl(t), primaryColor: tenantSettings(settings).branding.primaryColor };
       const sites = await tx.site.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
       const year = await tx.academicYear.findFirst({ where: { isCurrent: true }, select: { id: true, label: true } });
       let children: { id: string; firstName: string; lastName: string; className: string | null }[] = [];

@@ -10,3 +10,4 @@ coverage/
 apps/api/storage/
 *.tsbuildinfo
 next-env.d.ts
+shots/

@@ -18,19 +18,63 @@ datasource db {
 
 /// Groupe scolaire client (décision D1 : un tenant = un groupe avec ses sites).
 model Tenant {
-  id        String   @id @default(uuid()) @db.Uuid
-  slug      String   @unique
-  name      String
-  shortName String?
-  country   String   @default("BJ")
-  currency  String   @default("XOF")
-  timezone  String   @default("Africa/Porto-Novo")
+  id            String       @id @default(uuid()) @db.Uuid
+  slug          String       @unique
+  name          String
+  shortName     String?
+  country       String       @default("BJ")
+  currency      String       @default("XOF")
+  timezone      String       @default("Africa/Porto-Novo")
   /// Paramètres : seuils de distinction, règles de calcul, blocage bulletin si impayé, canaux de notification...
-  settings  Json     @default("{}")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  settings      Json         @default("{}")
+  /// Suspendu par la plateforme : plus aucune connexion possible, données conservées.
+  status        TenantStatus @default(ACTIVE)
+  /// Nom de domaine propre à l'école (facultatif), en plus du sous-domaine <slug>.<domaine de la plateforme>.
+  domain        String?      @unique
+  /// Notes internes de la plateforme (contrat, contact), jamais visibles par l'école.
+  platformNotes String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   @@map("tenants")
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+// ---------------------------------------------------------------- Plateforme (éditeur du logiciel)
+
+/// Compte Super Admin de la plateforme : crée et suit les écoles clientes, sans accès à leurs données métier.
+model PlatformAdmin {
+  id           String    @id @default(uuid()) @db.Uuid
+  email        String    @unique
+  name         String
+  passwordHash String
+  active       Boolean   @default(true)
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  /// Mot de passe remis par la ligne de commande : à changer à la première connexion.
+  mustChangePassword Boolean @default(true)
+  passwordChangedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@map("platform_admins")
+}
+
+/// Journal des actions de la plateforme (création, suspension d'école…), en ajout seul.
+model PlatformAuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  adminId   String?  @db.Uuid
+  action    String
+  tenantId  String?  @db.Uuid
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("platform_audit_logs")
 }
 
 model Site {

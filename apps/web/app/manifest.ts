@@ -3,8 +3,8 @@ import type { MetadataRoute } from 'next';
 /** Application installable sur l'écran d'accueil Android (décision D4 : PWA d'abord). */
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'Saint Kisito-GESA · Espace école',
-    short_name: 'Saint Kisito',
+    name: 'Espace école',
+    short_name: 'Espace école',
     description: 'Notes, absences, emploi du temps, frais scolaires et paiement Mobile Money.',
     start_url: '/espace',
     display: 'standalone',

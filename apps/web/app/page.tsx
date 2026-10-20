@@ -2,46 +2,40 @@
 
 import Link from 'next/link';
 import { ArrowRight, BadgeCheck, CalendarDays, CreditCard, GraduationCap, MapPin, MessageSquareText, Phone, Wrench } from 'lucide-react';
-import { SiteFooter, SiteHeader, SCHOOL } from '@/components/site/chrome';
-import { siteList, usePublicSchool, type PublicSchool } from '@/lib/public-school';
+import { PlatformHome, SuspendedSchool } from '@/components/site/platform-home';
+import { SiteFooter, SiteHeader } from '@/components/site/chrome';
+import { siteList, telHref, useSchoolState } from '@/lib/public-school';
 import { date } from '@/lib/format';
 
-type School = PublicSchool;
+const COUNT = ['', 'un', 'deux', 'trois', 'quatre', 'cinq'];
 
-/* Textes repris des affiches de l'école, remplacés par les réglages publics de l'API dès qu'ils sont chargés. Les sites viennent toujours de la base. */
-const FALLBACK: School = {
-  name: SCHOOL.name,
-  public: {
-    slogan: 'Éduquer · Former · Réussir',
-    tagline: 'La référence de l’excellence professionnelle',
-    phone: SCHOOL.phone,
-    rentree: '2026-09-14',
-    highlights: ['100 % pratique', 'Garantie de stage', 'Obtention de CQM, CAP et DT'],
-    reasons: ['Enseignants qualifiés', 'Formation pratique et professionnelle', 'Stages en entreprise garantis', 'Obtention du CQP, CAP et DT', 'Matériels modernes et ateliers équipés'],
-    motto: 'Oser, apprendre, garantir son avenir !',
-  },
-  sites: [],
-  tracks: [],
-};
-
-const TRACK_IMG: Record<string, string> = { F3: '/img/electrotechnique.jpg', F4: '/img/genie-civil.jpg', OG: '/img/geometre.jpg', HR: '/img/hotellerie.jpg', MMV: '/img/mode.jpg' };
-const TRACKS_FALLBACK = [
-  { code: 'F3', name: 'Électrotechnique (F3)' },
-  { code: 'F4', name: 'Génie civil (F4)' },
-  { code: 'OG', name: 'Opérateur géomètre (OG)' },
-  { code: 'HR', name: 'Hôtellerie restauration (HR)' },
-  { code: 'MMV', name: 'Mode et vêtement (MMV)' },
-  { code: 'G2', name: 'Comptabilité gestion (G2)' },
-  { code: 'IMI', name: 'Installation et maintenance informatique (IMI)' },
-];
+/** Offre de l'école décrite d'après ses niveaux réels : « Collège général de la 6e à la 3e et lycée technique ». */
+function offer(levels: { name: string; cycle: string }[]) {
+  const by = (c: string) => levels.filter((l) => l.cycle === c).map((l) => l.name);
+  const span = (names: string[]) => (names.length > 1 ? ` de la ${names[0]} à la ${names[names.length - 1]}` : '');
+  const parts = [
+    by('MATERNELLE').length && 'Maternelle',
+    by('PRIMAIRE').length && `Primaire${by('PRIMAIRE').length > 1 ? ` du ${by('PRIMAIRE')[0]} au ${by('PRIMAIRE').at(-1)}` : ''}`,
+    by('COLLEGE').length && `Collège général${span(by('COLLEGE'))}`,
+    by('LYCEE_GENERAL').length && 'lycée général',
+    by('LYCEE_TECHNIQUE').length && 'lycée technique',
+  ].filter(Boolean) as string[];
+  const text = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} et ${parts.at(-1)}` : parts[0] ?? '';
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
 
 export default function Home() {
-  const d = usePublicSchool();
-  const s: School = d ? { ...FALLBACK, ...d, public: { ...FALLBACK.public, ...d.public } } : FALLBACK;
-  const p = s.public;
-  const tech = s.tracks.filter((t) => t.cycle === 'LYCEE_TECHNIQUE');
-  const tracks = [...(tech.length ? tech : TRACKS_FALLBACK)].sort((a, b) => Number(!TRACK_IMG[a.code]) - Number(!TRACK_IMG[b.code]));
-  const tel = `tel:+229${(p.phone ?? SCHOOL.phone).replace(/\s/g, '')}`;
+  const state = useSchoolState();
+  if (state.status === 'none') return <PlatformHome />;
+  if (state.status === 'ready' && state.school.suspended) return <SuspendedSchool name={state.school.name} />;
+  const s = state.status === 'ready' ? state.school : null;
+  const p = s?.public ?? {};
+  const sites = s?.sites ?? [];
+  const images = p.trackImages ?? {};
+  const tracks = [...(s?.tracks ?? []).filter((t) => t.cycle === 'LYCEE_TECHNIQUE')].sort((a, b) => Number(!images[a.code]) - Number(!images[b.code]));
+  const hasCollege = !!s?.levels.some((l) => l.cycle === 'COLLEGE');
+  const where = sites.length > 1 ? ` sur ${COUNT[sites.length] ?? sites.length} sites, ${siteList(sites.map((x) => x.name))}` : sites.length === 1 ? ` à ${sites[0].name}` : '';
+  const description = s ? offer(s.levels) : '';
 
   return (
     <>
@@ -49,27 +43,31 @@ export default function Home() {
       <main>
         {/* Bandeau d'accueil aux couleurs des affiches */}
         <section className="relative overflow-hidden bg-brand-strong text-white">
-          <div className="absolute inset-0 opacity-25">
-            <img src="/img/electrotechnique.jpg" alt="" className="size-full object-cover" />
-          </div>
+          {p.heroImage && (
+            <div className="absolute inset-0 opacity-25">
+              <img src={p.heroImage} alt="" className="size-full object-cover" />
+            </div>
+          )}
           <div className="absolute inset-0 bg-gradient-to-r from-[#0f2258] via-[#13296a]/90 to-transparent" />
           <div className="relative mx-auto grid max-w-6xl gap-6 px-4 py-14 sm:py-20 md:grid-cols-[1.4fr_1fr] md:items-center">
             <div>
-              <span className="inline-flex items-center gap-2 rounded-full bg-yellow px-3 py-1 text-sm font-extrabold text-[#1b1206]">
-                <CalendarDays className="size-4" /> Rentrée scolaire le {date(p.rentree, { day: 'numeric', month: 'long', year: 'numeric' })}
-              </span>
-              <h1 className="mt-4 text-[44px] font-bold uppercase leading-[0.95] sm:text-6xl">
-                Lycée privé <span className="text-yellow">Saint Kisito</span>-GESA
-              </h1>
-              <p className="mt-3 text-xl font-bold text-orange">{p.tagline}</p>
-              <p className="mt-2 max-w-xl text-lg opacity-90">Collège général de la 6e à la 3e et lycée technique{s.sites.length > 1 ? ` sur ${["", "un", "deux", "trois", "quatre", "cinq"][s.sites.length] ?? s.sites.length} sites, ${siteList(s.sites.map((x) => x.name))}` : s.sites.length === 1 ? ` à ${s.sites[0].name}` : ''}.</p>
+              {p.rentree && (
+                <span className="mb-4 inline-flex items-center gap-2 rounded-full bg-yellow px-3 py-1 text-sm font-extrabold text-[#1b1206]">
+                  <CalendarDays className="size-4" /> Rentrée scolaire le {date(p.rentree, { day: 'numeric', month: 'long', year: 'numeric' })}
+                </span>
+              )}
+              <h1 className="min-h-[1em] text-[44px] font-bold uppercase leading-[0.95] sm:text-6xl">{s?.name}</h1>
+              {p.tagline && <p className="mt-3 text-xl font-bold text-orange">{p.tagline}</p>}
+              {(description || where) && <p className="mt-2 max-w-xl text-lg opacity-90">{description}{where}.</p>}
               <div className="mt-6 flex flex-wrap gap-3">
                 <Link href="/preinscription" className="inline-flex min-h-12 items-center gap-2 rounded-lg bg-orange px-5 font-extrabold text-[#1b1206] hover:brightness-95">
                   Pré-inscrire mon enfant <ArrowRight className="size-5" />
                 </Link>
-                <a href={tel} className="inline-flex min-h-12 items-center gap-2 rounded-lg border border-white/50 px-5 font-bold hover:bg-white/10">
-                  <Phone className="size-5" /> {p.phone}
-                </a>
+                {p.phone && (
+                  <a href={telHref(p.phone, s?.country)} className="inline-flex min-h-12 items-center gap-2 rounded-lg border border-white/50 px-5 font-bold hover:bg-white/10">
+                    <Phone className="size-5" /> {p.phone}
+                  </a>
+                )}
               </div>
             </div>
             <ul className="grid gap-2.5">
@@ -88,15 +86,14 @@ export default function Home() {
         </section>
 
         {/* Filières */}
-        <section id="filieres" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
-          <p className="font-bold uppercase tracking-wider text-orange">Enseignement technique</p>
-          <h2 className="text-4xl font-bold">Nos filières</h2>
-          <p className="mt-2 max-w-2xl text-muted">Une formation pratique en ateliers, avec stages en entreprise, préparant aux examens professionnels.</p>
+        {(tracks.length > 0 || hasCollege) && <section id="filieres" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
+          {tracks.length > 0 && <p className="font-bold uppercase tracking-wider text-orange">Enseignement technique</p>}
+          <h2 className="text-4xl font-bold">{tracks.length > 0 ? 'Nos filières' : 'Nos classes'}</h2>
           <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {tracks.map((t) => (
               <article key={t.code} className="group overflow-hidden rounded-xl border border-line bg-surface">
-                {TRACK_IMG[t.code] ? (
-                  <img src={TRACK_IMG[t.code]} alt="" className="aspect-[16/9] w-full object-cover transition-transform group-hover:scale-[1.03]" />
+                {images[t.code] ? (
+                  <img src={images[t.code]} alt="" className="aspect-[16/9] w-full object-cover transition-transform group-hover:scale-[1.03]" />
                 ) : (
                   <div className="grid aspect-[16/9] place-items-center bg-brand-soft text-brand">
                     <Wrench className="size-10" />
@@ -108,23 +105,23 @@ export default function Home() {
                 </div>
               </article>
             ))}
-            <article className="flex flex-col justify-between rounded-xl border border-line bg-surface p-5">
+            {hasCollege && <article className="flex flex-col justify-between rounded-xl border border-line bg-surface p-5">
               <div>
                 <GraduationCap className="size-8 text-brand" />
                 <h3 className="mt-2 text-xl font-bold">Collège général</h3>
                 <p className="mt-1 text-muted">De la 6e à la 3e, préparation au BEPC.</p>
               </div>
               <Link href="/preinscription" className="mt-4 inline-flex items-center gap-1 font-bold text-brand">Demander une place <ArrowRight className="size-4" /></Link>
-            </article>
+            </article>}
           </div>
-        </section>
+        </section>}
 
         {/* Pourquoi nous choisir */}
-        <section className="mx-auto max-w-6xl px-4 pt-14">
+        {(p.reasons?.length ?? 0) > 0 && <section className="mx-auto max-w-6xl px-4 pt-14">
           <div className="grid gap-6 rounded-2xl bg-surface p-6 sm:p-8 md:grid-cols-[1fr_1.3fr] md:items-center">
             <div>
               <h2 className="text-4xl font-bold">Pourquoi nous choisir ?</h2>
-              <p className="mt-2 text-xl font-bold text-red">{p.motto}</p>
+              {p.motto && <p className="mt-2 text-xl font-bold text-red">{p.motto}</p>}
             </div>
             <ul className="grid gap-2 sm:grid-cols-2">
               {(p.reasons ?? []).map((r) => (
@@ -134,7 +131,7 @@ export default function Home() {
               ))}
             </ul>
           </div>
-        </section>
+        </section>}
 
         {/* L'espace numérique */}
         <section className="mx-auto max-w-6xl px-4 pt-14">
@@ -159,16 +156,16 @@ export default function Home() {
 
         {/* Sites */}
         <section id="sites" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
-          <h2 className="text-4xl font-bold">{s.sites.length === 1 ? "Notre site" : "Nos sites"}</h2>
+          <h2 className="text-4xl font-bold">{sites.length === 1 ? 'Notre site' : 'Nos sites'}</h2>
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
-            {s.sites.map((site) => (
+            {sites.map((site) => (
               <div key={site.id} className="rounded-xl border border-line bg-surface p-5">
                 <h3 className="text-2xl font-bold text-brand">{site.name}</h3>
                 {site.address && (
                   <p className="mt-2 flex items-start gap-2"><MapPin className="mt-0.5 size-5 flex-none text-red" /> {site.address}</p>
                 )}
                 {site.phone && (
-                  <a href={`tel:+229${site.phone.replace(/\s/g, '')}`} className="mt-2 flex items-center gap-2 font-bold hover:underline"><Phone className="size-5 text-good" /> {site.phone}</a>
+                  <a href={telHref(site.phone, s?.country)} className="mt-2 flex items-center gap-2 font-bold hover:underline"><Phone className="size-5 text-good" /> {site.phone}</a>
                 )}
               </div>
             ))}

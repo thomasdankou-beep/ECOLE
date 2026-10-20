@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { AuthShell } from '@/components/site/auth-shell';
 import { Button, ErrorNote, Field, Input } from '@/components/ui';
-import { publicPost, TENANT } from '@/lib/api';
+import { publicPost } from '@/lib/api';
+import { tenantOrThrow } from '@/lib/tenant';
 
 export default function MotDePasseOublie() {
   const [step, setStep] = useState<'ask' | 'reset' | 'done'>('ask');
@@ -20,10 +21,10 @@ export default function MotDePasseOublie() {
     setError(null);
     try {
       if (step === 'ask') {
-        await publicPost('/auth/forgot', { tenant: TENANT, identifier: identifier.trim() });
+        await publicPost('/auth/forgot', { tenant: await tenantOrThrow(), identifier: identifier.trim() });
         setStep('reset');
       } else {
-        await publicPost('/auth/reset', { tenant: TENANT, identifier: identifier.trim(), code: code.trim(), password });
+        await publicPost('/auth/reset', { tenant: await tenantOrThrow(), identifier: identifier.trim(), code: code.trim(), password });
         setStep('done');
       }
     } catch (err) {

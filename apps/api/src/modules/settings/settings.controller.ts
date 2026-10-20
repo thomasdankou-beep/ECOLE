@@ -25,19 +25,19 @@ export class SettingsController {
   @Patch('settings')
   @Can('settings.manage')
   updateSettings(@CurrentActor() a: Actor, @Body() dto: TenantSettingsDto) {
-    return this.s.updateTenantSettings(a, dto.settings);
+    return this.s.updateTenantSettings(a, dto.settings ?? {}, { name: dto.name, shortName: dto.shortName });
   }
 
   @Post('settings/identity/:kind') @Can('settings.manage')
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   setIdentityImage(@CurrentActor() a: Actor, @Param('kind') kind: string, @UploadedFile() file?: Express.Multer.File) {
-    return this.s.setIdentityImage(a, kind === 'stamp' ? 'stamp' : 'signature', file);
+    return this.s.setIdentityImage(a, imageKind(kind), file);
   }
 
   @Delete('settings/identity/:kind') @Can('settings.manage')
   removeIdentityImage(@CurrentActor() a: Actor, @Param('kind') kind: string) {
-    return this.s.setIdentityImage(a, kind === 'stamp' ? 'stamp' : 'signature');
+    return this.s.setIdentityImage(a, imageKind(kind));
   }
 
   @Post('sites') @Can('settings.manage')
@@ -114,4 +114,8 @@ export class SettingsController {
 
   @Post('users/:id/reset-password') @Can('users.manage')
   resetPassword(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.resetPassword(a, id); }
+}
+
+function imageKind(kind: string) {
+  return kind === 'stamp' ? 'stamp' : kind === 'logo' ? 'logo' : 'signature';
 }

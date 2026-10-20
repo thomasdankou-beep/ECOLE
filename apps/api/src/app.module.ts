@@ -25,6 +25,7 @@ import { InternshipsController, InternshipsService } from './modules/internships
 import { LessonsController, LessonsService } from './modules/lessons/lessons';
 import { NotificationsController } from './modules/notifications/notifications.controller';
 import { NotificationsService } from './modules/notifications/notifications.service';
+import { PlatformController, PlatformDb, PlatformGuard, PlatformService } from './modules/platform/platform';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReportCardsController } from './modules/report-cards/report-cards.controller';
@@ -59,14 +60,14 @@ class CoreModule {}
     HealthController, AuthController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
-    InternshipsController,
+    InternshipsController, PlatformController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
     AuthService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
-    PublicService, DashboardService, InternshipsService,
+    PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService,
   ],
 })
 export class AppModule {}
