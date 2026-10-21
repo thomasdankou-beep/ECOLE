@@ -15,6 +15,7 @@ type Card = {
   student: { firstName: string; lastName: string; matricule: string; birthDate: string | null; sex: string | null };
   class: { name: string; site: { name: string }; level: { name: string }; track: { name: string } | null; headTeacher: { firstName: string; lastName: string } | null };
   term: { name: string; year: string }; tenant: { name: string }; identity: SchoolIdentity;
+  annual: { year: string; average: number | null; rank: number | null; classSize: number; distinction: string | null; outcomeLabel: string | null; note: string | null } | null;
 };
 
 export default function Bulletin() {
@@ -71,6 +72,13 @@ function OneCard({ id }: { id: string }) {
             <div className="rounded border border-black/40 p-2"><p className="text-xs uppercase">Rang</p><p className="font-display text-3xl font-bold">{c.rank ?? '—'}<span className="text-base"> / {c.classSize}</span></p></div>
             <div className="rounded border border-black/40 p-2"><p className="text-xs uppercase">Absences</p><p className="font-display text-3xl font-bold">{c.absencesCount}</p></div>
           </div>
+          {c.annual && (
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="rounded border-2 border-black/60 p-2"><p className="text-xs uppercase">Moyenne annuelle</p><p className="font-display text-3xl font-bold">{note(c.annual.average)}<span className="text-base"> / 20</span></p></div>
+              <div className="rounded border-2 border-black/60 p-2"><p className="text-xs uppercase">Rang annuel</p><p className="font-display text-3xl font-bold">{c.annual.rank ?? '—'}<span className="text-base"> / {c.annual.classSize}</span></p></div>
+              <div className="rounded border-2 border-black/60 p-2"><p className="text-xs uppercase">Décision de fin d’année</p><p className="font-display text-2xl font-bold">{c.annual.outcomeLabel ?? '—'}</p>{c.annual.note && <p className="text-xs">{c.annual.note}</p>}</div>
+            </div>
+          )}
           <div className="grid grid-cols-[1fr_auto] gap-4">
             <div className="grid gap-1 rounded border border-black/40 p-3">
               <p><b>Mention :</b> {c.distinction ?? '—'}</p>

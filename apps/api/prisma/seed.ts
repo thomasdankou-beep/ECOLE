@@ -293,7 +293,7 @@ async function wipe(tenantId: string) {
     const tables = [
       'notifications', 'announcements', 'documents', 'receipts', 'payments', 'invoice_items', 'invoices', 'fee_types', 'cash_closings',
       'report_card_items', 'report_cards', 'report_card_runs', 'appreciations', 'grades', 'assessments', 'attendance_records', 'attendance_sessions',
-      'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'teacher_assignments', 'teacher_subjects', 'class_subjects', 'enrollments', 'student_guardians',
+      'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'annual_decisions', 'teacher_assignments', 'teacher_subjects', 'class_subjects', 'enrollments', 'student_guardians',
       'applications', 'guardians', 'students', 'otp_codes', 'sessions', 'user_roles', 'classes', 'users', 'rooms', 'subjects', 'tracks', 'levels',
       'terms', 'academic_years', 'sites', 'counters', 'audit_logs',
     ];

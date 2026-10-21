@@ -24,7 +24,7 @@ function Runs() {
   const runs = useApi<{ classId: string; className: string; site: string; students: number; status: string }[]>(term ? `/report-cards/runs?termId=${term}` : null);
   return (
     <>
-      <PageHeader title="Bulletins" subtitle="Saisie, contrôle, conseil de classe, validation puis publication aux familles." />
+      <PageHeader title="Bulletins" subtitle="Saisie, contrôle, conseil de classe, validation puis publication aux familles." actions={<Link href="/espace/bulletins/annuel" className="inline-flex min-h-11 items-center rounded-lg border border-line px-4 font-bold text-brand hover:bg-sunk">Résultats de fin d’année</Link>} />
       <ErrorNote error={settings.error} />
       {terms.length > 0 && <Chips label="Période" value={term} onChange={setTerm} options={terms.map((t) => ({ value: t.id, label: t.name }))} />}
       <Card>
@@ -50,7 +50,7 @@ function Runs() {
 
 function FamilyCards() {
   const { child } = useAuth();
-  const q = useApi<{ blocked: boolean; cards: { id: string; term: string; className: string; average: string | null; rank: number | null; classSize: number; distinction: string | null; publishedAt: string | null }[] }>(`/report-cards/students/${child!.id}`);
+  const q = useApi<{ blocked: boolean; annual: { year: string; average: number | null; rank: number | null; classSize: number; distinction: string | null; outcome: 'ADMIS' | 'NON_ADMIS' | null; outcomeLabel: string | null; note: string | null } | null; cards: { id: string; term: string; className: string; average: string | null; rank: number | null; classSize: number; distinction: string | null; publishedAt: string | null }[] }>(`/report-cards/students/${child!.id}`);
   return (
     <>
       <PageHeader title="Bulletins" subtitle={`${child!.firstName} · bulletins officiels publiés par l’école`} />
@@ -58,6 +58,14 @@ function FamilyCards() {
         {(d) => (
           <>
             {d.blocked && <p className="rounded-xl bg-warn-soft p-4 font-bold text-warn">L’accès au bulletin en ligne est suspendu jusqu’au règlement des frais. Rapprochez-vous de l’économat.</p>}
+            {d.annual && (
+              <div className="rounded-xl border-2 border-brand bg-surface p-5">
+                <p className="text-sm font-bold text-muted">Résultat de l’année {d.annual.year}</p>
+                <p className="tabular mt-1 font-display text-4xl font-bold">{note(d.annual.average)}<span className="text-lg text-muted"> / 20</span></p>
+                <p className="text-sm text-muted">Moyenne générale annuelle · rang {d.annual.rank ?? '—'} sur {d.annual.classSize}{d.annual.distinction ? ` · ${d.annual.distinction}` : ''}</p>
+                {d.annual.outcomeLabel && <p className={`mt-2 text-xl font-bold ${d.annual.outcome === 'ADMIS' ? 'text-good' : 'text-bad'}`}>{d.annual.outcomeLabel}{d.annual.note ? ` · ${d.annual.note}` : ''}</p>}
+              </div>
+            )}
             {d.cards.length === 0 ? <Empty title="Aucun bulletin publié pour le moment">Vous recevrez une notification dès la publication.</Empty> : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {d.cards.map((c) => (

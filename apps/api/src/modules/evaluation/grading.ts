@@ -76,3 +76,9 @@ export function distinction(average: number | null, thresholds: { min: number; l
   const t = [...thresholds].sort((a, b) => b.min - a.min).find((x) => average >= x.min);
   return t?.label ?? null;
 }
+
+/** Décision proposée en fin d'année : admis si la moyenne annuelle atteint le seuil saisi par l'école ; rien sans seuil ni moyenne. */
+export function proposedOutcome(average: number | null, passMark: number | null): 'ADMIS' | 'NON_ADMIS' | null {
+  if (average === null || passMark === null || passMark === undefined) return null;
+  return average >= passMark ? 'ADMIS' : 'NON_ADMIS';
+}

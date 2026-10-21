@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsArray, IsOptional, IsString, IsUUID, MaxLength, ValidateNested } from 'class-validator';
+import { IsArray, IsIn, IsOptional, IsString, IsUUID, MaxLength, ValidateNested } from 'class-validator';
 import { Actor, Can, CurrentActor } from '../../common/auth';
 import { ReportCardsService } from './report-cards.service';
 
@@ -12,6 +12,14 @@ class CouncilEntryDto {
 }
 class CouncilDto {
   @IsArray() @ValidateNested({ each: true }) @Type(() => CouncilEntryDto) entries: CouncilEntryDto[];
+}
+class AnnualEntryDto {
+  @IsUUID() studentId: string;
+  @IsOptional() @IsIn(['ADMIS', 'NON_ADMIS', null]) outcome: 'ADMIS' | 'NON_ADMIS' | null;
+  @IsOptional() @IsString() @MaxLength(200) note?: string;
+}
+class AnnualDto {
+  @IsArray() @ValidateNested({ each: true }) @Type(() => AnnualEntryDto) entries: AnnualEntryDto[];
 }
 class ReasonDto {
   @IsString() @MaxLength(300) reason: string;
@@ -40,6 +48,14 @@ export class ReportCardsController {
   @Post('runs/:classId/:termId/reopen') @Can('reportcards.validate')
   reopen(@CurrentActor() a: Actor, @Param('classId', ParseUUIDPipe) c: string, @Param('termId', ParseUUIDPipe) t: string, @Body() dto: ReasonDto) {
     return this.s.reopen(a, c, t, dto.reason);
+  }
+
+  @Get('annual/:classId') @Can('reportcards.control', 'reportcards.appreciate')
+  annual(@CurrentActor() a: Actor, @Param('classId', ParseUUIDPipe) c: string) { return this.s.annual(a, c); }
+
+  @Put('annual/:classId') @Can('reportcards.validate')
+  saveAnnual(@CurrentActor() a: Actor, @Param('classId', ParseUUIDPipe) c: string, @Body() dto: AnnualDto) {
+    return this.s.saveAnnual(a, c, dto.entries.map((e) => ({ ...e, outcome: e.outcome ?? null })));
   }
 
   @Get('students/:id') @Can('reportcards.read')

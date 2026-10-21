@@ -11,7 +11,7 @@ import { createSmsProvider } from '../notifications/sms.provider';
 import { FilesService } from '../files/files.service';
 import { config, tenantOrigin } from '../../config';
 import {
-  AcademicYearDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto,
+  AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto,
   StaffUpdateDto, SubjectDto, TrackDto,
 } from './settings.dto';
 
@@ -25,6 +25,8 @@ export const DEFAULT_SETTINGS = {
     ],
     /// 'exclude' : une note manquante est ignorée ; 'zero' : comptée 0 (CDC §3.3).
     missingGrade: 'exclude',
+    /// Moyenne annuelle minimale pour passer en classe supérieure, saisie par l'école. Vide : aucune décision proposée automatiquement.
+    passMark: null as number | null,
   },
   /// Bloquer l'accès au bulletin en ligne en cas d'impayé (option CDC §3.3), désactivé par défaut.
   blockReportCardIfUnpaid: false,
@@ -152,6 +154,12 @@ export class SettingsService {
       const incoming: Record<string, unknown> = settings.identity
         ? { ...settings, identity: { ...current.identity, ...(settings.identity as object), signatureKey: current.identity.signatureKey, stampKey: current.identity.stampKey } }
         : { ...settings };
+      if (incoming.grading) {
+        const g = incoming.grading as { passMark?: unknown };
+        const mark = g.passMark === '' || g.passMark === undefined || g.passMark === null ? null : Number(g.passMark);
+        if (mark !== null && !(mark >= 0 && mark <= 20)) throw new BadRequestException('Le seuil de passage va de 0 à 20');
+        incoming.grading = { ...current.grading, ...(incoming.grading as object), passMark: mark };
+      }
       // Le logo ne change que par son envoi de fichier ; la couleur doit être une couleur hexadécimale.
       if (incoming.branding) {
         const b = incoming.branding as { primaryColor?: unknown };
@@ -222,6 +230,30 @@ export class SettingsService {
         .catch((e) => uniqueViolation(e, 'Cette année scolaire existe déjà'));
       await this.audit.log(tx, actor, 'year.created', 'AcademicYear', year.id, { label: dto.label });
       return year;
+    });
+  }
+
+  /** Dates de rentrée et de fin d'année, et périodes (nom, dates, poids dans la moyenne annuelle), modifiables à tout moment. */
+  updateYear(actor: Actor, id: string, dto: AcademicYearUpdateDto) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const year = await tx.academicYear.findUniqueOrThrow({ where: { id }, include: { terms: { orderBy: { position: 'asc' } } } });
+      const start = dto.startDate ? toDate(dto.startDate) : year.startDate;
+      const end = dto.endDate ? toDate(dto.endDate) : year.endDate;
+      if (start >= end) throw new BadRequestException("La fin d'année doit venir après la rentrée");
+      const terms = year.terms.map((t) => {
+        const u = dto.terms?.find((x) => x.id === t.id);
+        return { ...t, name: u?.name?.trim() || t.name, startDate: u?.startDate ? toDate(u.startDate) : t.startDate, endDate: u?.endDate ? toDate(u.endDate) : t.endDate, weight: u?.weight ?? Number(t.weight) };
+      });
+      if (dto.terms?.some((x) => !year.terms.some((t) => t.id === x.id))) throw new BadRequestException("Une période n'appartient pas à cette année");
+      terms.forEach((t, i) => {
+        if (t.startDate > t.endDate) throw new BadRequestException(`${t.name} : la fin doit venir après le début`);
+        if (t.startDate < start || t.endDate > end) throw new BadRequestException(`${t.name} doit être comprise entre la rentrée et la fin d'année`);
+        if (i > 0 && t.startDate <= terms[i - 1].endDate) throw new BadRequestException(`${t.name} commence avant la fin de ${terms[i - 1].name}`);
+      });
+      await tx.academicYear.update({ where: { id }, data: { label: dto.label?.trim() || undefined, startDate: start, endDate: end } }).catch((e) => uniqueViolation(e, 'Cette année scolaire existe déjà'));
+      for (const t of terms) await tx.term.update({ where: { id: t.id }, data: { name: t.name, startDate: t.startDate, endDate: t.endDate, weight: t.weight } });
+      await this.audit.log(tx, actor, 'year.updated', 'AcademicYear', id, dto);
+      return tx.academicYear.findUniqueOrThrow({ where: { id }, include: { terms: { orderBy: { position: 'asc' } } } });
     });
   }
 

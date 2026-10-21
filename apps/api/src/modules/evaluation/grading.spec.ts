@@ -1,4 +1,4 @@
-import { annualAverage, distinction, generalAverage, ranks, stats, subjectAverage } from './grading';
+import { annualAverage, distinction, proposedOutcome, generalAverage, ranks, stats, subjectAverage } from './grading';
 
 describe('Moteur de calcul des moyennes (CDC §3.3)', () => {
   it("reproduit l'exemple du cahier des charges : 116 / 9 = 12,89", () => {
@@ -67,5 +67,12 @@ describe('Moteur de calcul des moyennes (CDC §3.3)', () => {
     expect(distinction(14.99, t)).toBe('Encouragements');
     expect(distinction(12, t)).toBe("Tableau d'honneur");
     expect(distinction(11.99, t)).toBeNull();
+  });
+
+  it("propose admis ou non admis selon le seuil de l'école, rien sans seuil", () => {
+    expect(proposedOutcome(10, 10)).toBe('ADMIS');
+    expect(proposedOutcome(9.99, 10)).toBe('NON_ADMIS');
+    expect(proposedOutcome(15, null)).toBeNull();
+    expect(proposedOutcome(null, 10)).toBeNull();
   });
 });

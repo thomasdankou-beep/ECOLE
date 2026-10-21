@@ -5,7 +5,7 @@ import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { verifyCode } from '../../common/util';
-import { distinction } from '../evaluation/grading';
+import { distinction, proposedOutcome } from '../evaluation/grading';
 import { EvaluationService } from '../evaluation/evaluation.service';
 import { FinanceService } from '../finance/finance.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -22,6 +22,15 @@ export const STEP_LABEL: Record<ReportRunStatus, string> = {
   VALIDE: 'Validé par la direction',
   PUBLIE: 'Publié aux familles',
 };
+
+export const OUTCOME_LABEL = { ADMIS: 'Admis', NON_ADMIS: 'Non admis' } as const;
+
+export interface AnnualEntry {
+  studentId: string;
+  /** Décision arrêtée ; null revient à la décision proposée selon la moyenne. */
+  outcome: 'ADMIS' | 'NON_ADMIS' | null;
+  note?: string;
+}
 
 export interface CouncilEntry {
   studentId: string;
@@ -214,6 +223,78 @@ export class ReportCardsService {
     }
   }
 
+  /** Résultats de fin d'année d'une classe : moyennes par période, moyenne annuelle, rang, mention, décision proposée et décision arrêtée. */
+  annual(actor: Actor, classId: string) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      if (!(await this.canControl(tx, actor, classId))) throw new ForbiddenException('Réservé à la direction et au professeur principal');
+      const [klass, tenant] = await Promise.all([
+        tx.class.findUniqueOrThrow({ where: { id: classId }, include: { site: true, academicYear: true } }),
+        tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } }),
+      ]);
+      const { grading } = tenantSettings(tenant.settings);
+      const year = await this.evaluation.computeClassYear(tx, actor.tenantId, classId);
+      const decisions = await tx.annualDecision.findMany({ where: { academicYearId: klass.academicYearId, studentId: { in: year.students.map((s) => s.id) } } });
+      const students = year.students.map((s) => {
+        const d = decisions.find((x) => x.studentId === s.id);
+        const proposed = proposedOutcome(s.average, grading.passMark);
+        return {
+          id: s.id, name: `${s.firstName} ${s.lastName}`, matricule: s.matricule, terms: s.terms, average: s.average, rank: s.rank,
+          complete: Object.values(s.terms).every((v) => v !== null),
+          distinction: distinction(s.average, grading.distinctions), proposed, outcome: d?.outcome ?? null, note: d?.note ?? '',
+          final: d?.outcome ?? proposed,
+        };
+      });
+      const count = (o: string) => students.filter((s) => s.final === o).length;
+      return {
+        class: { id: klass.id, name: klass.name, site: klass.site.name },
+        year: { label: klass.academicYear.label, startDate: klass.academicYear.startDate, endDate: klass.academicYear.endDate },
+        passMark: grading.passMark, terms: year.terms, classStats: year.classStats, students,
+        summary: { admis: count('ADMIS'), nonAdmis: count('NON_ADMIS'), undecided: students.filter((s) => !s.final).length, total: students.length },
+      };
+    });
+  }
+
+  /** La direction arrête les décisions de fin d'année (elle peut s'écarter de la proposition, par exemple après le conseil). */
+  saveAnnual(actor: Actor, classId: string, entries: AnnualEntry[]) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      if (actor.role !== 'DIRECTION') throw new ForbiddenException('Les décisions de fin d’année reviennent à la direction');
+      const klass = await tx.class.findUniqueOrThrow({ where: { id: classId } });
+      const enrolled = new Set((await tx.enrollment.findMany({ where: { classId, status: 'ACTIVE' }, select: { studentId: true } })).map((e) => e.studentId));
+      for (const e of entries) {
+        if (!enrolled.has(e.studentId)) throw new BadRequestException("Un élève n'appartient pas à cette classe");
+        const where = { studentId_academicYearId: { studentId: e.studentId, academicYearId: klass.academicYearId } };
+        if (!e.outcome) { await tx.annualDecision.deleteMany({ where: { studentId: e.studentId, academicYearId: klass.academicYearId } }); continue; }
+        const data = { outcome: e.outcome, note: e.note?.trim() || null, classId, decidedById: actor.userId };
+        await tx.annualDecision.upsert({ where, update: data, create: { tenantId: actor.tenantId, studentId: e.studentId, academicYearId: klass.academicYearId, ...data } });
+      }
+      await this.audit.log(tx, actor, 'annual.decisions_saved', 'Class', classId, { entries });
+      return { ok: true };
+    });
+  }
+
+  /** Résultat annuel montré à la famille une fois les bulletins de la dernière période publiés. */
+  private async annualForFamily(tx: Tx, tenantId: string, studentId: string) {
+    const yearId = await this.scope.currentYearId(tx);
+    const enr = await tx.enrollment.findUnique({ where: { studentId_academicYearId: { studentId, academicYearId: yearId } }, include: { academicYear: true } });
+    if (!enr) return null;
+    const last = await tx.term.findFirst({ where: { academicYearId: yearId }, orderBy: { position: 'desc' } });
+    const run = last && (await tx.reportCardRun.findUnique({ where: { classId_termId: { classId: enr.classId, termId: last.id } } }));
+    if (run?.status !== 'PUBLIE') return null;
+    return this.annualResult(tx, tenantId, studentId, enr.classId, true);
+  }
+
+  private async annualResult(tx: Tx, tenantId: string, studentId: string, classId: string, publishedOnly: boolean) {
+    const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    const { grading } = tenantSettings(tenant.settings);
+    const year = await this.evaluation.computeClassYear(tx, tenantId, classId, publishedOnly);
+    const s = year.students.find((x) => x.id === studentId);
+    if (!s) return null;
+    const label = (await tx.academicYear.findUniqueOrThrow({ where: { id: year.academicYearId } })).label;
+    const d = await tx.annualDecision.findUnique({ where: { studentId_academicYearId: { studentId, academicYearId: year.academicYearId } } });
+    const outcome = d?.outcome ?? proposedOutcome(s.average, grading.passMark);
+    return { year: label, average: s.average, rank: s.rank, classSize: year.students.length, distinction: distinction(s.average, grading.distinctions), outcome, outcomeLabel: outcome ? OUTCOME_LABEL[outcome] : null, note: d?.note ?? null };
+  }
+
   /** Bulletins publiés d'un élève. */
   forStudent(actor: Actor, studentId: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
@@ -226,7 +307,8 @@ export class ReportCardsService {
       });
       const terms = await tx.term.findMany({ where: { id: { in: cards.map((c) => c.termId) } } });
       const blocked = family ? await this.blockedForUnpaid(tx, actor.tenantId, studentId) : false;
-      return { blocked, cards: cards.map((c) => ({ id: c.id, term: terms.find((t) => t.id === c.termId)?.name, className: c.class.name, average: c.average, rank: c.rank, classSize: c.classSize, distinction: c.distinction, publishedAt: c.publishedAt })) };
+      const annual = blocked ? null : await this.annualForFamily(tx, actor.tenantId, studentId);
+      return { blocked, annual, cards: cards.map((c) => ({ id: c.id, term: terms.find((t) => t.id === c.termId)?.name, className: c.class.name, average: c.average, rank: c.rank, classSize: c.classSize, distinction: c.distinction, publishedAt: c.publishedAt })) };
     });
   }
 
@@ -254,7 +336,10 @@ export class ReportCardsService {
         tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { name: true, settings: true } }),
       ]);
       const identity = schoolIdentity(tenant, this.files);
-      return { ...c, term: { name: term.name, year: term.academicYear.label }, tenant: { name: tenant.name }, identity };
+      // Le bulletin de la dernière période porte aussi la moyenne annuelle et la décision de fin d'année.
+      const last = await tx.term.findFirst({ where: { academicYearId: term.academicYearId }, orderBy: { position: 'desc' } });
+      const annual = last?.id === term.id ? await this.annualResult(tx, actor.tenantId, c.studentId, c.classId, ['PARENT', 'ELEVE'].includes(actor.role)) : null;
+      return { ...c, term: { name: term.name, year: term.academicYear.label }, tenant: { name: tenant.name }, identity, annual };
     });
   }
 }

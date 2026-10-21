@@ -28,6 +28,21 @@ export class AcademicYearDto {
   @IsArray() @ValidateNested({ each: true }) @Type(() => TermInput) terms: TermInput[];
 }
 
+export class TermUpdateInput {
+  @IsUUID() id: string;
+  @IsOptional() @IsString() @MaxLength(60) name?: string;
+  @IsOptional() @IsDateString() startDate?: string;
+  @IsOptional() @IsDateString() endDate?: string;
+  @IsOptional() @IsNumber() @Min(0.25) @Max(10) weight?: number;
+}
+
+export class AcademicYearUpdateDto {
+  @IsOptional() @IsString() @MaxLength(20) label?: string;
+  @IsOptional() @IsDateString() startDate?: string;
+  @IsOptional() @IsDateString() endDate?: string;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => TermUpdateInput) terms?: TermUpdateInput[];
+}
+
 export class LevelDto {
   @IsString() @MaxLength(60) name: string;
   @IsEnum(Cycle) cycle: Cycle;
