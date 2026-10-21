@@ -1,5 +1,6 @@
 'use client';
 
+import { date } from '@/lib/format';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { CheckCircle2 } from 'lucide-react';
@@ -8,7 +9,7 @@ import { Button, Card, ErrorNote, Field, Input, Select, Textarea } from '@/compo
 import { publicGet, publicPost } from '@/lib/api';
 import { tenantOrThrow } from '@/lib/tenant';
 
-type School = { sites: { name: string }[]; tracks: { name: string; cycle: string }[]; levels: { name: string; cycle: string }[] };
+type School = { sites: { name: string }[]; tracks: { name: string; cycle: string }[]; levels: { name: string; cycle: string }[]; public?: { entranceTest?: string; requiredDocuments?: string[] } };
 
 export default function Preinscription() {
   const [school, setSchool] = useState<School | null>(null);
@@ -45,6 +46,17 @@ export default function Preinscription() {
       <main className="mx-auto max-w-3xl px-4 pt-8">
         <h1 className="text-4xl font-bold">Pré-inscription en ligne</h1>
         <p className="mt-1 text-muted">Remplissez ce formulaire : le secrétariat vous rappelle pour compléter le dossier.</p>
+        {!reference && (school?.public?.entranceTest || (school?.public?.requiredDocuments?.length ?? 0) > 0) && (
+          <Card className="mt-4 grid gap-2">
+            {school?.public?.entranceTest && <p className="font-bold">Test d’entrée : {date(school.public.entranceTest, { day: 'numeric', month: 'long', year: 'numeric' })}</p>}
+            {(school?.public?.requiredDocuments?.length ?? 0) > 0 && (
+              <>
+                <p className="font-bold">Pièces à fournir pour l’inscription</p>
+                <ul className="grid list-disc gap-1 pl-5 text-sm">{school!.public!.requiredDocuments!.map((d) => <li key={d}>{d}</li>)}</ul>
+              </>
+            )}
+          </Card>
+        )}
         {reference ? (
           <Card className="mt-6 grid justify-items-center gap-3 py-10 text-center">
             <CheckCircle2 className="size-14 text-good" />

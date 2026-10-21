@@ -486,3 +486,40 @@ describe('Plateforme : plusieurs écoles sur un même serveur', () => {
     expect((await http.get('/api/v1/platform/resolve?host=localhost:3000')).body.slug).toBe('saint-kisito');
   });
 });
+
+describe('Fiche de renseignement chargée et frais par public', () => {
+  it("l'espace de Saint Kisito contient les niveaux et les frais réels de la fiche 2026-2027", async () => {
+    const s = (await as('direction').get('/settings')).body;
+    expect(s.levels.map((l: any) => l.name)).toEqual(expect.arrayContaining(['Maternelle 1', 'CI', 'CM2', '6e', '3e année', '2nde', 'Terminale']));
+    const fees = (await as('direction').get('/finance/fee-types')).body;
+    const sixieme = s.levels.find((l: any) => l.name === '6e').id;
+    const of = (name: string) => fees.find((f: any) => f.name === name && f.levelId === sixieme);
+    expect(of('Scolarité 1re tranche').amount).toBe(20000);
+    expect(of('Inscription')).toMatchObject({ amount: 5000, audience: 'NEW' });
+    expect(of('Réinscription')).toMatchObject({ amount: 3000, audience: 'RETURNING' });
+    expect(of('Scolarité en une fois')).toMatchObject({ amount: 47000, optional: true });
+    expect(s.tenant.identity.email).toBe('etp.saintkisito@gmail.com');
+  });
+
+  it("à l'inscription : frais de réinscription pour un ancien élève, jamais les frais facultatifs", async () => {
+    const classes = (await as('direction').get('/classes')).body;
+    const sixA = classes.find((c: any) => c.name === '6e A');
+    const enroll = (returning: boolean) => as('secretariat').post('/students', {
+      firstName: returning ? 'Ancien' : 'Nouveau', lastName: 'TESTFRAIS', classId: sixA.id, createInvoices: true, returning,
+      guardians: [{ firstName: 'Parent', lastName: 'TESTFRAIS', phone: returning ? '0197555001' : '0197555002', relation: 'Mère', isPrimary: true }],
+    });
+    const labels = async (r: any) => {
+      expect(r.status).toBe(201);
+      const inv = (await as('direction').get(`/finance/invoices?studentId=${r.body.id ?? r.body.student?.id}`)).body;
+      return inv.map((i: any) => i.label).sort();
+    };
+    const fresh = await labels(await enroll(false));
+    expect(fresh).toContain('Inscription');
+    expect(fresh).not.toContain('Réinscription');
+    expect(fresh).not.toContain('Scolarité en une fois');
+    expect(fresh).toEqual(expect.arrayContaining(['Frais généraux', 'Scolarité 1re tranche', 'Scolarité 2e tranche', 'Scolarité 3e tranche']));
+    const back = await labels(await enroll(true));
+    expect(back).toContain('Réinscription');
+    expect(back).not.toContain('Inscription');
+  });
+});

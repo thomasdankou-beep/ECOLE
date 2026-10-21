@@ -23,6 +23,14 @@ Documents imprimables (format A4, QR code vérifiable) : bulletin, reçu, certif
 
 Sécurité : isolation des écoles par Row Level Security PostgreSQL, mots de passe argon2id, session courte avec renouvellement par cookie httpOnly, verrouillage après 5 échecs, double authentification (TOTP), droits par rôle et par site, notes et paiements jamais supprimés, journal d’audit en ajout seul.
 
+## Charger les données d’une école depuis un fichier
+
+Chaque école peut tout saisir à l’écran. Pour aller plus vite, ses niveaux, filières, frais, coordonnées et textes publics peuvent aussi être décrits dans un fichier JSON et chargés dans son espace, sans rien effacer ; tout reste modifiable ensuite dans l’application :
+
+`npm run school:import -w apps/api -- <identifiant-ecole> apps/api/data/ecoles/<fichier>.json`
+
+Exemple : `apps/api/data/ecoles/saint-kisito-2026-2027.json`, recopié de la fiche de renseignement 2026-2027 de Saint Kisito (le jeu de démonstration le charge aussi). Les points à préciser par l’école sont listés à la fin du fichier et affichés au chargement.
+
 ## Vendre le logiciel à d’autres écoles (plateforme multi-écoles)
 
 Un seul serveur sert toutes les écoles clientes. Chaque école a sa propre adresse (`<identifiant>.<domaine de la plateforme>`, ou son propre nom de domaine), ses données séparées par la Row Level Security, et saisit elle-même son nom, son logo, sa couleur et les textes de son site.
@@ -93,7 +101,7 @@ npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 43 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins, plateforme)
+npm test            # 45 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins, plateforme)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).
@@ -136,7 +144,7 @@ Rien de ce qui suit n’a été inventé. Ces points sont signalés dans le code
 
 | Information | Où la saisir |
 | --- | --- |
-| Montants réels des frais par niveau et filière | Frais et tarifs › Grille par niveau et filière |
+| Frais par niveau : inscription et réinscription, tranches, frais généraux, TP, frais facultatifs | Frais et tarifs (grille par niveau, ou par niveau et filière) ; chargés pour Saint Kisito depuis sa fiche 2026-2027 |
 | Coefficients par matière et par classe, règle « note manquante » | Paramètres › Coefficients (par niveau) ou Classes et matières (par classe) |
 | Seuils des mentions et libellés | Paramètres › Mentions et règles |
 | Classes, enseignants, salles et ateliers, emploi du temps | Paramètres › Classes et matières, Sites, salles, matières ; Personnel ; Emploi du temps |

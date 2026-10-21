@@ -115,7 +115,7 @@ export class StudentsService {
     }
 
     let invoices = 0;
-    if (dto.createInvoices) invoices = await this.finance.invoiceFromCatalog(tx, actor, student.id, klass.id);
+    if (dto.createInvoices) invoices = await this.finance.invoiceFromCatalog(tx, actor, student.id, klass.id, !!dto.returning);
 
     if (dto.applicationId) {
       await tx.application.update({ where: { id: dto.applicationId }, data: { status: 'INSCRIT', studentId: student.id } });

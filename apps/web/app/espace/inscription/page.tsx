@@ -23,6 +23,7 @@ export default function Inscription() {
   const [guardians, setGuardians] = useState<Guardian[]>([emptyGuardian()]);
   const [createStudentAccount, setAccount] = useState(true);
   const [createInvoices, setInvoices] = useState(true);
+  const [returning, setReturning] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
@@ -47,6 +48,7 @@ export default function Inscription() {
         guardians: guardians.map((g, i) => ({ ...clean(g), isPrimary: i === 0 })),
         createStudentAccount,
         createInvoices,
+        returning,
         ...(applicationId ? { applicationId } : {}),
       });
       setResult(r);
@@ -125,6 +127,7 @@ export default function Inscription() {
         <Card className="grid gap-3">
           <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={createStudentAccount} onChange={(e) => setAccount(e.target.checked)} /> Créer le compte de l’élève (identifiant = matricule)</label>
           <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={createInvoices} onChange={(e) => setInvoices(e.target.checked)} /> Créer les factures selon les frais de la classe</label>
+          {createInvoices && <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={returning} onChange={(e) => setReturning(e.target.checked)} /> Ancien élève : frais de réinscription au lieu de ceux d’inscription</label>}
         </Card>
         <ErrorNote error={error} />
         <Button type="submit" size="lg" loading={busy}>Enregistrer l’inscription</Button>

@@ -65,8 +65,9 @@ export class FinanceService {
           if (existing?.active) await tx.feeType.update({ where: { id: existing.id }, data: { active: false } });
           continue;
         }
-        if (existing) await tx.feeType.update({ where: { id: existing.id }, data: { amount: r.amount, active: true, ...(dueDate ? { dueDate } : {}) } });
-        else await tx.feeType.create({ data: { tenantId: actor.tenantId, academicYearId, name: dto.name, levelId: r.levelId, trackId, amount: r.amount, dueDate: dueDate ?? null } });
+        const kind = { ...(dto.audience ? { audience: dto.audience } : {}), ...(dto.optional !== undefined ? { optional: dto.optional } : {}) };
+        if (existing) await tx.feeType.update({ where: { id: existing.id }, data: { amount: r.amount, active: true, ...(dueDate ? { dueDate } : {}), ...kind } });
+        else await tx.feeType.create({ data: { tenantId: actor.tenantId, academicYearId, name: dto.name, levelId: r.levelId, trackId, amount: r.amount, dueDate: dueDate ?? null, ...kind } });
         saved++;
       }
       await this.audit.log(tx, actor, 'fee_type.grid', 'FeeType', null, { name: dto.name, rows: dto.rows.length, saved });
@@ -94,12 +95,15 @@ export class FinanceService {
     });
   }
 
-  /** Factures d'un nouvel inscrit d'après le catalogue de sa classe (niveau et filière). */
-  async invoiceFromCatalog(tx: Tx, actor: Actor, studentId: string, classId: string): Promise<number> {
+  /**
+   * Factures d'un inscrit d'après le catalogue de sa classe (niveau et filière) : frais de tous,
+   * plus ceux des nouveaux (inscription) ou des anciens élèves (réinscription). Les frais facultatifs ne sont jamais facturés d'office.
+   */
+  async invoiceFromCatalog(tx: Tx, actor: Actor, studentId: string, classId: string, returning = false): Promise<number> {
     const klass = await tx.class.findUniqueOrThrow({ where: { id: classId } });
     const fees = await tx.feeType.findMany({
       where: {
-        academicYearId: klass.academicYearId, active: true,
+        academicYearId: klass.academicYearId, active: true, optional: false, audience: { in: ['ALL', returning ? 'RETURNING' : 'NEW'] },
         AND: [{ OR: [{ levelId: null }, { levelId: klass.levelId }] }, { OR: [{ trackId: null }, { trackId: klass.trackId }] }],
       },
     });

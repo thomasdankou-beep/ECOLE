@@ -1,4 +1,4 @@
-import { PaymentMethod } from '@prisma/client';
+import { FeeAudience, PaymentMethod } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested,
@@ -11,6 +11,8 @@ export class FeeTypeDto {
   @IsOptional() @IsUUID() trackId?: string | null;
   @IsOptional() @IsDateString() dueDate?: string | null;
   @IsOptional() @IsBoolean() active?: boolean;
+  @IsOptional() @IsEnum(FeeAudience) audience?: FeeAudience;
+  @IsOptional() @IsBoolean() optional?: boolean;
 }
 
 export class FeeGridRow {
@@ -24,6 +26,10 @@ export class FeeGridRow {
 export class FeeGridDto {
   @IsString() @MaxLength(120) name: string;
   @IsOptional() @IsDateString() dueDate?: string | null;
+  /** Tous les élèves, nouveaux inscrits seulement (inscription) ou anciens seulement (réinscription). */
+  @IsOptional() @IsEnum(FeeAudience) audience?: FeeAudience;
+  /** Facultatif : jamais facturé d'office (activité extra-classe, paiement en une fois). */
+  @IsOptional() @IsBoolean() optional?: boolean;
   @IsArray() @ValidateNested({ each: true }) @Type(() => FeeGridRow) rows: FeeGridRow[];
 }
 

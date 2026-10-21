@@ -109,6 +109,8 @@ function publicTexts(raw: unknown, current: Record<string, unknown> = {}) {
     slogan: str(r.slogan, 120), tagline: str(r.tagline, 160), phone: str(r.phone, 40), motto: str(r.motto, 160),
     rentree: typeof r.rentree === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.rentree) ? r.rentree : undefined,
     highlights: list(r.highlights), reasons: list(r.reasons),
+    entranceTest: typeof r.entranceTest === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.entranceTest) ? r.entranceTest : undefined,
+    requiredDocuments: Array.isArray(r.requiredDocuments) ? r.requiredDocuments.map((x) => str(x, 200)).filter(Boolean).slice(0, 15) : undefined,
   };
 }
 

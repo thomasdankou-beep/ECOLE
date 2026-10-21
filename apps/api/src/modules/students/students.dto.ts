@@ -26,6 +26,8 @@ export class EnrollStudentDto {
   @IsOptional() @IsBoolean() createStudentAccount?: boolean;
   /// Crée la facture des frais de la classe à partir du catalogue.
   @IsOptional() @IsBoolean() createInvoices?: boolean;
+  /// Ancien élève : frais de réinscription au lieu de ceux d'inscription.
+  @IsOptional() @IsBoolean() returning?: boolean;
   @IsOptional() @IsUUID() applicationId?: string;
 }
 
