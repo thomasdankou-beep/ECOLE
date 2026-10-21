@@ -596,3 +596,30 @@ describe("Fin d'année : dates, moyenne annuelle et décision", () => {
     expect((await as('comptable').get(`/report-cards/annual/${classes[0].id}/cards`)).status).toBe(403);
   });
 });
+
+describe("Élèves à l'honneur sur le site public", () => {
+  // PNG 1×1 transparent.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+
+  it("rien n'est public sans choix de la direction ; publié avec l'accord des parents, sans la moyenne si elle le décide", async () => {
+    expect((await http.get('/api/v1/public/saint-kisito')).body.honors).toEqual([]);
+    const o = (await as('direction').get('/honors')).body;
+    const best = o.suggestions[0];
+    expect(best).toBeTruthy();
+    expect((await as('direction').post('/honors', { reportCardId: best.reportCardId, displayName: best.suggestedName, showAverage: false, consent: false })).status).toBe(400);
+    const h = await as('direction').post('/honors', { reportCardId: best.reportCardId, displayName: best.suggestedName, showAverage: false, consent: true });
+    expect(h.status).toBe(201);
+    expect((await as('direction').post('/honors', { reportCardId: best.reportCardId, displayName: 'X Y', showAverage: true, consent: true })).status).toBe(409);
+    const pub = (await http.get('/api/v1/public/saint-kisito')).body.honors;
+    expect(pub).toHaveLength(1);
+    expect(pub[0]).toMatchObject({ displayName: best.suggestedName, className: best.className, average: null, hasPhoto: false });
+    expect(JSON.stringify(pub)).not.toContain(best.studentId);
+    const up = await http.post(`/api/v1/honors/${h.body.id}/photo`).set('Authorization', `Bearer ${tokens.direction}`).attach('file', PNG, { filename: 'p.png', contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    const photo = await http.get(`/api/v1/public/saint-kisito/honors/${h.body.id}/photo`);
+    expect(photo.status).toBe(200);
+    expect((await as('secretariat').post('/honors', { reportCardId: best.reportCardId, displayName: 'X', showAverage: true, consent: true })).status).toBe(403);
+    await as('direction').del(`/honors/${h.body.id}`).expect(200);
+    expect((await http.get('/api/v1/public/saint-kisito')).body.honors).toEqual([]);
+  });
+});

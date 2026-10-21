@@ -12,6 +12,7 @@ import { useAuth } from '@/lib/auth';
 import type { SchoolIdentity } from '@/components/print/letterhead';
 import { Coefficients } from './coefficients';
 import { Etablissement, type IdentitySettings } from './etablissement';
+import { Honneur } from './honneur';
 import { ImageEcole, type PublicTexts } from './image';
 
 type Settings = {
@@ -39,7 +40,7 @@ export default function Parametres() {
     <>
       <PageHeader title="Paramètres" subtitle="Tout ce que l’école renseigne elle-même : identité officielle, logo et site public, classes, matières et coefficients, salles et ateliers, année, règles des bulletins." />
       <Chips label="Rubrique" value={tab} onChange={setTab} options={[
-        { value: 'etablissement', label: 'Établissement' }, { value: 'image', label: 'Logo et site public' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
+        { value: 'etablissement', label: 'Établissement' }, { value: 'image', label: 'Logo et site public' }, { value: 'honneur', label: 'Élèves à l’honneur' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
         { value: 'structure', label: 'Sites, salles, matières' }, { value: 'annee', label: 'Année et périodes' }, { value: 'regles', label: 'Mentions et règles' },
       ]} />
       <Loader {...q}>
@@ -47,6 +48,7 @@ export default function Parametres() {
           <>
             {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} reload={q.reload} />}
             {tab === 'image' && <ImageEcole name={s.tenant.name} shortName={s.tenant.shortName} logoUrl={s.tenant.identity.logoUrl} primaryColor={s.tenant.settings.branding.primaryColor} texts={s.tenant.settings.public ?? {}} reload={q.reload} />}
+            {tab === 'honneur' && <Honneur />}
             {tab === 'classes' && <Classes s={s} />}
             {tab === 'coefficients' && <Coefficients subjects={s.subjects} />}
             {tab === 'structure' && <Structure s={s} reload={q.reload} />}

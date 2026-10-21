@@ -10,6 +10,7 @@ import { ScopeService } from '../../common/scope.service';
 import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { logoUrl, tenantSettings } from '../settings/settings.service';
+import { HonorsService } from './honors';
 
 class AnnouncementDto {
   @IsString() @MaxLength(160) title: string;
@@ -89,16 +90,17 @@ export class PublicService {
     const branding = { logoUrl: logoUrl(t), primaryColor: s.branding.primaryColor };
     if (t.status === 'SUSPENDED') return { name: t.name, shortName: t.shortName, suspended: true, branding };
     return this.db.forTenant(t.id, async (tx) => {
-      const [sites, tracks, levels] = await Promise.all([
+      const [sites, tracks, levels, honors] = await Promise.all([
         tx.site.findMany({ where: { active: true }, select: { id: true, name: true, address: true, phone: true }, orderBy: { name: 'asc' } }),
         tx.track.findMany({ select: { code: true, name: true, cycle: true }, orderBy: { name: 'asc' } }),
         tx.level.findMany({ select: { name: true, cycle: true }, orderBy: { position: 'asc' } }),
+        HonorsService.publicList(tx, slug),
       ]);
       return {
         name: t.name, shortName: t.shortName, country: t.country, suspended: false, branding,
         /// Comptes de démonstration affichés à la connexion uniquement pour l'école de démonstration.
         demo: (t.settings as any)?.demo === true,
-        public: (t.settings as any)?.public ?? {}, sites, tracks, levels,
+        public: (t.settings as any)?.public ?? {}, sites, tracks, levels, honors,
       };
     });
   }

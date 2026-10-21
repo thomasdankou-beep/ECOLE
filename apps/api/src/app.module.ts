@@ -30,6 +30,7 @@ import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReportCardsController } from './modules/report-cards/report-cards.controller';
 import { ReportCardsService } from './modules/report-cards/report-cards.service';
+import { HonorsController, HonorsService } from './modules/communication/honors';
 import { SettingsController } from './modules/settings/settings.controller';
 import { SettingsService } from './modules/settings/settings.service';
 import { StudentsController } from './modules/students/students.controller';
@@ -60,14 +61,14 @@ class CoreModule {}
     HealthController, AuthController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
-    InternshipsController, PlatformController,
+    InternshipsController, PlatformController, HonorsController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
     AuthService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
-    PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService,
+    PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, HonorsService,
   ],
 })
 export class AppModule {}

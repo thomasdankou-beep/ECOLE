@@ -362,6 +362,7 @@ model Student {
   sanctions   Sanction[]
   internships InternshipPlacement[]
   annualDecisions AnnualDecision[]
+  honors          PublicHonor[]
 
   @@unique([tenantId, matricule])
   @@index([tenantId, lastName, firstName])
@@ -1149,4 +1150,28 @@ model AnnualDecision {
 
   @@unique([studentId, academicYearId])
   @@map("annual_decisions")
+}
+
+/// Élève mis à l'honneur sur le site public, choisi par la direction parmi les bulletins publiés, avec l'accord des parents.
+/// Le nom affiché, la classe, la période et la moyenne sont figés au moment de la publication.
+model PublicHonor {
+  id          String   @id @default(uuid()) @db.Uuid
+  tenantId    String   @map("tenant_id") @db.Uuid
+  studentId   String   @db.Uuid
+  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  reportCardId String  @db.Uuid
+  displayName String
+  className   String
+  termLabel   String
+  average     Decimal? @db.Decimal(5, 2)
+  showAverage Boolean  @default(true)
+  distinction String?
+  photoKey    String?
+  /// La direction confirme avoir l'accord des parents pour publier le nom (et la photo) de l'élève.
+  consentAt   DateTime
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now())
+
+  @@unique([reportCardId])
+  @@map("public_honors")
 }

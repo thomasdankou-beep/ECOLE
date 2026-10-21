@@ -20,6 +20,8 @@ export function SiteHeader() {
         </Link>
         <nav className="flex items-center gap-1.5 text-sm font-bold">
           {school?.tracks.length ? <Link href="/#filieres" className="hidden rounded-lg px-3 py-2 hover:bg-sunk md:block">Filières</Link> : null}
+          {school?.honors?.length ? <Link href="/#honneur" className="hidden rounded-lg px-3 py-2 hover:bg-sunk lg:block">Nos lauréats</Link> : null}
+          <Link href="/#admission" className="hidden rounded-lg px-3 py-2 hover:bg-sunk lg:block">Admission</Link>
           <Link href="/#sites" className="hidden rounded-lg px-3 py-2 hover:bg-sunk md:block">{school?.sites.length === 1 ? 'Notre site' : 'Nos sites'}</Link>
           <Link href="/preinscription" className="hidden rounded-lg px-3 py-2 hover:bg-sunk sm:block">Pré-inscription</Link>
           <Link href="/connexion" className="inline-flex min-h-11 items-center rounded-lg bg-brand px-4 text-brand-ink hover:bg-brand-strong">Se connecter</Link>
