@@ -116,6 +116,8 @@ export class StaffDto {
   @IsString() @MaxLength(30) phone: string;
   @IsOptional() @IsEmail() email?: string;
   @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => RoleInput) roles: RoleInput[];
+  /// Matières enseignées (une ou plusieurs), pour un professeur.
+  @IsOptional() @IsArray() @IsUUID('all', { each: true }) subjectIds?: string[];
 }
 
 export class StaffUpdateDto {
@@ -125,6 +127,7 @@ export class StaffUpdateDto {
   @IsOptional() @IsEmail() email?: string;
   @IsOptional() @IsBoolean() active?: boolean;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => RoleInput) roles?: RoleInput[];
+  @IsOptional() @IsArray() @IsUUID('all', { each: true }) subjectIds?: string[];
 }
 
 export class TenantSettingsDto {
