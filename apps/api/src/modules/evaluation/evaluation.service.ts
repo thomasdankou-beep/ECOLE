@@ -97,11 +97,17 @@ export class EvaluationService {
     for (const t of terms) results.push(await this.computeClassTerm(tx, tenantId, classId, t.id, publishedOnly));
     const students = (results[0]?.students ?? []).map((s) => {
       const byTerm = Object.fromEntries(terms.map((t, i) => [t.id, results[i].students.find((x) => x.id === s.id)?.average ?? null]));
-      return { id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, terms: byTerm, average: annualAverage(terms.map((t) => ({ average: byTerm[t.id], weight: Number(t.weight) }))), rank: null as number | null };
+      // Moyenne annuelle de chaque matière : moyennes des périodes pondérées comme la moyenne générale.
+      const subjects = (results[0]?.subjects ?? []).map((x) => {
+        const t = Object.fromEntries(terms.map((term, i) => [term.id, results[i].students.find((y) => y.id === s.id)?.subjects.get(x.classSubjectId) ?? null]));
+        return { classSubjectId: x.classSubjectId, name: x.name, coefficient: x.coefficient, teacher: x.teacher, terms: t, average: annualAverage(terms.map((term) => ({ average: t[term.id], weight: Number(term.weight) }))) };
+      });
+      return { id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, terms: byTerm, subjects, average: annualAverage(terms.map((t) => ({ average: byTerm[t.id], weight: Number(t.weight) }))), rank: null as number | null };
     });
     const r = ranks(students);
     for (const s of students) s.rank = r.get(s.id) ?? null;
-    return { terms: terms.map((t) => ({ id: t.id, name: t.name, weight: Number(t.weight), classAverage: results[terms.indexOf(t)].classStats.mean })), students, classStats: stats(students.map((s) => s.average)), academicYearId: klass.academicYearId };
+    const subjectStats = (results[0]?.subjects ?? []).map((x) => ({ classSubjectId: x.classSubjectId, ...stats(students.map((s) => s.subjects.find((y) => y.classSubjectId === x.classSubjectId)?.average ?? null)) }));
+    return { subjectStats, terms: terms.map((t) => ({ id: t.id, name: t.name, weight: Number(t.weight), classAverage: results[terms.indexOf(t)].classStats.mean })), students, classStats: stats(students.map((s) => s.average)), academicYearId: klass.academicYearId };
   }
 
   private async runStatus(tx: Tx, classId: string, termId: string) {

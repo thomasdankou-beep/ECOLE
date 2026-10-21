@@ -35,7 +35,7 @@ function OneCard({ id }: { id: string }) {
   return (
     <Loader {...q}>
       {(c) => (
-        <article className="mx-auto grid w-full max-w-[210mm] gap-4 bg-white p-6 text-[13px] text-black shadow-sm print:break-after-page print:p-0 print:shadow-none">
+        <article className="mx-auto grid w-full max-w-[210mm] gap-4 bg-white p-6 text-[13px] text-black shadow-sm print:break-after-page print:last:break-after-auto print:p-0 print:shadow-none">
           <Letterhead identity={c.identity} site={c.class.site.name} />
           <div className="text-center">
             <h1 className="font-display text-2xl font-bold uppercase">Bulletin de notes · {c.term.name}</h1>

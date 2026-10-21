@@ -64,6 +64,7 @@ function FamilyCards() {
                 <p className="tabular mt-1 font-display text-4xl font-bold">{note(d.annual.average)}<span className="text-lg text-muted"> / 20</span></p>
                 <p className="text-sm text-muted">Moyenne générale annuelle · rang {d.annual.rank ?? '—'} sur {d.annual.classSize}{d.annual.distinction ? ` · ${d.annual.distinction}` : ''}</p>
                 {d.annual.outcomeLabel && <p className={`mt-2 text-xl font-bold ${d.annual.outcome === 'ADMIS' ? 'text-good' : 'text-bad'}`}>{d.annual.outcomeLabel}{d.annual.note ? ` · ${d.annual.note}` : ''}</p>}
+                <Link href={`/espace/bulletins/annuel/imprimer?eleve=${child!.id}`} className="mt-3 inline-flex font-bold text-brand hover:underline">Voir et imprimer le bulletin annuel</Link>
               </div>
             )}
             {d.cards.length === 0 ? <Empty title="Aucun bulletin publié pour le moment">Vous recevrez une notification dès la publication.</Empty> : (

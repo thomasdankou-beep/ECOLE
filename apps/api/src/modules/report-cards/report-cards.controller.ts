@@ -53,6 +53,15 @@ export class ReportCardsController {
   @Get('annual/:classId') @Can('reportcards.control', 'reportcards.appreciate')
   annual(@CurrentActor() a: Actor, @Param('classId', ParseUUIDPipe) c: string) { return this.s.annual(a, c); }
 
+  /** Bulletins annuels à imprimer : toute la classe, ou les élèves listés dans « ids ». */
+  @Get('annual/:classId/cards') @Can('reportcards.control', 'reportcards.appreciate')
+  annualCards(@CurrentActor() a: Actor, @Param('classId', ParseUUIDPipe) c: string, @Query('ids') ids?: string) {
+    return this.s.annualCards(a, c, ids ? ids.split(',').filter(Boolean) : undefined);
+  }
+
+  @Get('students/:id/annual') @Can('reportcards.read')
+  annualForStudent(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.annualCardForStudent(a, id); }
+
   @Put('annual/:classId') @Can('reportcards.validate')
   saveAnnual(@CurrentActor() a: Actor, @Param('classId', ParseUUIDPipe) c: string, @Body() dto: AnnualDto) {
     return this.s.saveAnnual(a, c, dto.entries.map((e) => ({ ...e, outcome: e.outcome ?? null })));
