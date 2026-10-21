@@ -1,15 +1,20 @@
 /**
  * Données de démonstration du pilote Saint Kisito-GESA.
  *
- * Réel (affiches de l'école) : nom, sites, cycles, filières, téléphone, devise, date de rentrée.
- * FICTIF : toutes les personnes, notes, absences, montants des frais et coefficients.
- * Les montants et coefficients sont des exemples à remplacer par ceux de l'école (INFORMATION MANQUANTE).
+ * Réel : nom, sites, cycles, filières, téléphone, devise (affiches de l'école) ; niveaux, frais 2026-2027,
+ * coordonnées et pièces à fournir (fiche de renseignement, chargée depuis data/ecoles/saint-kisito-2026-2027.json).
+ * FICTIF : toutes les personnes, notes, absences, factures et paiements, coefficients (INFORMATION MANQUANTE).
  *
  * Usage : npm run db:seed (réinitialise l'établissement « saint-kisito »).
  */
 import { AssessmentKind, Cycle, PrismaClient, RoleCode } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { randomBytes } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { applySchoolData, SchoolData } from '../src/modules/settings/school-data';
+
+const SCHOOL_DATA = JSON.parse(readFileSync(join(__dirname, '..', 'data', 'ecoles', 'saint-kisito-2026-2027.json'), 'utf8')) as SchoolData;
 
 const db = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_ADMIN_URL } } });
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD ?? 'Kisito2026';
@@ -76,6 +81,9 @@ async function main() {
         g2: await tr('G2', 'Comptabilité gestion (G2)', 'LYCEE_TECHNIQUE'),
         imi: await tr('IMI', 'Installation et maintenance informatique (IMI)', 'LYCEE_TECHNIQUE'),
       };
+      // Fiche de renseignement 2026-2027 de l'école : niveaux, filières, frais réels, coordonnées (données de l'école, pas du code).
+      await applySchoolData(tx, T, SCHOOL_DATA);
+
       const room = async (siteId: string, name: string) => tx.room.create({ data: { tenantId: T, siteId, name, kind: name.startsWith('Atelier') ? 'WORKSHOP' : 'CLASSROOM' } });
       const R = { at1: await room(hed.id, 'Atelier 1'), at2: await room(hed.id, 'Atelier 2'), s3: await room(hed.id, 'Salle 3'), s5: await room(hed.id, 'Salle 5'), s4: await room(tog.id, 'Salle 4'), s6: await room(tog.id, 'Salle 6'), cout: await room(tog.id, 'Atelier couture') };
       const sub = async (c: string, name: string, practical = false) => tx.subject.create({ data: { tenantId: T, code: c, name, practical } });
@@ -162,9 +170,9 @@ async function main() {
       };
       const f3Names: [string, 'M' | 'F'][] = [['Koffi Dossou', 'M'], ['Rachidatou Bio', 'F'], ['Mawulé Ahouansou', 'M'], ['Ifèoluwa Adjovi', 'F'], ['Romaric Gbaguidi', 'M'], ['Nadège Akpovi', 'F'], ['Fiacre Tossou', 'M'], ['Prisca Hounkpè', 'F'], ['Jérôme Kpadonou', 'M'], ['Bénédicte Sossou', 'F']];
       const a4Names: [string, 'M' | 'F'][] = [['Sèna Dossou', 'F'], ['Ange Hounsa', 'M'], ['Gildas Agbo', 'M'], ['Faïzath Moussa', 'F'], ['Brice Dégbé', 'M'], ['Carine Hessou', 'F'], ['Luc Amoussou', 'M'], ['Yasmine Soglo', 'F']];
-      const f3 = [];
+      const f3: { id: string; firstName: string; lastName: string }[] = [];
       for (const [nm, sx] of f3Names) f3.push(await enroll(nm, F3.id, sx, nm === 'Koffi Dossou' ? guardianDossou.id : undefined));
-      const a4 = [];
+      const a4: { id: string; firstName: string; lastName: string }[] = [];
       for (const [nm, sx] of a4Names) a4.push(await enroll(nm, A4.id, sx, nm === 'Sèna Dossou' ? guardianDossou.id : undefined));
       const koffi = f3[0];
       const sena = a4[0];
@@ -189,24 +197,27 @@ async function main() {
       await assess(A4cs.math.id, 'Devoir 1', 'DEVOIR', '2026-10-07', [9.5, 12, 14, 11, 8, 15, 10.5, 13], a4, zinsou.id);
       await assess(A4cs.fr.id, 'Devoir 1', 'DEVOIR', '2026-10-08', [12, 11, 13.5, 14, 9, 16, 10, 12.5], a4, akakpo.id);
 
-      // ---------------------------------------------------------------- Frais (MONTANTS D'EXEMPLE) et factures
-      const fees: { name: string; amount: number; trackId: string; due: string }[] = [
-        { name: 'Scolarité tranche 1', amount: 60000, trackId: TR.f3.id, due: '2026-09-30' },
-        { name: 'Scolarité tranche 2', amount: 60000, trackId: TR.f3.id, due: '2026-11-15' },
-        { name: 'Tenue d’atelier', amount: 15000, trackId: TR.f3.id, due: '2026-10-10' },
-        { name: 'Scolarité tranche 1', amount: 45000, trackId: TR.gen.id, due: '2026-09-30' },
-        { name: 'Scolarité tranche 2', amount: 45000, trackId: TR.gen.id, due: '2026-11-15' },
+      // ---------------------------------------------------------------- Factures (FICTIVES) sur les frais réels de la fiche
+      const feeOf = async (name: string, where: { levelId?: string; trackId?: string }) => {
+        const f = await tx.feeType.findFirstOrThrow({ where: { academicYearId: year.id, name, ...where } });
+        return { fee: f, name: f.name, amount: f.amount, due: f.dueDate?.toISOString().slice(0, 10) ?? '2026-10-10', students: where.trackId === TR.f3.id || where.levelId === L.a1.id ? f3 : a4 };
+      };
+      const fees = [
+        await feeOf('Scolarité 1re tranche', { levelId: L.a1.id }), await feeOf('Scolarité 2e tranche', { levelId: L.a1.id }),
+        await feeOf("Frais de TP (toute l'année)", { trackId: TR.f3.id }),
+        await feeOf('Scolarité 1re tranche', { levelId: L.s4.id }), await feeOf('Scolarité 2e tranche', { levelId: L.s4.id }),
       ];
       let inv = 0;
       let rec = 0;
       for (const f of fees) {
-        const fee = await tx.feeType.create({ data: { tenantId: T, academicYearId: year.id, name: f.name, amount: f.amount, trackId: f.trackId, dueDate: d(f.due) } });
-        const students = f.trackId === TR.f3.id ? f3 : a4;
+        const { fee, students } = f;
+        const tp = f.name.startsWith('Frais de TP');
         for (const [i, s] of students.entries()) {
-          const paidFull = f.due === '2026-09-30' && i % 4 !== 3; // tranche 1 réglée sauf pour un élève sur quatre
-          const paidPart = f.due === '2026-09-30' && i % 4 === 3 && i % 8 === 3 ? 20000 : 0;
-          const paidUniform = f.name.startsWith('Tenue') && i % 2 === 0;
-          const paid = paidFull || paidUniform ? f.amount : paidPart;
+          const first = f.name === 'Scolarité 1re tranche';
+          const paidFull = first && i % 4 !== 3; // 1re tranche réglée sauf pour un élève sur quatre
+          const paidPart = first && i % 8 === 3 ? Math.round(f.amount / 2) : 0;
+          const paidTp = tp && i % 2 === 0;
+          const paid = paidFull || paidTp ? f.amount : paidPart;
           const invoice = await tx.invoice.create({
             data: {
               tenantId: T, number: `FAC-2026-${String(++inv).padStart(5, '0')}`, studentId: s.id, label: f.name, total: f.amount, paid,
@@ -218,7 +229,7 @@ async function main() {
             const p = await tx.payment.create({
               data: {
                 tenantId: T, invoiceId: invoice.id, studentId: s.id, amount: paid, method: i % 3 === 0 ? 'MOBILE_MONEY_DESK' : 'CASH', transactionId: `SEED-${invoice.number}`,
-                status: 'SUCCESS', receivedById: compta.id, confirmedAt: d(f.name.startsWith('Tenue') ? '2026-10-08' : '2026-09-25'),
+                status: 'SUCCESS', receivedById: compta.id, confirmedAt: d(tp ? '2026-10-08' : '2026-09-25'),
               },
             });
             const vc = code();

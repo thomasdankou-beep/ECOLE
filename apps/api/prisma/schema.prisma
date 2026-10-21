@@ -790,9 +790,19 @@ model FeeType {
   trackId        String?   @db.Uuid
   dueDate        DateTime? @db.Date
   active         Boolean   @default(true)
+  /// À qui le frais s'applique : tous, nouveaux inscrits (inscription) ou anciens élèves (réinscription).
+  audience       FeeAudience @default(ALL)
+  /// Facultatif (activité extra-classe, paiement en une fois) : jamais facturé d'office, seulement à la demande.
+  optional       Boolean   @default(false)
   createdAt      DateTime  @default(now())
 
   @@map("fee_types")
+}
+
+enum FeeAudience {
+  ALL
+  NEW
+  RETURNING
 }
 
 enum InvoiceStatus {

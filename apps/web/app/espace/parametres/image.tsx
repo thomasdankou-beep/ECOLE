@@ -8,7 +8,7 @@ import { api } from '@/lib/api';
 import { useAction } from '@/lib/use-api';
 import { ImageSlot } from './etablissement';
 
-export type PublicTexts = { slogan?: string; tagline?: string; phone?: string; rentree?: string; highlights?: string[]; reasons?: string[]; motto?: string; [k: string]: unknown };
+export type PublicTexts = { slogan?: string; tagline?: string; phone?: string; rentree?: string; entranceTest?: string; requiredDocuments?: string[]; highlights?: string[]; reasons?: string[]; motto?: string; [k: string]: unknown };
 
 const DEFAULT_COLOR = '#1b3a8c';
 const lines = (v: string) => v.split('\n').map((x) => x.trim()).filter(Boolean);
@@ -23,6 +23,7 @@ export function ImageEcole({ name, shortName, logoUrl, primaryColor, texts, relo
   const [t, setT] = useState({
     slogan: texts.slogan ?? '', tagline: texts.tagline ?? '', phone: texts.phone ?? '', rentree: texts.rentree ?? '', motto: texts.motto ?? '',
     highlights: (texts.highlights ?? []).join('\n'), reasons: (texts.reasons ?? []).join('\n'),
+    entranceTest: texts.entranceTest ?? '', requiredDocuments: (texts.requiredDocuments ?? []).join('\n'),
   });
   const setText = (k: keyof typeof t) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setT({ ...t, [k]: e.target.value });
 
@@ -65,7 +66,7 @@ export function ImageEcole({ name, shortName, logoUrl, primaryColor, texts, relo
       <Section title="Textes du site public">
         <form className="grid gap-3" onSubmit={async (e) => {
           e.preventDefault();
-          const pub = { ...texts, slogan: t.slogan, tagline: t.tagline, phone: t.phone, rentree: t.rentree || undefined, motto: t.motto, highlights: lines(t.highlights), reasons: lines(t.reasons) };
+          const pub = { ...texts, slogan: t.slogan, tagline: t.tagline, phone: t.phone, rentree: t.rentree || undefined, motto: t.motto, highlights: lines(t.highlights), reasons: lines(t.reasons), entranceTest: t.entranceTest || undefined, requiredDocuments: lines(t.requiredDocuments) };
           if (await run(() => api.patch('/settings', { settings: { public: pub } }), toast, 'Site public mis à jour')) reload();
         }}>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -73,9 +74,13 @@ export function ImageEcole({ name, shortName, logoUrl, primaryColor, texts, relo
             <Field label="Téléphone affiché"><Input value={t.phone} onChange={setText('phone')} maxLength={40} /></Field>
           </div>
           <Field label="Accroche sous le nom"><Input value={t.tagline} onChange={setText('tagline')} maxLength={160} /></Field>
-          <Field label="Date de la rentrée" hint="Laissez vide pour ne pas l’afficher."><Input type="date" value={t.rentree} onChange={setText('rentree')} /></Field>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Date de la rentrée" hint="Laissez vide pour ne pas l’afficher."><Input type="date" value={t.rentree} onChange={setText('rentree')} /></Field>
+            <Field label="Date du test d’entrée" hint="Facultatif."><Input type="date" value={t.entranceTest} onChange={setText('entranceTest')} /></Field>
+          </div>
           <Field label="Points forts du bandeau" hint="Un par ligne."><Textarea value={t.highlights} onChange={setText('highlights')} rows={3} maxLength={600} /></Field>
           <Field label="Pourquoi nous choisir" hint="Une raison par ligne. Laissez vide pour masquer la rubrique."><Textarea value={t.reasons} onChange={setText('reasons')} rows={4} maxLength={1000} /></Field>
+          <Field label="Pièces à fournir pour l’inscription" hint="Une par ligne. Affichées sur la page de pré-inscription."><Textarea value={t.requiredDocuments} onChange={setText('requiredDocuments')} rows={4} maxLength={2000} /></Field>
           <Field label="Phrase de conclusion"><Input value={t.motto} onChange={setText('motto')} maxLength={160} /></Field>
           <Button type="submit" loading={busy}>Enregistrer</Button>
         </form>

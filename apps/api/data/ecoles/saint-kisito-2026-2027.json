@@ -1,0 +1,169 @@
+{
+  "source": "Fiche de renseignement « LP ST KISITO 2026-2027 » transmise par l'école le 21 octobre 2026. Montants recopiés tels quels.",
+  "year": "2026-2027",
+  "identity": { "phone": "01 40 63 24 39", "email": "etp.saintkisito@gmail.com" },
+  "sites": [
+    { "name": "Hêdomey", "address": "Hêdomey, fin des pavés, deuxième von à gauche" },
+    { "name": "Togbin", "address": "Togbin Kpèvi, immeuble Kpondjou" }
+  ],
+  "levels": [
+    { "name": "Maternelle 1", "cycle": "MATERNELLE" },
+    { "name": "Maternelle 2", "cycle": "MATERNELLE" },
+    { "name": "CI", "cycle": "PRIMAIRE" },
+    { "name": "CP", "cycle": "PRIMAIRE" },
+    { "name": "CE1", "cycle": "PRIMAIRE" },
+    { "name": "CE2", "cycle": "PRIMAIRE" },
+    { "name": "CM1", "cycle": "PRIMAIRE" },
+    { "name": "CM2", "cycle": "PRIMAIRE" },
+    { "name": "6e", "cycle": "COLLEGE" },
+    { "name": "5e", "cycle": "COLLEGE" },
+    { "name": "4e", "cycle": "COLLEGE" },
+    { "name": "3e", "cycle": "COLLEGE" },
+    { "name": "1re année", "cycle": "LYCEE_TECHNIQUE" },
+    { "name": "2e année", "cycle": "LYCEE_TECHNIQUE" },
+    { "name": "3e année", "cycle": "LYCEE_TECHNIQUE" },
+    { "name": "2nde", "cycle": "LYCEE_TECHNIQUE" },
+    { "name": "1re", "cycle": "LYCEE_TECHNIQUE" },
+    { "name": "Terminale", "cycle": "LYCEE_TECHNIQUE" }
+  ],
+  "tracks": [
+    { "code": "F4", "name": "Génie civil (F4)", "cycle": "LYCEE_TECHNIQUE" },
+    { "code": "BTP", "name": "Constructeur bâtiment (BTP)", "cycle": "LYCEE_TECHNIQUE" },
+    { "code": "F3", "name": "Électrotechnique (F3)", "cycle": "LYCEE_TECHNIQUE" },
+    { "code": "MMV", "name": "Métier de mode et de vêtement (MMV)", "cycle": "LYCEE_TECHNIQUE" },
+    { "code": "HR", "name": "Hôtellerie restauration (HR)", "cycle": "LYCEE_TECHNIQUE" },
+    { "code": "G2", "name": "Comptabilité gestion (G2)", "cycle": "LYCEE_TECHNIQUE" }
+  ],
+  "fees": [
+    {
+      "name": "Inscription", "audience": "NEW", "dueDate": "2026-09-14",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2", "CI", "CP", "CE1", "CE2", "CM1", "CM2"], "amount": 3000 },
+        { "levels": ["6e", "5e", "4e", "3e"], "amount": 5000 },
+        { "levels": ["1re année", "2e année", "3e année", "2nde", "1re", "Terminale"], "amount": 5000 }
+      ]
+    },
+    {
+      "name": "Réinscription", "audience": "RETURNING", "dueDate": "2026-09-14",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2", "CI", "CP", "CE1", "CE2", "CM1", "CM2"], "amount": 2000 },
+        { "levels": ["6e", "5e", "4e", "3e"], "amount": 3000 },
+        { "levels": ["1re année", "2e année", "3e année", "2nde", "1re", "Terminale"], "amount": 3000 }
+      ]
+    },
+    {
+      "name": "Frais généraux", "dueDate": "2026-09-14",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2", "CI", "CP", "CE1", "CE2", "CM1", "CM2"], "amount": 2500 },
+        { "levels": ["6e", "5e", "4e", "3e", "1re année", "2e année", "3e année"], "amount": 3500 },
+        { "levels": ["2nde", "1re", "Terminale"], "amount": 5000 }
+      ]
+    },
+    {
+      "name": "Scolarité 1re tranche", "dueDate": "2026-09-14",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2"], "amount": 20000 },
+        { "levels": ["CI", "CP"], "amount": 15000 },
+        { "levels": ["CE1", "CE2"], "amount": 20000 },
+        { "levels": ["CM1", "CM2"], "amount": 20000 },
+        { "levels": ["6e"], "amount": 20000 },
+        { "levels": ["5e"], "amount": 15000 },
+        { "levels": ["4e"], "amount": 20000 },
+        { "levels": ["3e"], "amount": 20000 },
+        { "levels": ["1re année"], "amount": 35000 },
+        { "levels": ["2e année"], "amount": 40000 },
+        { "levels": ["3e année"], "amount": 50000 },
+        { "levels": ["2nde"], "amount": 50000 },
+        { "levels": ["1re"], "amount": 60000 },
+        { "levels": ["Terminale"], "amount": 80000 }
+      ]
+    },
+    {
+      "name": "Scolarité 2e tranche", "dueDate": "2026-12-05",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2"], "amount": 12000 },
+        { "levels": ["CI", "CP", "CE1", "CE2"], "amount": 6000 },
+        { "levels": ["CM1", "CM2"], "amount": 10000 },
+        { "levels": ["6e"], "amount": 12000 },
+        { "levels": ["5e", "4e"], "amount": 7000 },
+        { "levels": ["3e"], "amount": 10000 },
+        { "levels": ["1re année", "2e année", "3e année"], "amount": 20000 },
+        { "levels": ["2nde", "1re"], "amount": 40000 },
+        { "levels": ["Terminale"], "amount": 50000 }
+      ]
+    },
+    {
+      "name": "Scolarité 3e tranche", "dueDate": "2027-02-05",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2"], "amount": 10000 },
+        { "levels": ["CI", "CP", "CE1", "CE2"], "amount": 5000 },
+        { "levels": ["CM1", "CM2", "5e", "4e"], "amount": 6000 },
+        { "levels": ["6e"], "amount": 10000 },
+        { "levels": ["3e"], "amount": 8000 },
+        { "levels": ["1re année", "3e année"], "amount": 10000 },
+        { "levels": ["2e année"], "amount": 15000 },
+        { "levels": ["2nde"], "amount": 20000 },
+        { "levels": ["1re"], "amount": 30000 },
+        { "levels": ["Terminale"], "amount": 40000 }
+      ]
+    },
+    {
+      "name": "Scolarité en une fois", "optional": true, "dueDate": "2026-09-14",
+      "rows": [
+        { "levels": ["Maternelle 1", "Maternelle 2"], "amount": 42000 },
+        { "levels": ["CI", "CP"], "amount": 26000 },
+        { "levels": ["CE1", "CE2"], "amount": 31000 },
+        { "levels": ["CM1", "CM2"], "amount": 36000 },
+        { "levels": ["6e"], "amount": 47000 },
+        { "levels": ["5e"], "amount": 57000 },
+        { "levels": ["4e"], "amount": 62000 },
+        { "levels": ["3e"], "amount": 75000 },
+        { "levels": ["1re année"], "amount": 65000 },
+        { "levels": ["2e année"], "amount": 75000 },
+        { "levels": ["3e année"], "amount": 80000 },
+        { "levels": ["2nde"], "amount": 120000 },
+        { "levels": ["1re"], "amount": 130000 },
+        { "levels": ["Terminale"], "amount": 170000 }
+      ]
+    },
+    {
+      "name": "Frais de TP (toute l'année)",
+      "rows": [
+        { "track": "HR", "amount": 30000 },
+        { "track": "MMV", "amount": 30000 },
+        { "track": "F3", "amount": 20000 },
+        { "track": "F4", "amount": 20000 }
+      ]
+    },
+    {
+      "name": "Frais de Noël et d'excursion",
+      "rows": [{ "levels": ["Maternelle 1", "Maternelle 2", "CI", "CP", "CE1", "CE2", "CM1", "CM2"], "amount": 8000 }]
+    },
+    {
+      "name": "Activités extra-classe (danse, musique, jeux, arts martiaux, arts plastiques)", "optional": true,
+      "rows": [{ "all": true, "amount": 10000 }]
+    }
+  ],
+  "public": {
+    "rentree": "2026-09-14",
+    "entranceTest": "2026-08-05",
+    "motto": "Oser, apprendre, garantir son avenir !",
+    "phone": "01 40 63 24 39",
+    "highlights": ["100 % pratique", "Garantie de stage", "Primaire bilingue : anglais dès le CI", "Diplômes : CEP, BEPC, BAC, CAP, DTI, CQP"],
+    "requiredDocuments": [
+      "Acte de naissance légalisé",
+      "Bulletins de l'année précédente ou relevé de notes",
+      "Numéro EDUCMASTER",
+      "2 photos d'identité",
+      "1 paquet de papier RAM (secondaire)",
+      "Fiche d'engagement disciplinaire (au secrétariat)",
+      "Le tout dans une chemise dossier portant l'adresse des parents ; liste des fournitures au secrétariat"
+    ]
+  },
+  "unresolved": [
+    "Ligne « TD » de chaque tableau (0 F, puis 2e et 3e tranches) : signification non précisée, non saisie.",
+    "6e, 5e, 4e, 3e et 2nde : le montant « en une tranche » diffère de la somme des trois tranches ; recopié tel quel.",
+    "Date limite de la 1re tranche « à l'inscription » : fixée par défaut à la rentrée (14/09/2026).",
+    "Date limite des frais de TP, de Noël et des activités extra-classe : non précisée."
+  ]
+}
