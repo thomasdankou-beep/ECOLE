@@ -32,7 +32,7 @@ export default function ResultatsAnnuels() {
   return (
     <>
       <Link href="/espace/bulletins" className="inline-flex items-center gap-1 text-sm font-bold text-brand print:hidden"><ArrowLeft className="size-4" /> Bulletins</Link>
-      <PageHeader title="Résultats de fin d’année" subtitle="Moyenne générale annuelle de chaque élève, rang, mention et décision de passage." actions={<Button variant="outline" onClick={() => window.print()} className="print:hidden"><Printer className="size-4" /> Imprimer</Button>} />
+      <PageHeader title="Résultats de fin d’année" subtitle="Moyenne générale annuelle de chaque élève, rang, mention et décision de passage." actions={<Button variant="outline" onClick={() => window.print()} className="print:hidden"><Printer className="size-4" /> Imprimer le tableau</Button>} />
       <ErrorNote error={settings.error ?? classes.error} />
       {classes.data && classes.data.length === 0 && <Empty title="Aucune classe">Seuls le professeur principal et la direction voient les résultats d’une classe.</Empty>}
       {classes.data && classes.data.length > 0 && (
@@ -61,6 +61,9 @@ function ClassResults({ classId }: { classId: string }) {
           {a.passMark === null && (
             <p className="rounded-xl bg-warn-soft p-4 text-sm font-bold text-warn print:hidden">Aucun seuil de passage saisi : aucune décision n’est proposée automatiquement. La direction peut le renseigner dans Paramètres › Mentions et règles, ou arrêter chaque décision ci-dessous.</p>
           )}
+          <div className="flex flex-wrap gap-2 print:hidden">
+            <Button asChild><Link href={`/espace/bulletins/annuel/imprimer?classId=${classId}`}><Printer className="size-4" /> Bulletins annuels de la classe</Link></Button>
+          </div>
           <div className="grid gap-3 sm:grid-cols-4">
             <Stat label="Moyenne de la classe" value={note(a.classStats.mean)} detail={`de ${note(a.classStats.min)} à ${note(a.classStats.max)}`} />
             <Stat label="Admis" value={a.summary.admis} detail={a.summary.total ? `${Math.round((a.summary.admis / a.summary.total) * 100)} % de la classe` : undefined} tone="good" />
@@ -76,7 +79,7 @@ function ClassResults({ classId }: { classId: string }) {
                   const final = d.outcome ?? s.proposed;
                   return (
                     <tr key={s.id}>
-                      <td><b>{s.name}</b><span className="block text-xs text-muted">{s.matricule}</span></td>
+                      <td><b>{s.name}</b><span className="block text-xs text-muted">{s.matricule}</span><Link className="text-xs font-bold text-brand hover:underline print:hidden" href={`/espace/bulletins/annuel/imprimer?classId=${classId}&ids=${s.id}`}>Bulletin annuel</Link></td>
                       {a.terms.map((t) => <td key={t.id} className="tabular text-right">{note(s.terms[t.id])}</td>)}
                       <td className="tabular text-right font-bold">{note(s.average)}{s.average !== null && !s.complete && <span className="block text-xs font-normal text-muted">provisoire</span>}</td>
                       <td className="text-right">{s.rank ?? '—'}</td>

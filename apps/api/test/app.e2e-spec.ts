@@ -576,4 +576,23 @@ describe("Fin d'année : dates, moyenne annuelle et décision", () => {
     expect((await as('teacher').put(`/report-cards/annual/${annual.class.id}`, { entries: [] })).status).toBe(403);
     await as('direction').patch('/settings', { settings: { grading: { passMark: null } } }).expect(200);
   });
+
+  it('imprime le bulletin annuel : matières par trimestre et moyenne annuelle ; la famille attend la publication du dernier trimestre', async () => {
+    const classes = (await as('direction').get('/classes')).body;
+    let r: any;
+    for (const c of classes) {
+      r = await as('direction').get(`/report-cards/annual/${c.id}/cards`);
+      if (r.body.cards?.some((x: any) => x.average !== null)) break;
+    }
+    expect(r.status).toBe(200);
+    const card = r.body.cards.find((x: any) => x.average !== null);
+    expect(card.subjects.length).toBeGreaterThan(0);
+    expect(Object.keys(card.subjects[0].terms)).toHaveLength(r.body.terms.length);
+    const one = await as('direction').get(`${r.req.path.replace('/api/v1', '')}?ids=${card.student.id}`);
+    expect(one.body.cards).toHaveLength(1);
+    const me = (await as('student').get('/auth/me')).body;
+    expect(me.self?.id).toBeTruthy();
+    expect((await as('student').get(`/report-cards/students/${me.self.id}/annual`)).status).toBe(404);
+    expect((await as('comptable').get(`/report-cards/annual/${classes[0].id}/cards`)).status).toBe(403);
+  });
 });

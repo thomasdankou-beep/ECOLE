@@ -272,6 +272,66 @@ export class ReportCardsService {
     });
   }
 
+  /** Bulletins annuels d'une classe (tous les élèves, ou ceux demandés), pour l'impression par la direction ou le professeur principal. */
+  annualCards(actor: Actor, classId: string, studentIds?: string[]) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      if (!(await this.canControl(tx, actor, classId))) throw new ForbiddenException('Réservé à la direction et au professeur principal');
+      return this.buildAnnualCards(tx, actor.tenantId, classId, studentIds, false);
+    });
+  }
+
+  /** Bulletin annuel d'un élève : la famille le voit une fois les bulletins de la dernière période publiés. */
+  annualCardForStudent(actor: Actor, studentId: string) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      await this.scope.assertStudent(tx, actor, studentId);
+      const family = ['PARENT', 'ELEVE'].includes(actor.role);
+      const yearId = await this.scope.currentYearId(tx);
+      const enr = await tx.enrollment.findUnique({ where: { studentId_academicYearId: { studentId, academicYearId: yearId } } });
+      if (!enr) throw new NotFoundException("L'élève n'est pas inscrit cette année");
+      if (family) {
+        const last = await tx.term.findFirst({ where: { academicYearId: yearId }, orderBy: { position: 'desc' } });
+        const run = last && (await tx.reportCardRun.findUnique({ where: { classId_termId: { classId: enr.classId, termId: last.id } } }));
+        if (run?.status !== 'PUBLIE') throw new NotFoundException('Le bulletin annuel sera disponible après la publication des bulletins du dernier trimestre');
+        if (await this.blockedForUnpaid(tx, actor.tenantId, studentId)) throw new ForbiddenException("L'accès au bulletin en ligne est suspendu jusqu'au règlement des frais. Rapprochez-vous de l'économat.");
+      }
+      return this.buildAnnualCards(tx, actor.tenantId, enr.classId, [studentId], family);
+    });
+  }
+
+  private async buildAnnualCards(tx: Tx, tenantId: string, classId: string, studentIds: string[] | undefined, publishedOnly: boolean) {
+    const [klass, tenant] = await Promise.all([
+      tx.class.findUniqueOrThrow({ where: { id: classId }, include: { site: true, level: true, track: true, academicYear: true, headTeacher: { select: { firstName: true, lastName: true } } } }),
+      tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { name: true, settings: true } }),
+    ]);
+    const { grading } = tenantSettings(tenant.settings);
+    const year = await this.evaluation.computeClassYear(tx, tenantId, classId, publishedOnly);
+    const wanted = year.students.filter((s) => !studentIds?.length || studentIds.includes(s.id));
+    const ids = wanted.map((s) => s.id);
+    const [students, decisions, absences] = await Promise.all([
+      tx.student.findMany({ where: { id: { in: ids } }, select: { id: true, birthDate: true, sex: true } }),
+      tx.annualDecision.findMany({ where: { academicYearId: klass.academicYearId, studentId: { in: ids } } }),
+      tx.attendanceRecord.groupBy({ by: ['studentId'], where: { studentId: { in: ids }, status: 'ABSENT', session: { classId } }, _count: true }),
+    ]);
+    const identity = schoolIdentity(tenant, this.files);
+    return {
+      identity,
+      class: { name: klass.name, site: klass.site.name, level: klass.level.name, track: klass.track?.name ?? null, headTeacher: klass.headTeacher },
+      year: { label: klass.academicYear.label, startDate: klass.academicYear.startDate, endDate: klass.academicYear.endDate },
+      terms: year.terms, classStats: year.classStats, classSize: year.students.length,
+      cards: wanted.map((s) => {
+        const d = decisions.find((x) => x.studentId === s.id);
+        const outcome = d?.outcome ?? proposedOutcome(s.average, grading.passMark);
+        return {
+          student: { id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, birthDate: students.find((x) => x.id === s.id)?.birthDate ?? null },
+          subjects: s.subjects.map((x) => ({ ...x, classAverage: year.subjectStats.find((y) => y.classSubjectId === x.classSubjectId)?.mean ?? null })),
+          terms: s.terms, average: s.average, rank: s.rank, distinction: distinction(s.average, grading.distinctions),
+          absences: absences.find((a) => a.studentId === s.id)?._count ?? 0,
+          outcome, outcomeLabel: outcome ? OUTCOME_LABEL[outcome] : null, note: d?.note ?? null,
+        };
+      }),
+    };
+  }
+
   /** Résultat annuel montré à la famille une fois les bulletins de la dernière période publiés. */
   private async annualForFamily(tx: Tx, tenantId: string, studentId: string) {
     const yearId = await this.scope.currentYearId(tx);
