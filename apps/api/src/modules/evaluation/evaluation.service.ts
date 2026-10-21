@@ -7,7 +7,7 @@ import { ScopeService } from '../../common/scope.service';
 import { toDate } from '../../common/util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { tenantSettings } from '../settings/settings.service';
-import { generalAverage, MissingRule, ranks, stats, subjectAverage } from './grading';
+import { annualAverage, generalAverage, MissingRule, ranks, stats, subjectAverage } from './grading';
 
 export interface AssessmentInput {
   classSubjectId: string;
@@ -87,6 +87,21 @@ export class EvaluationService {
     const r = ranks(students);
     for (const s of students) s.rank = r.get(s.id) ?? null;
     return { subjects, students, classStats: stats(students.map((s) => s.average)) };
+  }
+
+  /** Moyennes de chaque période et moyenne annuelle (pondérée par le poids des périodes), avec le rang annuel. */
+  async computeClassYear(tx: Tx, tenantId: string, classId: string, publishedOnly = false) {
+    const klass = await tx.class.findUniqueOrThrow({ where: { id: classId } });
+    const terms = await tx.term.findMany({ where: { academicYearId: klass.academicYearId }, orderBy: { position: 'asc' } });
+    const results: ClassTermResult[] = [];
+    for (const t of terms) results.push(await this.computeClassTerm(tx, tenantId, classId, t.id, publishedOnly));
+    const students = (results[0]?.students ?? []).map((s) => {
+      const byTerm = Object.fromEntries(terms.map((t, i) => [t.id, results[i].students.find((x) => x.id === s.id)?.average ?? null]));
+      return { id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, terms: byTerm, average: annualAverage(terms.map((t) => ({ average: byTerm[t.id], weight: Number(t.weight) }))), rank: null as number | null };
+    });
+    const r = ranks(students);
+    for (const s of students) s.rank = r.get(s.id) ?? null;
+    return { terms: terms.map((t) => ({ id: t.id, name: t.name, weight: Number(t.weight), classAverage: results[terms.indexOf(t)].classStats.mean })), students, classStats: stats(students.map((s) => s.average)), academicYearId: klass.academicYearId };
   }
 
   private async runStatus(tx: Tx, classId: string, termId: string) {

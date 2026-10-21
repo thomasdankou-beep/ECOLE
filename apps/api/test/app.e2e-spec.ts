@@ -539,3 +539,41 @@ describe('Fiche de renseignement chargée et frais par public', () => {
     expect(back).not.toContain('Inscription');
   });
 });
+
+describe("Fin d'année : dates, moyenne annuelle et décision", () => {
+  it("la direction modifie la rentrée, la fin d'année et le poids des périodes, dans un ordre cohérent", async () => {
+    const y = (await as('direction').get('/settings')).body.currentYear;
+    const last = y.terms[y.terms.length - 1];
+    const ok = await as('direction').patch(`/academic-years/${y.id}`, { endDate: '2027-07-16', terms: [{ id: last.id, endDate: '2027-07-16', weight: 2 }] });
+    expect(ok.status).toBe(200);
+    expect(ok.body.endDate.slice(0, 10)).toBe('2027-07-16');
+    expect(Number(ok.body.terms[ok.body.terms.length - 1].weight)).toBe(2);
+    expect((await as('direction').patch(`/academic-years/${y.id}`, { terms: [{ id: last.id, endDate: '2027-08-30' }] })).status).toBe(400);
+    expect((await as('secretariat').patch(`/academic-years/${y.id}`, { endDate: '2027-07-01' })).status).toBe(403);
+  });
+
+  it("calcule la moyenne annuelle, propose admis ou non admis selon le seuil de l'école, et la direction arrête la décision", async () => {
+    const classes = (await as('direction').get('/classes')).body;
+    let annual: any;
+    for (const c of classes) {
+      annual = (await as('direction').get(`/report-cards/annual/${c.id}`)).body;
+      if (annual.students?.some((s: any) => s.average !== null)) break;
+    }
+    expect(annual.passMark).toBeNull();
+    const s = annual.students.find((x: any) => x.average !== null);
+    expect(s.proposed).toBeNull();
+    expect((await as('direction').patch('/settings', { settings: { grading: { passMark: 25 } } })).status).toBe(400);
+    await as('direction').patch('/settings', { settings: { grading: { passMark: s.average } } }).expect(200);
+    let again = (await as('direction').get(`/report-cards/annual/${annual.class.id}`)).body;
+    expect(again.students.find((x: any) => x.id === s.id).proposed).toBe('ADMIS');
+    expect(again.summary.admis).toBeGreaterThan(0);
+    await as('direction').put(`/report-cards/annual/${annual.class.id}`, { entries: [{ studentId: s.id, outcome: 'NON_ADMIS', note: 'Décision du conseil' }] }).expect(200);
+    again = (await as('direction').get(`/report-cards/annual/${annual.class.id}`)).body;
+    expect(again.students.find((x: any) => x.id === s.id)).toMatchObject({ final: 'NON_ADMIS', note: 'Décision du conseil' });
+    await as('direction').put(`/report-cards/annual/${annual.class.id}`, { entries: [{ studentId: s.id, outcome: null }] }).expect(200);
+    again = (await as('direction').get(`/report-cards/annual/${annual.class.id}`)).body;
+    expect(again.students.find((x: any) => x.id === s.id).final).toBe('ADMIS');
+    expect((await as('teacher').put(`/report-cards/annual/${annual.class.id}`, { entries: [] })).status).toBe(403);
+    await as('direction').patch('/settings', { settings: { grading: { passMark: null } } }).expect(200);
+  });
+});

@@ -4,7 +4,7 @@ import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { MAX_UPLOAD_BYTES } from '../files/files.service';
 import { Actor, Can, CurrentActor } from '../../common/auth';
 import {
-  AcademicYearDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, RoomUpdateDto,
+  AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, RoomUpdateDto,
   SiteDto, StaffDto, StaffUpdateDto, SubjectDto, SubjectUpdateDto, TenantSettingsDto, TrackDto, TrackUpdateDto,
 } from './settings.dto';
 import { SettingsService } from './settings.service';
@@ -48,6 +48,9 @@ export class SettingsController {
 
   @Post('academic-years') @Can('settings.manage')
   createYear(@CurrentActor() a: Actor, @Body() dto: AcademicYearDto) { return this.s.createYear(a, dto); }
+
+  @Patch('academic-years/:id') @Can('settings.manage')
+  updateYear(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: AcademicYearUpdateDto) { return this.s.updateYear(a, id, dto); }
 
   @Post('academic-years/:id/current') @Can('settings.manage')
   setCurrent(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.setCurrentYear(a, id); }

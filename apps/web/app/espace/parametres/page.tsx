@@ -15,7 +15,7 @@ import { Etablissement, type IdentitySettings } from './etablissement';
 import { ImageEcole, type PublicTexts } from './image';
 
 type Settings = {
-  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero' }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
+  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean }[];
@@ -314,13 +314,15 @@ function Year({ s, reload: reloadSettings }: { s: Settings; reload: () => void }
   const reload = () => { reloadSettings(); auth.reload(); };
   const toast = useToast();
   const { busy, run } = useAction();
-  const [f, setF] = useState({ label: '', startDate: '', endDate: '', terms: [{ name: 'Trimestre 1', startDate: '', endDate: '' }, { name: 'Trimestre 2', startDate: '', endDate: '' }, { name: 'Trimestre 3', startDate: '', endDate: '' }] });
+  const [f, setF] = useState({ label: '', startDate: '', endDate: '', terms: [{ name: 'Trimestre 1', startDate: '', endDate: '', weight: '1' }, { name: 'Trimestre 2', startDate: '', endDate: '', weight: '1' }, { name: 'Trimestre 3', startDate: '', endDate: '', weight: '1' }] });
+  const [edit, setEdit] = useState<{ label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null>(null);
+  const cy = s.currentYear;
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <Section title={`Année en cours${s.currentYear ? ` · ${s.currentYear.label}` : ''}`}>
+      <Section title={`Année en cours${s.currentYear ? ` · ${s.currentYear.label}` : ''}`} action={cy && <Button size="sm" variant="ghost" onClick={() => setEdit({ label: cy.label, startDate: cy.startDate.slice(0, 10), endDate: cy.endDate.slice(0, 10), terms: cy.terms.map((t) => ({ id: t.id, name: t.name, startDate: t.startDate.slice(0, 10), endDate: t.endDate.slice(0, 10), weight: String(Number(t.weight)) })) })}><Pencil className="size-4" /> Modifier les dates</Button>}>
         {s.currentYear ? (
           <>
-            <p className="mb-2 text-sm text-muted">Du {date(s.currentYear.startDate)} au {date(s.currentYear.endDate)}</p>
+            <p className="mb-2 text-sm text-muted">Rentrée le {date(s.currentYear.startDate)} · fin d’année le {date(s.currentYear.endDate)}</p>
             <ul className="grid gap-1.5">{s.currentYear.terms.map((t) => <li key={t.id} className="flex justify-between rounded-lg bg-sunk px-3 py-2"><b>{t.name}</b><span className="text-sm">{date(t.startDate)} → {date(t.endDate)} · poids {note(t.weight)}</span></li>)}</ul>
           </>
         ) : <Empty title="Aucune année en cours" />}
@@ -329,22 +331,50 @@ function Year({ s, reload: reloadSettings }: { s: Settings; reload: () => void }
         )}
       </Section>
       <Section title="Préparer une nouvelle année">
-        <form className="grid gap-2" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post('/academic-years', { ...f, isCurrent: false }), toast, 'Année créée')) reload(); }}>
+        <form className="grid gap-2" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post('/academic-years', { ...f, terms: f.terms.map((t) => ({ ...t, weight: Number(t.weight) || 1 })), isCurrent: false }), toast, 'Année créée')) reload(); }}>
           <div className="grid grid-cols-3 gap-2">
             <Field label="Libellé"><Input placeholder="2027-2028" value={f.label} onChange={(e) => setF({ ...f, label: e.target.value })} required /></Field>
-            <Field label="Début"><Input type="date" value={f.startDate} onChange={(e) => setF({ ...f, startDate: e.target.value })} required /></Field>
-            <Field label="Fin"><Input type="date" value={f.endDate} onChange={(e) => setF({ ...f, endDate: e.target.value })} required /></Field>
+            <Field label="Rentrée"><Input type="date" value={f.startDate} onChange={(e) => setF({ ...f, startDate: e.target.value })} required /></Field>
+            <Field label="Fin d’année"><Input type="date" value={f.endDate} onChange={(e) => setF({ ...f, endDate: e.target.value })} required /></Field>
           </div>
           {f.terms.map((t, i) => (
-            <div key={i} className="grid grid-cols-3 gap-2">
+            <div key={i} className="grid grid-cols-[1fr_1fr_1fr_70px] gap-2">
               <Input aria-label="Période" value={t.name} onChange={(e) => setF({ ...f, terms: f.terms.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)) })} required />
               <Input aria-label="Début" type="date" value={t.startDate} onChange={(e) => setF({ ...f, terms: f.terms.map((x, j) => (j === i ? { ...x, startDate: e.target.value } : x)) })} required />
               <Input aria-label="Fin" type="date" value={t.endDate} onChange={(e) => setF({ ...f, terms: f.terms.map((x, j) => (j === i ? { ...x, endDate: e.target.value } : x)) })} required />
+              <Input aria-label="Poids" title="Poids dans la moyenne annuelle" type="number" min={0.25} max={10} step={0.25} value={t.weight} onChange={(e) => setF({ ...f, terms: f.terms.map((x, j) => (j === i ? { ...x, weight: e.target.value } : x)) })} required />
             </div>
           ))}
+          <p className="text-xs text-muted">Poids : part de chaque période dans la moyenne annuelle (par exemple 1, 1 et 2 si le dernier trimestre compte double).</p>
           <Button type="submit" variant="outline" loading={busy}>Créer l’année</Button>
         </form>
       </Section>
+      <Dialog open={!!edit} onOpenChange={(o) => !o && setEdit(null)}>
+        {edit && cy && (
+          <DialogContent title={`Dates de l’année ${cy.label}`} description="Rentrée, fin d’année et périodes. Le poids d’une période est sa part dans la moyenne annuelle." className="max-w-2xl">
+            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.patch(`/academic-years/${cy.id}`, { ...edit, terms: edit.terms.map((t) => ({ ...t, weight: Number(t.weight) })) }), toast, 'Dates enregistrées')) { setEdit(null); reload(); } }}>
+              <div className="grid grid-cols-3 gap-2">
+                <Field label="Libellé"><Input value={edit.label} onChange={(e) => setEdit({ ...edit, label: e.target.value })} required /></Field>
+                <Field label="Rentrée"><Input type="date" value={edit.startDate} onChange={(e) => setEdit({ ...edit, startDate: e.target.value })} required /></Field>
+                <Field label="Fin d’année"><Input type="date" value={edit.endDate} onChange={(e) => setEdit({ ...edit, endDate: e.target.value })} required /></Field>
+              </div>
+              <div className="grid grid-cols-[1fr_1fr_1fr_80px] gap-2 text-[13px] font-bold text-muted"><span>Période</span><span>Début</span><span>Fin</span><span>Poids</span></div>
+              {edit.terms.map((t, i) => {
+                const set = (k: 'name' | 'startDate' | 'endDate' | 'weight', v: string) => setEdit({ ...edit, terms: edit.terms.map((x, j) => (j === i ? { ...x, [k]: v } : x)) });
+                return (
+                  <div key={t.id} className="grid grid-cols-[1fr_1fr_1fr_80px] gap-2">
+                    <Input aria-label={`Nom de la période ${i + 1}`} value={t.name} onChange={(e) => set('name', e.target.value)} required />
+                    <Input aria-label={`Début de ${t.name}`} type="date" value={t.startDate} onChange={(e) => set('startDate', e.target.value)} required />
+                    <Input aria-label={`Fin de ${t.name}`} type="date" value={t.endDate} onChange={(e) => set('endDate', e.target.value)} required />
+                    <Input aria-label={`Poids de ${t.name}`} type="number" min={0.25} max={10} step={0.25} value={t.weight} onChange={(e) => set('weight', e.target.value)} required />
+                  </div>
+                );
+              })}
+              <Button type="submit" loading={busy}>Enregistrer</Button>
+            </form>
+          </DialogContent>
+        )}
+      </Dialog>
     </div>
   );
 }
@@ -373,6 +403,9 @@ function Rules({ s, reload }: { s: Settings; reload: () => void }) {
         ))}
         <Button variant="ghost" onClick={() => setR({ ...r, grading: { ...r.grading, distinctions: [...r.grading.distinctions, { min: 10, label: '' }] } })}><Plus className="size-4" /> Ajouter une mention</Button>
       </div>
+      <Field label="Moyenne annuelle pour passer en classe supérieure" hint="Saisie par l’école. Au-dessus ou égale : « Admis » proposé ; en dessous : « Non admis ». Laissez vide pour ne rien proposer ; la direction arrête toujours la décision finale.">
+        <Input type="number" min={0} max={20} step={0.25} placeholder="Ex. 10" value={r.grading.passMark ?? ''} onChange={(e) => setR({ ...r, grading: { ...r.grading, passMark: e.target.value === '' ? null : Number(e.target.value) } })} className="max-w-40" />
+      </Field>
       <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={r.notifications.absenceSms} onChange={(e) => setR({ ...r, notifications: { ...r.notifications, absenceSms: e.target.checked } })} /> Prévenir les parents par SMS si l’absence n’est pas vue dans l’application</label>
       <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={r.blockReportCardIfUnpaid} onChange={(e) => setR({ ...r, blockReportCardIfUnpaid: e.target.checked })} /> Suspendre le bulletin en ligne en cas d’impayé</label>
       <Button loading={busy} onClick={async () => { if (await run(() => api.patch('/settings', { settings: { grading: { ...r.grading, distinctions: [...r.grading.distinctions].sort((a, b) => b.min - a.min) }, notifications: r.notifications, blockReportCardIfUnpaid: r.blockReportCardIfUnpaid } }), toast, 'Règles enregistrées')) reload(); }}>Enregistrer</Button>

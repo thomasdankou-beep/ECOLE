@@ -361,6 +361,7 @@ model Student {
   documents   Document[]
   sanctions   Sanction[]
   internships InternshipPlacement[]
+  annualDecisions AnnualDecision[]
 
   @@unique([tenantId, matricule])
   @@index([tenantId, lastName, firstName])
@@ -1126,4 +1127,26 @@ model InternshipPlacement {
 
   @@unique([periodId, studentId])
   @@map("internship_placements")
+}
+
+enum AnnualOutcome {
+  ADMIS
+  NON_ADMIS
+}
+
+/// Décision de fin d'année arrêtée par la direction. Sans ligne, la décision proposée suit la moyenne annuelle et le seuil de passage saisi par l'école.
+model AnnualDecision {
+  id             String        @id @default(uuid()) @db.Uuid
+  tenantId       String        @map("tenant_id") @db.Uuid
+  studentId      String        @db.Uuid
+  student        Student       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  academicYearId String        @db.Uuid
+  classId        String        @db.Uuid
+  outcome        AnnualOutcome
+  note           String?
+  decidedById    String        @db.Uuid
+  updatedAt      DateTime      @updatedAt
+
+  @@unique([studentId, academicYearId])
+  @@map("annual_decisions")
 }
