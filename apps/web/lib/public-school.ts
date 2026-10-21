@@ -18,7 +18,10 @@ export type PublicSchool = {
     slogan?: string; tagline?: string; phone?: string; rentree?: string; highlights?: string[]; reasons?: string[]; motto?: string;
     /// Photo du bandeau d'accueil et photos par code de filière, fournies avec l'installation de l'école.
     heroImage?: string; trackImages?: Record<string, string>;
+    entranceTest?: string; requiredDocuments?: string[];
   };
+  /// Élèves mis à l'honneur par la direction, avec l'accord des parents.
+  honors?: { id: string; displayName: string; className: string; term: string; distinction: string | null; average: number | null; photoUrl: string | null }[];
   sites: { id: string; name: string; address: string | null; phone: string | null }[];
   tracks: { code: string; name: string; cycle: string }[];
   levels: { name: string; cycle: string }[];

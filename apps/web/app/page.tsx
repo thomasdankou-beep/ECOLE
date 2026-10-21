@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowRight, BadgeCheck, CalendarDays, CreditCard, GraduationCap, MapPin, MessageSquareText, Phone, Wrench } from 'lucide-react';
+import { ArrowRight, Award, BadgeCheck, CalendarDays, ClipboardCheck, CreditCard, FileText, GraduationCap, MapPin, MessageSquareText, Phone, PencilLine, Star } from 'lucide-react';
 import { PlatformHome, SuspendedSchool } from '@/components/site/platform-home';
 import { SiteFooter, SiteHeader } from '@/components/site/chrome';
 import { siteList, telHref, useSchoolState } from '@/lib/public-school';
@@ -36,6 +36,14 @@ export default function Home() {
   const hasCollege = !!s?.levels.some((l) => l.cycle === 'COLLEGE');
   const where = sites.length > 1 ? ` sur ${COUNT[sites.length] ?? sites.length} sites, ${siteList(sites.map((x) => x.name))}` : sites.length === 1 ? ` à ${sites[0].name}` : '';
   const description = s ? offer(s.levels) : '';
+  const honors = s?.honors ?? [];
+  const docs = p.requiredDocuments ?? [];
+  // Chiffres tirés des données réelles de l'école, jamais saisis à la main.
+  const figures = s ? [
+    { value: s.levels.length, label: s.levels.length > 1 ? 'niveaux d’études' : 'niveau d’études' },
+    tracks.length ? { value: tracks.length, label: tracks.length > 1 ? 'filières techniques' : 'filière technique' } : null,
+    sites.length ? { value: sites.length, label: sites.length > 1 ? 'sites' : 'site' } : null,
+  ].filter((x): x is { value: number; label: string } => !!x && x.value > 0) : [];
 
   return (
     <>
@@ -85,6 +93,59 @@ export default function Home() {
           </div>
         </section>
 
+        {/* Chiffres clés */}
+        {figures.length > 0 && (
+          <section className="mx-auto max-w-6xl px-4">
+            <div className="-mt-px grid grid-cols-2 gap-px overflow-hidden rounded-b-2xl bg-line sm:grid-cols-4">
+              {figures.map((f) => (
+                <div key={f.label} className="bg-surface px-4 py-5 text-center">
+                  <p className="tabular font-display text-4xl font-bold text-brand">{f.value}</p>
+                  <p className="text-sm font-bold text-muted">{f.label}</p>
+                </div>
+              ))}
+              {p.entranceTest && (
+                <div className="bg-surface px-4 py-5 text-center">
+                  <p className="font-display text-2xl font-bold text-orange">{date(p.entranceTest, { day: 'numeric', month: 'long' })}</p>
+                  <p className="text-sm font-bold text-muted">test d’entrée</p>
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Élèves à l'honneur, choisis par la direction */}
+        {honors.length > 0 && (
+          <section id="honneur" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
+            <p className="flex items-center gap-2 font-bold uppercase tracking-wider text-orange"><Star className="size-4 fill-current" /> Tableau d’honneur</p>
+            <h2 className="text-4xl font-bold">Nos élèves à l’honneur</h2>
+            <p className="mt-1 max-w-2xl text-muted">Bravo à nos meilleurs élèves pour leur travail et leurs résultats.</p>
+            <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {honors.map((h, i) => (
+                <article key={h.id} className={`relative overflow-hidden rounded-2xl border bg-surface p-5 ${i === 0 ? 'border-yellow shadow-[0_0_0_3px] shadow-yellow/30' : 'border-line'}`}>
+                  <div className="flex items-center gap-4">
+                    {h.photoUrl ? (
+                      <img src={h.photoUrl} alt={h.displayName} className="size-20 flex-none rounded-full border-4 border-yellow object-cover" />
+                    ) : (
+                      <div className="grid size-20 flex-none place-items-center rounded-full border-4 border-yellow bg-brand font-display text-3xl font-bold text-brand-ink">{h.displayName.charAt(0)}</div>
+                    )}
+                    <div className="min-w-0">
+                      <h3 className="text-2xl font-bold leading-tight">{h.displayName}</h3>
+                      <p className="font-bold text-brand">{h.className}</p>
+                      <p className="text-sm text-muted">{h.term}</p>
+                    </div>
+                  </div>
+                  {(h.average !== null || h.distinction) && (
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      {h.average !== null && <span className="tabular rounded-lg bg-brand-soft px-3 py-1 font-display text-xl font-bold text-brand">{h.average.toLocaleString('fr-FR')} / 20</span>}
+                      {h.distinction && <span className="inline-flex items-center gap-1 rounded-lg bg-yellow/25 px-3 py-1 font-bold"><Award className="size-4" /> {h.distinction}</span>}
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Filières */}
         {(tracks.length > 0 || hasCollege) && <section id="filieres" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
           {tracks.length > 0 && <p className="font-bold uppercase tracking-wider text-orange">Enseignement technique</p>}
@@ -95,8 +156,9 @@ export default function Home() {
                 {images[t.code] ? (
                   <img src={images[t.code]} alt="" className="aspect-[16/9] w-full object-cover transition-transform group-hover:scale-[1.03]" />
                 ) : (
-                  <div className="grid aspect-[16/9] place-items-center bg-brand-soft text-brand">
-                    <Wrench className="size-10" />
+                  <div className="relative grid aspect-[16/9] place-items-center overflow-hidden bg-gradient-to-br from-brand to-brand-strong text-white">
+                    <span className="font-display text-6xl font-bold opacity-90">{t.code}</span>
+                    <span className="absolute inset-x-0 bottom-0 flex h-1.5"><span className="flex-1 bg-red" /><span className="flex-1 bg-orange" /><span className="flex-1 bg-yellow" /></span>
                   </div>
                 )}
                 <div className="p-4">
@@ -132,6 +194,35 @@ export default function Home() {
             </ul>
           </div>
         </section>}
+
+        {/* Admission */}
+        <section id="admission" className="mx-auto max-w-6xl scroll-mt-20 px-4 pt-14">
+          <p className="font-bold uppercase tracking-wider text-orange">Admission {p.rentree ? new Date(p.rentree).getFullYear() + '-' + (new Date(p.rentree).getFullYear() + 1) : ''}</p>
+          <h2 className="text-4xl font-bold">Inscrire votre enfant</h2>
+          <ol className="mt-6 grid gap-4 md:grid-cols-3">
+            <li className="rounded-xl border border-line bg-surface p-5">
+              <span className="grid size-10 place-items-center rounded-full bg-brand font-display text-xl font-bold text-brand-ink">1</span>
+              <h3 className="mt-3 flex items-center gap-2 text-xl font-bold"><PencilLine className="size-5 text-orange" /> Pré-inscription en ligne</h3>
+              <p className="mt-1 text-muted">Remplissez le formulaire depuis votre téléphone : l’école vous rappelle.</p>
+              <Link href="/preinscription" className="mt-3 inline-flex items-center gap-1 font-bold text-brand">Commencer <ArrowRight className="size-4" /></Link>
+            </li>
+            <li className="rounded-xl border border-line bg-surface p-5">
+              <span className="grid size-10 place-items-center rounded-full bg-brand font-display text-xl font-bold text-brand-ink">2</span>
+              <h3 className="mt-3 flex items-center gap-2 text-xl font-bold"><ClipboardCheck className="size-5 text-orange" /> {p.entranceTest ? 'Test d’entrée' : 'Rendez-vous à l’école'}</h3>
+              <p className="mt-1 text-muted">{p.entranceTest ? `Le ${date(p.entranceTest, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}, sur le site choisi.` : 'L’école vous indique la date de votre rendez-vous.'}</p>
+            </li>
+            <li className="rounded-xl border border-line bg-surface p-5">
+              <span className="grid size-10 place-items-center rounded-full bg-brand font-display text-xl font-bold text-brand-ink">3</span>
+              <h3 className="mt-3 flex items-center gap-2 text-xl font-bold"><FileText className="size-5 text-orange" /> Dossier d’inscription</h3>
+              {docs.length > 0 ? (
+                <ul className="mt-1 grid gap-0.5 text-muted">
+                  {docs.slice(0, 4).map((d) => <li key={d} className="flex gap-1.5"><BadgeCheck className="mt-0.5 size-4 flex-none text-good" /> {d}</li>)}
+                  {docs.length > 4 && <li><Link href="/preinscription" className="font-bold text-brand">et {docs.length - 4} autre{docs.length - 4 > 1 ? 's' : ''} pièce{docs.length - 4 > 1 ? 's' : ''}</Link></li>}
+                </ul>
+              ) : <p className="mt-1 text-muted">Déposez le dossier complet au secrétariat pour confirmer l’inscription.</p>}
+            </li>
+          </ol>
+        </section>
 
         {/* L'espace numérique */}
         <section className="mx-auto max-w-6xl px-4 pt-14">
@@ -171,8 +262,27 @@ export default function Home() {
             ))}
           </div>
         </section>
+
+        {/* Appel final */}
+        <section className="mx-auto max-w-6xl px-4 py-14">
+          <div className="grid gap-4 rounded-2xl bg-brand-strong p-6 text-white sm:p-8 md:grid-cols-[1fr_auto] md:items-center">
+            <div>
+              <h2 className="text-3xl font-bold">Une place pour votre enfant{p.rentree ? ` à la rentrée ${new Date(p.rentree).getFullYear()}` : ''} ?</h2>
+              <p className="mt-1 opacity-90">Pré-inscrivez-le en quelques minutes ou appelez-nous.</p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Link href="/preinscription" className="inline-flex min-h-12 items-center gap-2 rounded-lg bg-orange px-5 font-extrabold text-[#1b1206] hover:brightness-95">Pré-inscrire mon enfant <ArrowRight className="size-5" /></Link>
+              {p.phone && <a href={telHref(p.phone, s?.country)} className="inline-flex min-h-12 items-center gap-2 rounded-lg border border-white/50 px-5 font-bold hover:bg-white/10"><Phone className="size-5" /> {p.phone}</a>}
+            </div>
+          </div>
+        </section>
       </main>
+      {/* Bouton toujours visible sur téléphone */}
+      <div className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/95 p-3 backdrop-blur sm:hidden no-print">
+        <Link href="/preinscription" className="flex min-h-12 items-center justify-center gap-2 rounded-lg bg-orange font-extrabold text-[#1b1206]">Pré-inscrire mon enfant <ArrowRight className="size-5" /></Link>
+      </div>
       <SiteFooter />
+      <div className="h-[72px] sm:hidden" />
     </>
   );
 }
