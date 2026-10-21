@@ -59,9 +59,11 @@ export default function Parametres() {
   );
 }
 
+type Teacher = { id: string; firstName: string; lastName: string; roles: { role: string }[]; teacherSubjects: { subject: { id: string; name: string } }[] };
+
 function Classes({ s }: { s: Settings }) {
   const classes = useApi<ClassRow[]>('/classes');
-  const staff = useApi<{ id: string; firstName: string; lastName: string; roles: { role: string }[] }[]>('/staff');
+  const staff = useApi<Teacher[]>('/staff');
   const teachers = staff.data?.filter((u) => u.roles.some((r) => r.role === 'ENSEIGNANT')) ?? [];
   const [edit, setEdit] = useState<any | null>(null);
   const [open, setOpen] = useState<ClassRow | null>(null);
@@ -120,13 +122,13 @@ function Classes({ s }: { s: Settings }) {
         )}
       </Dialog>
       <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
-        {open && <ClassSubjects klass={open} subjects={s.subjects} teachers={teachers} onChange={classes.reload} />}
+        {open && <ClassSubjects klass={open} subjects={s.subjects} teachers={teachers} onChange={() => { classes.reload(); staff.reload(); }} />}
       </Dialog>
     </>
   );
 }
 
-function ClassSubjects({ klass, subjects, teachers, onChange }: { klass: ClassRow; subjects: Settings['subjects']; teachers: { id: string; firstName: string; lastName: string }[]; onChange: () => void }) {
+function ClassSubjects({ klass, subjects, teachers, onChange }: { klass: ClassRow; subjects: Settings['subjects']; teachers: Teacher[]; onChange: () => void }) {
   const toast = useToast();
   const { busy, run } = useAction();
   const [add, setAdd] = useState({ subjectId: '', coefficient: '1' });
@@ -144,7 +146,19 @@ function ClassSubjects({ klass, subjects, teachers, onChange }: { klass: ClassRo
               ))}
               <Select aria-label="Affecter un enseignant" className="min-h-9 w-40 text-sm" value="" onChange={async (e) => { if (e.target.value && (await run(() => api.post('/assignments', { teacherId: e.target.value, classSubjectId: cs.id }), toast, 'Enseignant affecté'))) onChange(); }}>
                 <option value="">+ Enseignant</option>
-                {teachers.filter((t) => !cs.assignments.some((a) => a.teacher.id === t.id)).map((t) => <option key={t.id} value={t.id}>{t.lastName} {t.firstName}</option>)}
+                {(() => {
+                  // Les professeurs de cette matière d'abord ; les autres restent possibles (la matière s'ajoute alors à leur fiche).
+                  const free = teachers.filter((t) => !cs.assignments.some((a) => a.teacher.id === t.id));
+                  const ofSubject = free.filter((t) => t.teacherSubjects.some((x) => x.subject.id === cs.subject.id));
+                  const others = free.filter((t) => !ofSubject.includes(t));
+                  const opt = (t: Teacher) => <option key={t.id} value={t.id}>{t.lastName} {t.firstName}</option>;
+                  return (
+                    <>
+                      {ofSubject.length > 0 && <optgroup label={`Professeurs de ${cs.subject.name}`}>{ofSubject.map(opt)}</optgroup>}
+                      {others.length > 0 && <optgroup label={ofSubject.length > 0 ? 'Autres professeurs' : 'Professeurs'}>{others.map(opt)}</optgroup>}
+                    </>
+                  );
+                })()}
               </Select>
             </div>
             <Button variant="ghost" size="icon" aria-label="Retirer la matière" loading={busy} onClick={async () => { if (await run(() => api.del(`/class-subjects/${cs.id}`), toast, 'Matière retirée')) onChange(); }}><Trash2 className="size-4" /></Button>

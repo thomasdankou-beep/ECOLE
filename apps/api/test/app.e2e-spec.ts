@@ -372,6 +372,22 @@ describe('Paramétrage par la direction', () => {
     expect(used.status).toBe(409);
   });
 
+  it('un professeur enregistré avec deux matières, puis affecté à une troisième qui rejoint sa liste', async () => {
+    const s = (await as('direction').get('/settings')).body;
+    const [m1, m2] = s.subjects;
+    const r = await as('direction').post('/staff', { firstName: 'Prof', lastName: 'DEUXMATIERES', phone: '0197770011', roles: [{ role: 'ENSEIGNANT' }], subjectIds: [m1.id, m2.id] });
+    expect(r.status).toBe(201);
+    const mine = async () => (await as('direction').get('/staff')).body.find((u: any) => u.id === r.body.id);
+    expect((await mine()).teacherSubjects.map((t: any) => t.subject.id).sort()).toEqual([m1.id, m2.id].sort());
+    const cs = (await as('direction').get('/classes')).body.flatMap((c: any) => c.subjects).find((x: any) => x.subject.id !== m1.id && x.subject.id !== m2.id);
+    expect((await as('direction').post('/assignments', { teacherId: r.body.id, classSubjectId: cs.id })).status).toBe(201);
+    expect((await mine()).teacherSubjects).toHaveLength(3);
+    await as('direction').patch(`/staff/${r.body.id}`, { subjectIds: [m2.id] }).expect(200);
+    expect((await mine()).teacherSubjects.map((t: any) => t.subject.id)).toEqual([m2.id]);
+    const secretary = (await as('direction').get('/staff')).body.find((u: any) => u.roles.every((x: any) => x.role !== 'ENSEIGNANT'));
+    expect((await as('direction').patch(`/staff/${secretary.id}`, { subjectIds: [m1.id] })).status).toBe(400);
+  });
+
   it('organise une période de stage et place un élève, visible sur sa fiche', async () => {
     const s = (await as('direction').get('/settings')).body;
     const lycee = s.levels.find((l: any) => l.cycle === 'LYCEE_TECHNIQUE') ?? s.levels[0];

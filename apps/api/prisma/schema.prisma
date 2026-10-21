@@ -257,6 +257,8 @@ model User {
   sessions      Session[]
   otps          OtpCode[]
   assignments   TeacherAssignment[]
+  /// Matières que ce professeur enseigne (une ou plusieurs), saisies par la direction.
+  teacherSubjects TeacherSubject[]
   headOf        Class[]             @relation("HeadTeacher")
   notifications Notification[]
   guardian      Guardian?
@@ -470,9 +472,23 @@ model Subject {
   practical Boolean @default(false)
 
   classSubjects ClassSubject[]
+  teachers      TeacherSubject[]
 
   @@unique([tenantId, code])
   @@map("subjects")
+}
+
+/// Matière qu'un professeur enseigne : sert à proposer les bons professeurs lors des affectations aux classes.
+model TeacherSubject {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @map("tenant_id") @db.Uuid
+  teacherId String  @db.Uuid
+  teacher   User    @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  subjectId String  @db.Uuid
+  subject   Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([teacherId, subjectId])
+  @@map("teacher_subjects")
 }
 
 /// Matière enseignée dans une classe, avec son coefficient (coefficient par niveau et série, CDC §3.3).

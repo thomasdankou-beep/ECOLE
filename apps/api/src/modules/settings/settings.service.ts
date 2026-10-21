@@ -396,6 +396,9 @@ export class SettingsService {
       const a = await tx.teacherAssignment
         .create({ data: { tenantId: actor.tenantId, ...dto } })
         .catch((e) => uniqueViolation(e, 'Cet enseignant est déjà affecté à cette matière'));
+      // Affecter un professeur à une matière l'ajoute à ses matières s'il ne l'avait pas encore.
+      const { subjectId } = await tx.classSubject.findUniqueOrThrow({ where: { id: dto.classSubjectId }, select: { subjectId: true } });
+      await tx.teacherSubject.createMany({ data: [{ tenantId: actor.tenantId, teacherId: dto.teacherId, subjectId }], skipDuplicates: true });
       await this.audit.log(tx, actor, 'assignment.created', 'TeacherAssignment', a.id, dto);
       return a;
     });
@@ -418,6 +421,7 @@ export class SettingsService {
           id: true, firstName: true, lastName: true, phone: true, email: true, status: true, lastLoginAt: true, totpEnabled: true,
           roles: { select: { role: true, siteId: true } },
           assignments: { select: { id: true, classSubject: { select: { id: true, coefficient: true, subject: { select: { name: true } }, class: { select: { id: true, name: true } } } } } },
+          teacherSubjects: { select: { subject: { select: { id: true, name: true } } }, orderBy: { subject: { name: 'asc' } } },
         },
         orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
       }),
@@ -437,7 +441,8 @@ export class SettingsService {
           },
         })
         .catch((e) => uniqueViolation(e, 'Un compte existe déjà avec ce téléphone ou cet e-mail'));
-      await this.audit.log(tx, actor, 'user.created', 'User', user.id, { roles: dto.roles });
+      if (dto.subjectIds) await this.setTeacherSubjects(tx, actor, user.id, dto.subjectIds);
+      await this.audit.log(tx, actor, 'user.created', 'User', user.id, { roles: dto.roles, subjectIds: dto.subjectIds });
       await this.sendCredentials(tx, actor, phone, password);
       return { id: user.id, temporaryPassword: password };
     });
@@ -458,12 +463,25 @@ export class SettingsService {
         await tx.userRole.deleteMany({ where: { userId: id, role: { notIn: ['PARENT', 'ELEVE'] } } });
         await tx.userRole.createMany({ data: dto.roles.map((r) => ({ tenantId: actor.tenantId, userId: id, role: r.role, siteId: r.siteId ?? null })), skipDuplicates: true });
       }
+      if (dto.subjectIds) await this.setTeacherSubjects(tx, actor, id, dto.subjectIds);
       if (dto.active === false || dto.roles) {
         await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
       }
       await this.audit.log(tx, actor, dto.roles ? 'user.roles_changed' : 'user.updated', 'User', id, dto);
       return { ok: true };
     });
+  }
+
+  /** Remplace la liste des matières d'un professeur (une ou plusieurs ; vide pour aucune). */
+  private async setTeacherSubjects(tx: Tx, actor: Actor, userId: string, subjectIds: string[]) {
+    const ids = [...new Set(subjectIds)];
+    if (ids.length) {
+      const isTeacher = await tx.userRole.findFirst({ where: { userId, role: 'ENSEIGNANT' } });
+      if (!isTeacher) throw new BadRequestException('Seul un compte avec le rôle Enseignant peut avoir des matières');
+      if ((await tx.subject.count({ where: { id: { in: ids } } })) !== ids.length) throw new BadRequestException('Matière inconnue');
+    }
+    await tx.teacherSubject.deleteMany({ where: { teacherId: userId, subjectId: { notIn: ids } } });
+    await tx.teacherSubject.createMany({ data: ids.map((subjectId) => ({ tenantId: actor.tenantId, teacherId: userId, subjectId })), skipDuplicates: true });
   }
 
   resetPassword(actor: Actor, id: string) {

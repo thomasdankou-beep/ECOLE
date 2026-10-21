@@ -114,7 +114,10 @@ async function main() {
 
       const cs = async (classId: string, subjectId: string, coefficient: number, teacherId?: string) => {
         const row = await tx.classSubject.create({ data: { tenantId: T, classId, subjectId, coefficient } });
-        if (teacherId) await tx.teacherAssignment.create({ data: { tenantId: T, teacherId, classSubjectId: row.id } });
+        if (teacherId) {
+          await tx.teacherAssignment.create({ data: { tenantId: T, teacherId, classSubjectId: row.id } });
+          await tx.teacherSubject.upsert({ where: { teacherId_subjectId: { teacherId, subjectId } }, update: {}, create: { tenantId: T, teacherId, subjectId } });
+        }
         return row;
       };
       const F3cs = {
@@ -290,7 +293,7 @@ async function wipe(tenantId: string) {
     const tables = [
       'notifications', 'announcements', 'documents', 'receipts', 'payments', 'invoice_items', 'invoices', 'fee_types', 'cash_closings',
       'report_card_items', 'report_cards', 'report_card_runs', 'appreciations', 'grades', 'assessments', 'attendance_records', 'attendance_sessions',
-      'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'teacher_assignments', 'class_subjects', 'enrollments', 'student_guardians',
+      'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'teacher_assignments', 'teacher_subjects', 'class_subjects', 'enrollments', 'student_guardians',
       'applications', 'guardians', 'students', 'otp_codes', 'sessions', 'user_roles', 'classes', 'users', 'rooms', 'subjects', 'tracks', 'levels',
       'terms', 'academic_years', 'sites', 'counters', 'audit_logs',
     ];
