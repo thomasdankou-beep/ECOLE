@@ -12,12 +12,14 @@ import { date, fcfa, hhmm, note } from '@/lib/format';
 import { can } from '@/lib/perm';
 import { DOC_KINDS, type ClassRow } from '@/lib/types';
 import { useAction, useApi } from '@/lib/use-api';
+import { StudentFiles, StudentPhoto, type StudentFile } from '@/components/espace/student-files';
 
 type Student = {
   id: string; matricule: string; firstName: string; lastName: string; sex: string | null; birthDate: string | null; birthPlace: string | null; allergies: string | null; status: string;
   guardians: { id: string; relation: string; isPrimary: boolean; guardian: { firstName: string; lastName: string; phone: string; email: string | null } }[];
   enrollments: { id: string; status: string; class: { name: string; site: { name: string } }; academicYear: { label: string } }[];
   currentClass: { id: string; name: string; site: { name: string } } | null; balance: number; hasAccount: boolean;
+  photoUrl: string | null; files?: StudentFile[];
 };
 
 export default function EleveFiche() {
@@ -45,7 +47,7 @@ export default function EleveFiche() {
               actions={can(role, 'students.write') && s.status === 'ACTIVE' && <StudentActions s={s} onDone={q.reload} />}
             />
             <Chips label="Rubrique" value={tab} onChange={setTab} options={tabs} />
-            {tab === 'infos' && <Infos s={s} />}
+            {tab === 'infos' && <Infos s={s} editable={can(role, 'students.write')} onChange={q.reload} />}
             {tab === 'notes' && <Notes id={s.id} />}
             {tab === 'absences' && <Absences id={s.id} />}
             {tab === 'finances' && <Finances id={s.id} />}
@@ -57,10 +59,11 @@ export default function EleveFiche() {
   );
 }
 
-function Infos({ s }: { s: Student }) {
+function Infos({ s, editable, onChange }: { s: Student; editable: boolean; onChange: () => void }) {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
-      <Section title="Identité">
+      <Section title="Identité" action={editable && <EditIdentity s={s} onDone={onChange} />}>
+        <div className="mb-4"><StudentPhoto studentId={s.id} url={s.photoUrl} name={s.firstName} editable={editable} onChange={onChange} /></div>
         <dl className="grid grid-cols-2 gap-3 text-sm">
           <div><dt className="font-bold text-muted">Sexe</dt><dd>{s.sex === 'F' ? 'Fille' : s.sex === 'M' ? 'Garçon' : '—'}</dd></div>
           <div><dt className="font-bold text-muted">Né(e) le</dt><dd>{date(s.birthDate, { day: 'numeric', month: 'long', year: 'numeric' })}{s.birthPlace ? ` à ${s.birthPlace}` : ''}</dd></div>
@@ -81,6 +84,11 @@ function Infos({ s }: { s: Student }) {
           ))}
         </ul>
       </Section>
+      {s.files && (
+        <Section title="Pièces du dossier" className="lg:col-span-2">
+          <StudentFiles studentId={s.id} files={s.files} onChange={onChange} />
+        </Section>
+      )}
       <Section title="Parcours" className="lg:col-span-2">
         <ul className="grid gap-1 text-sm">
           {s.enrollments.map((e) => <li key={e.id}>{e.academicYear.label} · {e.class.name} ({e.class.site.name}) · <StatusBadge status={e.status} /></li>)}
@@ -88,6 +96,34 @@ function Infos({ s }: { s: Student }) {
       </Section>
       <Internships id={s.id} />
     </div>
+  );
+}
+
+/** Mise à jour de l'identité de l'élève (nom, naissance, santé). */
+function EditIdentity({ s, onDone }: { s: Student; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [f, setF] = useState({ lastName: s.lastName, firstName: s.firstName, sex: s.sex ?? '', birthDate: s.birthDate?.slice(0, 10) ?? '', birthPlace: s.birthPlace ?? '', allergies: s.allergies ?? '' });
+  const toast = useToast();
+  const { busy, run } = useAction();
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild><Button size="sm" variant="ghost">Modifier</Button></DialogTrigger>
+      <DialogContent title="Modifier l’identité de l’élève">
+        <form className="grid gap-3 sm:grid-cols-2" onSubmit={async (e) => {
+          e.preventDefault();
+          const body = { ...f, sex: f.sex || undefined, birthDate: f.birthDate || undefined };
+          if (await run(() => api.patch(`/students/${s.id}`, body), toast, 'Identité mise à jour')) { setOpen(false); onDone(); }
+        }}>
+          <Field label="Nom"><Input value={f.lastName} onChange={(e) => setF({ ...f, lastName: e.target.value })} required /></Field>
+          <Field label="Prénoms"><Input value={f.firstName} onChange={(e) => setF({ ...f, firstName: e.target.value })} required /></Field>
+          <Field label="Sexe"><Select value={f.sex} onChange={(e) => setF({ ...f, sex: e.target.value })}><option value="">Non précisé</option><option value="F">Fille</option><option value="M">Garçon</option></Select></Field>
+          <Field label="Date de naissance"><Input type="date" value={f.birthDate} onChange={(e) => setF({ ...f, birthDate: e.target.value })} /></Field>
+          <Field label="Lieu de naissance"><Input value={f.birthPlace} onChange={(e) => setF({ ...f, birthPlace: e.target.value })} /></Field>
+          <Field label="Santé, allergies"><Input value={f.allergies} onChange={(e) => setF({ ...f, allergies: e.target.value })} /></Field>
+          <Button type="submit" loading={busy} className="sm:col-span-2">Enregistrer</Button>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

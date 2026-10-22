@@ -12,7 +12,7 @@ import { useApi } from '@/lib/use-api';
 type Card = {
   id: string; average: string | null; rank: number | null; classSize: number; distinction: string | null; appreciation: string | null; councilDecision: string | null; absencesCount: number; verifyCode: string; publishedAt: string | null; createdAt: string;
   items: { id: string; subjectName: string; coefficient: string; average: string | null; classAverage: string | null; minAverage: string | null; maxAverage: string | null; rank: number | null; teacherName: string | null; appreciation: string | null }[];
-  student: { firstName: string; lastName: string; matricule: string; birthDate: string | null; sex: string | null };
+  student: { firstName: string; lastName: string; matricule: string; birthDate: string | null; sex: string | null; photoUrl: string | null };
   class: { name: string; site: { name: string }; level: { name: string }; track: { name: string } | null; headTeacher: { firstName: string; lastName: string } | null };
   term: { name: string; year: string }; tenant: { name: string }; identity: SchoolIdentity;
   annual: { year: string; average: number | null; rank: number | null; classSize: number; distinction: string | null; outcomeLabel: string | null; note: string | null } | null;
@@ -41,13 +41,16 @@ function OneCard({ id }: { id: string }) {
             <h1 className="font-display text-2xl font-bold uppercase">Bulletin de notes · {c.term.name}</h1>
             <p>Année scolaire {c.term.year}</p>
           </div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-1 rounded border border-black/30 p-3">
+          <div className="flex gap-3 rounded border border-black/30 p-3">
+            {c.student.photoUrl && <img src={c.student.photoUrl} alt="" className="h-[30mm] w-[24mm] flex-none rounded object-cover" />}
+            <div className="grid flex-1 grid-cols-2 content-start gap-x-6 gap-y-1">
             <p>Élève : <b>{c.student.lastName} {c.student.firstName}</b></p>
             <p>Matricule : <b className="font-mono">{c.student.matricule}</b></p>
             <p>Classe : <b>{c.class.name}</b>{c.class.track ? ` · ${c.class.track.name}` : ''}</p>
             <p>Effectif : {c.classSize}</p>
             {c.student.birthDate && <p>Né(e) le {date(c.student.birthDate)}</p>}
             <p>Professeur principal : {c.class.headTeacher ? `${c.class.headTeacher.firstName} ${c.class.headTeacher.lastName}` : '—'}</p>
+          </div>
           </div>
           <table className="w-full border-collapse text-[12.5px] [&_td]:border [&_td]:border-black/40 [&_td]:px-1.5 [&_td]:py-1 [&_th]:border [&_th]:border-black/40 [&_th]:bg-[#e3e9f8] [&_th]:px-1.5 [&_th]:py-1">
             <thead><tr><th className="text-left">Matière</th><th>Coef.</th><th>Moy.</th><th>Moy. × coef.</th><th>Rang</th><th>Classe</th><th>Min / Max</th><th className="text-left">Appréciation</th><th className="text-left">Professeur</th></tr></thead>

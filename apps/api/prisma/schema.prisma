@@ -344,6 +344,8 @@ model Student {
   birthDate  DateTime?     @db.Date
   birthPlace String?
   photoUrl   String?
+  /// Photo d'identité envoyée par l'école (fichier privé, servi par lien signé).
+  photoKey   String?
   allergies  String?
   status     StudentStatus @default(ACTIVE)
   userId     String?       @unique @db.Uuid
@@ -363,6 +365,7 @@ model Student {
   internships InternshipPlacement[]
   annualDecisions AnnualDecision[]
   honors          PublicHonor[]
+  files           StudentFile[]
 
   @@unique([tenantId, matricule])
   @@index([tenantId, lastName, firstName])
@@ -1174,4 +1177,21 @@ model PublicHonor {
 
   @@unique([reportCardId])
   @@map("public_honors")
+}
+
+/// Pièce du dossier de l'élève (extrait de naissance, pièce d'identité, attestation…), envoyée par l'école. Fichier privé.
+model StudentFile {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  studentId    String   @db.Uuid
+  student      Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  label        String
+  fileKey      String
+  mime         String
+  size         Int
+  uploadedById String   @db.Uuid
+  createdAt    DateTime @default(now())
+
+  @@index([studentId])
+  @@map("student_files")
 }

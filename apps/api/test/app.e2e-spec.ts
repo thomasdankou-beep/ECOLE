@@ -623,3 +623,39 @@ describe("Élèves à l'honneur sur le site public", () => {
     expect((await http.get('/api/v1/public/saint-kisito')).body.honors).toEqual([]);
   });
 });
+
+describe("Photo et pièces du dossier de l'élève", () => {
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+  const PDF = Buffer.from('%PDF-1.4\n%test\n');
+  const post = (path: string) => http.post(`/api/v1${path}`).set('Authorization', `Bearer ${tokens.direction}`);
+
+  it("enregistre la photo et les pièces, les remplace, les retire ; seuls la direction et le secrétariat voient les pièces", async () => {
+    const student = (await as('direction').get('/students')).body[0];
+    const photo = await post(`/students/${student.id}/photo`).attach('file', PNG, { filename: 'photo.png', contentType: 'image/png' });
+    expect(photo.status).toBe(201);
+    expect(photo.body.photoUrl).toMatch(/^\/api\/v1\/files\?key=/);
+    expect((await post(`/students/${student.id}/photo`).attach('file', PDF, { filename: 'x.pdf', contentType: 'application/pdf' })).status).toBe(400);
+
+    const f = await post(`/students/${student.id}/files`).field('label', 'Extrait de naissance').attach('file', PDF, { filename: 'extrait.pdf', contentType: 'application/pdf' });
+    expect(f.status).toBe(201);
+    expect((await post(`/students/${student.id}/files`).attach('file', PDF, { filename: 'a.pdf', contentType: 'application/pdf' })).status).toBe(400);
+    let dossier = (await as('direction').get(`/students/${student.id}`)).body;
+    expect(dossier.photoUrl).toBeTruthy();
+    expect(dossier.files).toEqual([expect.objectContaining({ label: 'Extrait de naissance', mime: 'application/pdf' })]);
+    expect((await http.get(dossier.files[0].url)).status).toBe(200);
+
+    const replaced = await http.patch(`/api/v1/students/${student.id}/files/${f.body.id}`).set('Authorization', `Bearer ${tokens.direction}`).field('label', 'Acte de naissance légalisé').attach('file', PNG, { filename: 'acte.png', contentType: 'image/png' });
+    expect(replaced.status).toBe(200);
+    expect(replaced.body).toMatchObject({ label: 'Acte de naissance légalisé', mime: 'image/png' });
+
+    const teacherView = await as('teacher').get(`/students/${student.id}`);
+    if (teacherView.status === 200) expect(teacherView.body.files).toBeUndefined();
+    expect((await http.post(`/api/v1/students/${student.id}/files`).set('Authorization', `Bearer ${tokens.teacher}`).field('label', 'x').attach('file', PDF, { filename: 'a.pdf', contentType: 'application/pdf' })).status).toBe(403);
+
+    await as('secretariat').del(`/students/${student.id}/files/${f.body.id}`).expect(200);
+    await as('direction').del(`/students/${student.id}/photo`).expect(200);
+    dossier = (await as('direction').get(`/students/${student.id}`)).body;
+    expect(dossier.files).toEqual([]);
+    expect(dossier.photoUrl).toBeNull();
+  });
+});
