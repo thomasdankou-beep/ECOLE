@@ -7,6 +7,7 @@ import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { nextNumber, normalizePhone, pad, toDate } from '../../common/util';
 import { hashPassword } from '../auth/auth.service';
+import { FilesService } from '../files/files.service';
 import { FinanceService } from '../finance/finance.service';
 import { SettingsService, temporaryPassword } from '../settings/settings.service';
 import { ChangeClassDto, EnrollStudentDto, GuardianInput, UpdateStudentDto, WithdrawDto } from './students.dto';
@@ -19,7 +20,13 @@ export class StudentsService {
     private audit: AuditService,
     private settings: SettingsService,
     private finance: FinanceService,
+    private files: FilesService,
   ) {}
+
+  /** Lien signé (15 minutes) vers la photo de l'élève, ou null. */
+  photoUrl(s: { photoKey: string | null; photoUrl?: string | null }) {
+    return s.photoKey ? this.files.signedUrl(s.photoKey) : s.photoUrl ?? null;
+  }
 
   list(actor: Actor, q?: string, classId?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
@@ -67,7 +74,12 @@ export class StudentsService {
       const balance = can(actor.role, 'finance.read') ? (await this.finance.balances(tx, [id])).get(id) ?? 0 : undefined;
       // Les coordonnées des responsables ne sont pas exposées aux élèves.
       const guardians = actor.role === 'ELEVE' ? s.guardians.map((g) => ({ ...g, guardian: { ...g.guardian, phone: null, email: null } })) : s.guardians;
-      return { ...s, guardians, currentClass: current?.class ?? null, balance, hasAccount: !!s.userId };
+      // Les pièces du dossier ne sont visibles que de la direction et du secrétariat.
+      const files = can(actor.role, 'students.write')
+        ? (await tx.studentFile.findMany({ where: { studentId: id }, orderBy: { createdAt: 'asc' } })).map((f) => this.fileView(f))
+        : undefined;
+      const { photoKey, ...rest } = s;
+      return { ...rest, photoUrl: this.photoUrl(s), guardians, currentClass: current?.class ?? null, balance, hasAccount: !!s.userId, files };
     });
   }
 
@@ -167,6 +179,61 @@ export class StudentsService {
       });
       await this.audit.log(tx, actor, 'student.updated', 'Student', id, dto);
       return s;
+    });
+  }
+
+  /** Photo d'identité de l'élève (JPEG, PNG ou WebP), remplaçable à tout moment ; sans fichier, la photo est retirée. */
+  setPhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une photo (JPEG, PNG ou WebP)');
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      await this.scope.assertStudent(tx, actor, id);
+      const photoKey = file ? await this.files.save(actor.tenantId, 'eleves/photos', file) : null;
+      const s = await tx.student.update({ where: { id }, data: { photoKey } });
+      await this.audit.log(tx, actor, file ? 'student.photo_set' : 'student.photo_removed', 'Student', id);
+      return { photoUrl: this.photoUrl(s) };
+    });
+  }
+
+  private fileView(f: { id: string; label: string; fileKey: string; mime: string; size: number; createdAt: Date }) {
+    return { id: f.id, label: f.label, mime: f.mime, size: f.size, createdAt: f.createdAt, url: this.files.signedUrl(f.fileKey) };
+  }
+
+  /** Pièce du dossier (extrait de naissance, pièce d'identité, attestation…) : photo ou PDF de 5 Mo au plus. */
+  addFile(actor: Actor, id: string, label: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    if (!file) throw new BadRequestException('Choisissez le fichier à envoyer');
+    const name = (label ?? '').trim().slice(0, 120);
+    if (!name) throw new BadRequestException('Indiquez de quelle pièce il s’agit');
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      await this.scope.assertStudent(tx, actor, id);
+      const fileKey = await this.files.save(actor.tenantId, 'eleves/pieces', file);
+      const f = await tx.studentFile.create({ data: { tenantId: actor.tenantId, studentId: id, label: name, fileKey, mime: file.mimetype, size: file.size, uploadedById: actor.userId } });
+      await this.audit.log(tx, actor, 'student.file_added', 'Student', id, { fileId: f.id, label: name });
+      return this.fileView(f);
+    });
+  }
+
+  /** Remplace le fichier d'une pièce (nouvelle version) en gardant son nom, ou renomme la pièce. */
+  updateFile(actor: Actor, id: string, fileId: string, label?: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      await this.scope.assertStudent(tx, actor, id);
+      const current = await tx.studentFile.findFirst({ where: { id: fileId, studentId: id } });
+      if (!current) throw new NotFoundException('Pièce introuvable');
+      const data: Prisma.StudentFileUpdateInput = {};
+      if (label?.trim()) data.label = label.trim().slice(0, 120);
+      if (file) Object.assign(data, { fileKey: await this.files.save(actor.tenantId, 'eleves/pieces', file), mime: file.mimetype, size: file.size, uploadedById: actor.userId });
+      const f = await tx.studentFile.update({ where: { id: fileId }, data });
+      await this.audit.log(tx, actor, 'student.file_updated', 'Student', id, { fileId, label: f.label, replaced: !!file });
+      return this.fileView(f);
+    });
+  }
+
+  removeFile(actor: Actor, id: string, fileId: string) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      await this.scope.assertStudent(tx, actor, id);
+      const { count } = await tx.studentFile.deleteMany({ where: { id: fileId, studentId: id } });
+      if (!count) throw new NotFoundException('Pièce introuvable');
+      await this.audit.log(tx, actor, 'student.file_removed', 'Student', id, { fileId });
+      return { ok: true };
     });
   }
 

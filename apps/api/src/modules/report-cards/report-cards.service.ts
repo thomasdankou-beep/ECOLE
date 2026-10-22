@@ -308,7 +308,7 @@ export class ReportCardsService {
     const wanted = year.students.filter((s) => !studentIds?.length || studentIds.includes(s.id));
     const ids = wanted.map((s) => s.id);
     const [students, decisions, absences] = await Promise.all([
-      tx.student.findMany({ where: { id: { in: ids } }, select: { id: true, birthDate: true, sex: true } }),
+      tx.student.findMany({ where: { id: { in: ids } }, select: { id: true, birthDate: true, sex: true, photoKey: true } }),
       tx.annualDecision.findMany({ where: { academicYearId: klass.academicYearId, studentId: { in: ids } } }),
       tx.attendanceRecord.groupBy({ by: ['studentId'], where: { studentId: { in: ids }, status: 'ABSENT', session: { classId } }, _count: true }),
     ]);
@@ -322,7 +322,10 @@ export class ReportCardsService {
         const d = decisions.find((x) => x.studentId === s.id);
         const outcome = d?.outcome ?? proposedOutcome(s.average, grading.passMark);
         return {
-          student: { id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, birthDate: students.find((x) => x.id === s.id)?.birthDate ?? null },
+          student: (() => {
+            const st = students.find((x) => x.id === s.id);
+            return { id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, birthDate: st?.birthDate ?? null, photoUrl: st?.photoKey ? this.files.signedUrl(st.photoKey) : null };
+          })(),
           subjects: s.subjects.map((x) => ({ ...x, classAverage: year.subjectStats.find((y) => y.classSubjectId === x.classSubjectId)?.mean ?? null })),
           terms: s.terms, average: s.average, rank: s.rank, distinction: distinction(s.average, grading.distinctions),
           absences: absences.find((a) => a.studentId === s.id)?._count ?? 0,
@@ -399,7 +402,8 @@ export class ReportCardsService {
       // Le bulletin de la dernière période porte aussi la moyenne annuelle et la décision de fin d'année.
       const last = await tx.term.findFirst({ where: { academicYearId: term.academicYearId }, orderBy: { position: 'desc' } });
       const annual = last?.id === term.id ? await this.annualResult(tx, actor.tenantId, c.studentId, c.classId, ['PARENT', 'ELEVE'].includes(actor.role)) : null;
-      return { ...c, term: { name: term.name, year: term.academicYear.label }, tenant: { name: tenant.name }, identity, annual };
+      const { photoKey, ...student } = c.student;
+      return { ...c, student: { ...student, photoUrl: photoKey ? this.files.signedUrl(photoKey) : null }, term: { name: term.name, year: term.academicYear.label }, tenant: { name: tenant.name }, identity, annual };
     });
   }
 }

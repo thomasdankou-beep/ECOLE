@@ -17,7 +17,7 @@ type Annual = {
   classStats: { mean: number | null; min: number | null; max: number | null };
   classSize: number;
   cards: {
-    student: { id: string; firstName: string; lastName: string; matricule: string; birthDate: string | null };
+    student: { id: string; firstName: string; lastName: string; matricule: string; birthDate: string | null; photoUrl: string | null };
     subjects: { classSubjectId: string; name: string; coefficient: number; teacher: string | null; terms: Record<string, number | null>; average: number | null; classAverage: number | null }[];
     terms: Record<string, number | null>; average: number | null; rank: number | null; distinction: string | null; absences: number;
     outcomeLabel: string | null; note: string | null;
@@ -55,7 +55,9 @@ function Card({ a, c }: { a: Annual; c: Annual['cards'][number] }) {
         <h1 className="font-display text-2xl font-bold uppercase">Bulletin annuel</h1>
         <p>Année scolaire {a.year.label}</p>
       </div>
-      <div className="grid grid-cols-2 gap-x-6 gap-y-1 rounded border border-black/30 p-3">
+      <div className="flex gap-3 rounded border border-black/30 p-3">
+            {c.student.photoUrl && <img src={c.student.photoUrl} alt="" className="h-[30mm] w-[24mm] flex-none rounded object-cover" />}
+            <div className="grid flex-1 grid-cols-2 content-start gap-x-6 gap-y-1">
         <p>Élève : <b>{c.student.lastName} {c.student.firstName}</b></p>
         <p>Matricule : <b className="font-mono">{c.student.matricule}</b></p>
         <p>Classe : <b>{a.class.name}</b>{a.class.track ? ` · ${a.class.track}` : ''}</p>
@@ -63,6 +65,7 @@ function Card({ a, c }: { a: Annual; c: Annual['cards'][number] }) {
         {c.student.birthDate && <p>Né(e) le {date(c.student.birthDate)}</p>}
         <p>Professeur principal : {a.class.headTeacher ? `${a.class.headTeacher.firstName} ${a.class.headTeacher.lastName}` : '—'}</p>
       </div>
+          </div>
       <table className="w-full border-collapse text-[12.5px] [&_td]:border [&_td]:border-black/40 [&_td]:px-1.5 [&_td]:py-1 [&_th]:border [&_th]:border-black/40 [&_th]:bg-[#e3e9f8] [&_th]:px-1.5 [&_th]:py-1">
         <thead>
           <tr><th className="text-left">Matière</th><th>Coef.</th>{a.terms.map((t) => <th key={t.id}>{t.name}</th>)}<th>Moy. annuelle</th><th>Moy. × coef.</th><th>Classe</th><th className="text-left">Professeur</th></tr>

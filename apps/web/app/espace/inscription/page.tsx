@@ -8,9 +8,11 @@ import { Button, Card, ErrorNote, Field, Input, PageHeader, Select, Table } from
 import { api } from '@/lib/api';
 import type { ClassRow } from '@/lib/types';
 import { useApi } from '@/lib/use-api';
+import { ACCEPT_FILE, ACCEPT_PHOTO, useDocumentLabels } from '@/components/espace/student-files';
 
 type Guardian = { firstName: string; lastName: string; phone: string; email: string; relation: string };
-type Result = { id: string; matricule: string; credentials: { name: string; identifier: string; temporaryPassword: string }[]; invoices: number };
+type Result = { id: string; matricule: string; credentials: { name: string; identifier: string; temporaryPassword: string }[]; invoices: number; uploaded?: string[]; failed?: string[] };
+type Piece = { label: string; file: File };
 
 const emptyGuardian = (): Guardian => ({ firstName: '', lastName: '', phone: '', email: '', relation: 'Mère' });
 
@@ -27,6 +29,10 @@ export default function Inscription() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [pieces, setPieces] = useState<Piece[]>([]);
+  const [pieceLabel, setPieceLabel] = useState('');
+  const labels = useDocumentLabels();
 
   // Pré-remplissage depuis une pré-inscription acceptée.
   useEffect(() => {
@@ -51,7 +57,20 @@ export default function Inscription() {
         returning,
         ...(applicationId ? { applicationId } : {}),
       });
-      setResult(r);
+      // Photo et pièces envoyées une fois le dossier créé ; un échec n'annule pas l'inscription.
+      const uploaded: string[] = [];
+      const failed: string[] = [];
+      const send = async (path: string, file: File, label?: string) => {
+        const body = new FormData();
+        body.append('file', file);
+        if (label) body.append('label', label);
+        try { await api.post(path, body); uploaded.push(label ?? 'Photo'); } catch { failed.push(label ?? 'Photo'); }
+      };
+      if (photo) await send(`/students/${r.id}/photo`, photo);
+      for (const p of pieces) await send(`/students/${r.id}/files`, p.file, p.label);
+      setResult({ ...r, uploaded, failed });
+      setPhoto(null);
+      setPieces([]);
       window.scrollTo({ top: 0 });
     } catch (err) {
       setError(err);
@@ -65,6 +84,8 @@ export default function Inscription() {
       <Card className="grid gap-4">
         <p className="flex items-center gap-2 text-2xl font-bold text-good"><CheckCircle2 className="size-8" /> Inscription enregistrée</p>
         <p>Matricule attribué : <span className="font-mono text-lg font-bold">{result.matricule}</span>. {result.invoices ? `${result.invoices} facture(s) créée(s) d’après les frais de la classe.` : ''}</p>
+        {!!result.uploaded?.length && <p className="text-sm">Ajouté au dossier : {result.uploaded.join(', ')}.</p>}
+        {!!result.failed?.length && <p className="rounded-lg bg-warn-soft p-3 text-sm font-bold text-warn">Non envoyé : {result.failed.join(', ')}. Ajoutez-les depuis le dossier de l’élève (fichier trop lourd ou format non accepté).</p>}
         {result.credentials.length > 0 && (
           <div className="grid gap-2">
             <p className="font-bold">Identifiants à remettre (ils ne seront plus affichés) :</p>
@@ -123,6 +144,34 @@ export default function Inscription() {
               </div>
             );
           })}
+        </Card>
+        <Card className="grid gap-4">
+          <h2 className="text-2xl font-bold">Photo et pièces du dossier</h2>
+          <p className="-mt-2 text-sm text-muted">Facultatif à cette étape : tout peut être ajouté ou remplacé plus tard depuis le dossier de l’élève. Photo ou scan PDF, 5 Mo au plus.</p>
+          <Field label="Photo de l’élève">
+            <Input type="file" accept={ACCEPT_PHOTO} capture="user" onChange={(e) => setPhoto(e.target.files?.[0] ?? null)} />
+          </Field>
+          {photo && <img src={URL.createObjectURL(photo)} alt="Aperçu de la photo" className="size-24 rounded-xl object-cover" />}
+          <div className="grid gap-2">
+            <p className="text-[13px] font-bold text-muted">Pièces (extrait de naissance, pièce d’identité, attestation…)</p>
+            {pieces.map((p, i) => (
+              <div key={i} className="flex items-center justify-between gap-2 rounded-lg bg-sunk px-3 py-2 text-sm">
+                <span><b>{p.label}</b> · {p.file.name}</span>
+                <Button type="button" size="icon" variant="ghost" aria-label={`Retirer ${p.label}`} onClick={() => setPieces(pieces.filter((_, j) => j !== i))}><Trash2 className="size-4" /></Button>
+              </div>
+            ))}
+            <div className="grid gap-2 sm:grid-cols-[1fr_1fr]">
+              <Select aria-label="Pièce" value={pieceLabel} onChange={(e) => setPieceLabel(e.target.value)}>
+                <option value="">Choisir la pièce</option>
+                {labels.all.map((l) => <option key={l} value={l}>{l}</option>)}
+              </Select>
+              <Input type="file" aria-label="Fichier de la pièce" accept={ACCEPT_FILE} disabled={!pieceLabel} onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file && pieceLabel) { setPieces([...pieces, { label: pieceLabel, file }]); setPieceLabel(''); }
+              }} />
+            </div>
+          </div>
         </Card>
         <Card className="grid gap-3">
           <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={createStudentAccount} onChange={(e) => setAccount(e.target.checked)} /> Créer le compte de l’élève (identifiant = matricule)</label>
