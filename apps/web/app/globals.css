@@ -20,6 +20,7 @@
   --orange: #ee7d17;
   --orange-soft: #fdebdc;
   --yellow: #ffc425;
+  --cream: #fbf5ea;
   --good: #1d8a57;
   --good-soft: #ddf3e8;
   --warn: #9a6200;
@@ -44,6 +45,7 @@
     --red: #ff6b61;
     --orange: #ff9b4a;
     --orange-soft: #3a2717;
+    --cream: #111a2e;
     --good: #4cc48b;
     --good-soft: #163527;
     --warn: #e5b54a;
@@ -68,6 +70,7 @@
   --red: #ff6b61;
   --orange: #ff9b4a;
   --orange-soft: #3a2717;
+  --cream: #111a2e;
   --good: #4cc48b;
   --good-soft: #163527;
   --warn: #e5b54a;
@@ -92,6 +95,7 @@
   --color-orange: var(--orange);
   --color-orange-soft: var(--orange-soft);
   --color-yellow: var(--yellow);
+  --color-cream: var(--cream);
   --color-good: var(--good);
   --color-good-soft: var(--good-soft);
   --color-warn: var(--warn);
