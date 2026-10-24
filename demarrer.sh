@@ -4,8 +4,23 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Docker arrêté : on tente de le démarrer (cas courant d'un Codespace remis en route), sinon on explique quoi faire.
 if ! docker info >/dev/null 2>&1; then
-  echo "Docker n'est pas démarré. Lancez Docker Desktop (ou le service docker), puis relancez ./demarrer.sh"
+  echo "Docker n'est pas démarré : tentative de démarrage..."
+  for start in "/usr/local/share/docker-init.sh" "service docker start" "dockerd"; do
+    if command -v sudo >/dev/null 2>&1 && command -v ${start%% *} >/dev/null 2>&1; then
+      (sudo -n $start >/tmp/demarrage-docker.log 2>&1 &) || true
+      for i in $(seq 1 15); do docker info >/dev/null 2>&1 && break 2; sleep 2; done
+    fi
+  done
+fi
+if ! docker info >/dev/null 2>&1; then
+  if [ -n "${CODESPACE_NAME:-}" ]; then
+    echo "Docker ne démarre pas dans ce codespace. Ouvrez la palette de commandes (Ctrl+Maj+P),"
+    echo "choisissez « Codespaces: Rebuild Container », attendez la fin, puis relancez ./demarrer.sh"
+  else
+    echo "Docker n'est pas démarré. Lancez Docker Desktop (ou le service docker), puis relancez ./demarrer.sh"
+  fi
   exit 1
 fi
 
