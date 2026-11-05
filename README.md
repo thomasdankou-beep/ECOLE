@@ -52,7 +52,7 @@ cd ecole
 ./installer-serveur.sh
 ```
 
-Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès qu’un nom de domaine pointe vers le serveur, passer en HTTPS : `SITE_ADDRESS`, `WEB_ORIGIN`, `COOKIE_SECURE=true` (voir la section précédente), puis relancer le script.
+Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès que le DNS envoie le domaine et `*.domaine` vers le serveur : `./installer-serveur.sh --domaine exemple.com` passe en HTTPS, chaque école sur `<identifiant>.exemple.com`.
 
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 

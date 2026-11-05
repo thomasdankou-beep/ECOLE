@@ -2,6 +2,10 @@
 # Installe ou met à jour le site sur un serveur Ubuntu (VPS), en root :
 #   ./installer-serveur.sh            (adresse publique du serveur détectée automatiquement)
 #   ./installer-serveur.sh 2.24.57.21 (adresse donnée à la main)
+#   ./installer-serveur.sh --domaine cahiora.com
+#       passe en HTTPS sur ce nom de domaine, en plateforme multi-écoles : chaque école sur
+#       <identifiant>.<domaine> (ex. saint-kisito.cahiora.com). Le DNS doit d'abord envoyer
+#       <domaine> et *.<domaine> vers ce serveur.
 # Installe Docker si besoin, crée .env avec des secrets de production aléatoires au premier lancement
 # (jamais remplacés ensuite), récupère la dernière version du code et démarre les services.
 # Ne charge AUCUNE donnée de démonstration. Relancer le script = mettre le site à jour, les données restent.
@@ -37,6 +41,13 @@ setkv() { # setkv CLE valeur : remplace la ligne CLE=... dans .env, ou l'ajoute.
   if grep -q "^$1=" .env; then sed -i "s#^$1=.*#$1=$2#" .env; else echo "$1=$2" >> .env; fi
 }
 
+domaine=""
+if [ "${1:-}" = "--domaine" ]; then
+  domaine=$(echo "${2:-}" | tr 'A-Z' 'a-z' | sed 's#^https\?://##; s#/.*##; s#^www\.##')
+  if [ -z "$domaine" ]; then echo "Usage : ./installer-serveur.sh --domaine exemple.com"; exit 1; fi
+  shift 2
+fi
+
 if [ ! -f .env ]; then
   ip="${1:-$(curl -4 -fsS --max-time 10 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')}"
   cp .env.docker.example .env
@@ -56,6 +67,16 @@ for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD JWT_ACCESS_SECRET
   echo "Secret $k généré."
 done
 chmod 600 .env
+
+if [ -n "$domaine" ]; then
+  setkv PLATFORM_DOMAIN "$domaine"
+  setkv SITE_ADDRESS "https://"
+  setkv WEB_ORIGIN "https://$domaine"
+  setkv COOKIE_SECURE true
+  setkv TENANT_SLUG ""
+  setkv SHOW_DEMO_ACCOUNTS false
+  echo "Site configuré en HTTPS sur $domaine (chaque école sur <identifiant>.$domaine)."
+fi
 
 echo "Construction et démarrage des services (10 à 15 minutes la première fois)..."
 docker compose up -d --build
