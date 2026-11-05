@@ -24,6 +24,8 @@ export type SchoolData = {
     /** Une ligne par groupe de niveaux, par filière (frais de TP) ou pour tous (« all »). */
     rows: { levels?: string[]; track?: string; all?: boolean; amount: number }[];
   }[];
+  /** Logo fourni avec l'installation (ex. /logo.png) ; un logo envoyé par la direction reste prioritaire. */
+  branding?: { logoUrl?: string };
   public?: Record<string, unknown>;
   unresolved?: string[];
 };
@@ -76,12 +78,13 @@ export async function applySchoolData(tx: Tx, tenantId: string, data: SchoolData
     }
   }
 
-  if (data.identity || data.public) {
+  if (data.identity || data.public || data.branding) {
     const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId } });
     const current = tenantSettings(tenant.settings) as Record<string, any>;
     const settings = {
       ...current,
       identity: { ...current.identity, ...(data.identity ?? {}) },
+      branding: { ...current.branding, ...(data.branding ?? {}) },
       public: { ...(current.public ?? {}), ...(data.public ?? {}) },
     };
     await tx.tenant.update({ where: { id: tenantId }, data: { settings } });

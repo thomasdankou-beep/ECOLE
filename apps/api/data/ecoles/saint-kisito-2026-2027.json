@@ -144,7 +144,13 @@
       "rows": [{ "all": true, "amount": 10000 }]
     }
   ],
+  "branding": { "logoUrl": "/logo.png" },
   "public": {
+    "slogan": "Éduquer · Former · Réussir",
+    "tagline": "La référence de l’excellence professionnelle",
+    "reasons": ["Enseignants qualifiés", "Formation pratique et professionnelle", "Stages en entreprise garantis", "Obtention du CQP, CAP et DT", "Matériels modernes et ateliers équipés"],
+    "heroImage": "/img/electrotechnique.jpg",
+    "trackImages": { "F3": "/img/electrotechnique.jpg", "F4": "/img/genie-civil.jpg", "BTP": "/img/geometre.jpg", "HR": "/img/hotellerie.jpg", "MMV": "/img/mode.jpg" },
     "rentree": "2026-09-14",
     "entranceTest": "2026-08-05",
     "motto": "Oser, apprendre, garantir son avenir !",
