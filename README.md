@@ -42,6 +42,18 @@ Un seul serveur sert toutes les écoles clientes. Chaque école a sa propre adre
 
 Sans `PLATFORM_DOMAIN`, l’installation sert une seule école (`TENANT_SLUG`), comme avant. Le domaine de la plateforme et la tarification des abonnements restent à décider (voir INFORMATION MANQUANTE).
 
+## Mettre en ligne sur un serveur (VPS Ubuntu)
+
+En root sur le serveur :
+
+```bash
+git clone https://github.com/thomasdankou-beep/ecole.git
+cd ecole
+./installer-serveur.sh
+```
+
+Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès qu’un nom de domaine pointe vers le serveur, passer en HTTPS : `SITE_ADDRESS`, `WEB_ORIGIN`, `COOKIE_SECURE=true` (voir la section précédente), puis relancer le script.
+
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
 Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Une fois le codespace ouvert, tapez `./demarrer.sh` dans son terminal (plusieurs minutes la première fois) ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.
