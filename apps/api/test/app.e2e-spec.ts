@@ -794,6 +794,21 @@ describe('Étanchéité entre écoles : références, blocages et sessions (SEC-
     expect((await asB('VIE_SCOLAIRE').post('/sanctions', { studentId: studentB, kind: 'Avertissement', reason: 'test', date: '2026-11-06' })).status).toBe(201);
   });
 
+  it("la même clé anti-doublon d'encaissement peut servir dans deux écoles (SEC-008)", async () => {
+    const key = `cle-commune-${slugB}`;
+    const invA = (await as('comptable').get('/finance/invoices?status=OPEN')).body;
+    const a = (invA.items ?? invA).find((i: any) => i.total - i.paid >= 2);
+    expect((await as('comptable').post('/finance/payments/desk', { invoiceId: a.id, amount: 1, method: 'CASH', idempotencyKey: key })).status).toBe(201);
+    const inv = await asB('COMPTABLE').post('/finance/invoices', { studentId: studentB, label: 'Scolarité', dueDate: '2026-12-01', items: [{ label: 'Scolarité', amount: 5000 }] });
+    expect(inv.status).toBe(201);
+    const b = await asB('COMPTABLE').post('/finance/payments/desk', { invoiceId: inv.body.id, amount: 1000, method: 'CASH', idempotencyKey: key });
+    expect(b.status).toBe(201);
+    expect(b.body.duplicate).toBeFalsy();
+    // Dans une même école, la clé protège toujours contre le double encaissement.
+    const again = await asB('COMPTABLE').post('/finance/payments/desk', { invoiceId: inv.body.id, amount: 1000, method: 'CASH', idempotencyKey: key });
+    expect(again.body.duplicate).toBe(true);
+  });
+
   it("« déconnecter tous les appareils » coupe aussitôt le jeton d'accès", async () => {
     const t = await login(phoneB, slugB);
     expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`)).status).toBe(200);
@@ -818,5 +833,77 @@ describe('Étanchéité entre écoles : références, blocages et sessions (SEC-
     expect(paymentProvider({ NODE_ENV: 'production', PAYMENT_PROVIDER: 'sandbox', ALLOW_SANDBOX_PAYMENTS: 'true' })).toBe('sandbox');
     expect(paymentProvider({ NODE_ENV: 'production', PAYMENT_PROVIDER: 'cinetpay' })).toBe('cinetpay');
     expect(paymentProvider({ NODE_ENV: 'development' })).toBe('sandbox');
+  });
+});
+
+describe('Cloisonnement dans la base elle-même (SEC-006, SEC-007, SEC-001 option B)', () => {
+  let A = '';
+  let O = '';
+  const inApp = <T>(tid: string, fn: (tx: any) => Promise<T>) =>
+    app_.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tid}, true)`;
+      return fn(tx);
+    });
+
+  beforeAll(async () => {
+    A = (await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } })).id;
+    O = (await admin.tenant.findUniqueOrThrow({ where: { slug: 'autre-ecole' } })).id;
+  });
+
+  it("une école ne lit que sa propre fiche d'établissement, jamais les notes de la plateforme (SEC-006)", async () => {
+    const seen = await inApp(A, (tx) => tx.$queryRaw`SELECT id::text AS id FROM tenants`);
+    expect((seen as { id: string }[]).map((r) => r.id)).toEqual([A]);
+    await expect(inApp(A, (tx) => tx.$queryRaw`SELECT "platformNotes" FROM tenants`)).rejects.toThrow(/permission denied/);
+    await expect(app_.$queryRaw`SELECT "platformNotes" FROM tenants`).rejects.toThrow(/permission denied/);
+    // Hors transaction d'école, la recherche d'une école par son identifiant reste possible (connexion, adresse du site).
+    const bySlug = await app_.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM tenants WHERE slug = 'autre-ecole'`;
+    expect(Number(bySlug[0].n)).toBe(1);
+    // La plateforme garde ses notes.
+    await admin.tenant.update({ where: { id: O }, data: { platformNotes: 'Contrat fictif' } });
+    expect((await admin.tenant.findUniqueOrThrow({ where: { id: O } })).platformNotes).toBe('Contrat fictif');
+  });
+
+  it("codes de vérification et routage des paiements : chaque école ne voit et n'écrit que les siens (SEC-007)", async () => {
+    const code = `TST${Date.now().toString(36)}`.toUpperCase();
+    const entry = { kind: 'Document de test', summary: 'Donnée fictive', issuedAt: new Date() };
+    await inApp(O, (tx) => tx.verificationEntry.create({ data: { code, tenantId: O, ...entry } }));
+    expect(await inApp(A, (tx) => tx.verificationEntry.findUnique({ where: { code } }))).toBeNull();
+    await expect(inApp(A, (tx) => tx.verificationEntry.create({ data: { code: `${code}X`, tenantId: O, ...entry } }))).rejects.toThrow();
+    await expect(inApp(A, (tx) => tx.$executeRaw`INSERT INTO payment_routes (transaction_id, tenant_id) VALUES (${code}, ${O}::uuid)`)).rejects.toThrow();
+    // La vérification publique d'un document, sans connexion, fonctionne toujours.
+    const pub = await http.get(`/api/v1/public/verify/${code}`);
+    expect(pub.status).toBe(200);
+  });
+
+  // Le refus vient du contrôle check_same_tenant (message « Référence vers un autre établissement »),
+  // que Prisma remonte comme une clé étrangère invalide (P2003, réponse 400 de l'API).
+  it("la base refuse une fiche qui pointe vers celle d'une autre école, même sans passer par l'API (SEC-001)", async () => {
+    const siteO = await admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${O}, true)`;
+      return (await tx.site.findFirst()) ?? tx.site.create({ data: { tenantId: O, name: 'Site autre' } });
+    });
+    await expect(inApp(A, (tx) => tx.room.create({ data: { tenantId: A, siteId: siteO.id, name: 'Intrus' } }))).rejects.toMatchObject({ code: 'P2003' });
+    const userA: any = await inApp(A, (tx) => tx.user.findFirstOrThrow());
+    await expect(
+      inApp(A, (tx) => tx.sanction.create({ data: { tenantId: A, studentId: otherTenantStudentId, proposedById: userA.id, kind: 'Avertissement', reason: 'test', date: new Date() } })),
+    ).rejects.toMatchObject({ code: 'P2003' });
+    // Une référence à sa propre école passe toujours.
+    const siteA: any = await inApp(A, (tx) => tx.site.findFirstOrThrow());
+    const room: any = await inApp(A, (tx) => tx.room.create({ data: { tenantId: A, siteId: siteA.id, name: `Salle contrôle ${Date.now()}` } }));
+    expect(room.siteId).toBe(siteA.id);
+  });
+
+  it('le contrôle couvre toutes les clés étrangères entre tables des écoles', async () => {
+    const missing = await admin.$queryRaw<{ fk: string }[]>`
+      SELECT con.conrelid::regclass::text || '.' || ca.attname AS fk
+      FROM pg_constraint con
+      JOIN pg_attribute ca ON ca.attrelid = con.conrelid AND ca.attnum = con.conkey[1]
+      WHERE con.contype = 'f' AND con.connamespace = 'public'::regnamespace AND ca.attname <> 'tenant_id'
+        AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.conrelid AND a.attname = 'tenant_id')
+        AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.confrelid AND a.attname = 'tenant_id')
+        AND NOT EXISTS (
+          SELECT 1 FROM pg_trigger t WHERE t.tgrelid = con.conrelid AND t.tgname = 'same_tenant_refs'
+            AND position(ca.attname || '\\000' IN encode(t.tgargs, 'escape')) > 0)`;
+    expect(missing).toEqual([]);
   });
 });

@@ -195,7 +195,7 @@ export class FinanceService {
   deskPayment(actor: Actor, dto: DeskPaymentDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       if (dto.idempotencyKey) {
-        const prev = await tx.payment.findUnique({ where: { idempotencyKey: dto.idempotencyKey }, include: { receipt: true } });
+        const prev = await tx.payment.findUnique({ where: { tenantId_idempotencyKey: { tenantId: actor.tenantId, idempotencyKey: dto.idempotencyKey } }, include: { receipt: true } });
         if (prev) return { payment: prev, receipt: prev.receipt, duplicate: true };
       }
       const inv = await tx.invoice.findUniqueOrThrow({ where: { id: dto.invoiceId } });

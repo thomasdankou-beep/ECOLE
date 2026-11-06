@@ -902,7 +902,8 @@ model Payment {
   providerRef    String?
   /// Identifiant de transaction envoyé au fournisseur, unique.
   transactionId  String        @unique
-  idempotencyKey String?       @unique
+  /// Clé anti-doublon envoyée par le poste de caisse, unique dans l'école (SEC-008).
+  idempotencyKey String?
   status         PaymentStatus @default(INITIATED)
   payerPhone     String?
   receivedById   String?       @db.Uuid
@@ -912,6 +913,7 @@ model Payment {
 
   receipt Receipt?
 
+  @@unique([tenantId, idempotencyKey])
   @@index([tenantId, status])
   @@map("payments")
 }
@@ -1076,7 +1078,8 @@ model AuditLog {
   @@map("audit_logs")
 }
 
-/// Routage des webhooks de paiement vers le bon établissement (hors RLS : le webhook arrive sans contexte).
+/// Routage des webhooks de paiement vers le bon établissement (le webhook arrive sans contexte d'école ;
+/// RLS : lecture libre hors transaction d'école, écriture limitée à l'école courante, voir migration securite_lot2).
 model PaymentRoute {
   transactionId String   @id @map("transaction_id")
   tenantId      String   @map("tenant_id") @db.Uuid
