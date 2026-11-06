@@ -20,7 +20,7 @@ import { PrismaService } from './prisma.service';
  * une déconnexion, un changement de mot de passe ou une suspension l'efface tout de suite.
  */
 const SESSION_CACHE_MS = 30_000;
-const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null; pendingPassword?: boolean; pendingTwoFactor?: boolean }>();
+const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null; pendingPassword?: boolean }>();
 
 /** Audience des jetons d'accès d'école (SEC-012) : un jeton Super Admin ou de double authentification n'est jamais accepté ici. */
 export const SCHOOL_AUDIENCE = 'school';
@@ -44,14 +44,6 @@ export function schoolFromHost(rawHost: string | undefined, platformDomain: stri
   // Adresse sans point (api, localhost) ou adresse IP : appel interne, pas une adresse d'école.
   if (!host.includes('.') || /^[\d.]+$/.test(host)) return null;
   return { domain: host };
-}
-
-/**
- * Double authentification obligatoire et pas encore activée (SEC-020) : la session ne donne accès qu'à « Mon compte »
- * (routes marquées AllowPendingPassword) jusqu'à son activation.
- */
-export function mustSetupTwoFactor(roles: { role: string }[], totpEnabled: boolean) {
-  return config.security.enforceTwoFactor && !totpEnabled && roles.some((r) => config.security.twoFactorRoles.includes(r.role));
 }
 
 /** Oublie les sessions gardées en mémoire : d'un utilisateur, de toute une école, ou une seule. */
@@ -116,20 +108,15 @@ export class AuthGuard implements CanActivate {
     const tenant = await this.db.tenant.findUnique({ where: { id: p.tid }, select: { status: true, slug: true, domain: true } });
     let ok = tenant?.status === 'ACTIVE';
     let pendingPassword = false;
-    let pendingTwoFactor = false;
     if (ok) {
       const s = await this.db.forTenant(p.tid, (tx) =>
-        tx.session.findUnique({
-          where: { id: p.sid },
-          select: { userId: true, revokedAt: true, expiresAt: true, user: { select: { status: true, mustChangePassword: true, totpEnabled: true, roles: { select: { role: true } } } } },
-        }),
+        tx.session.findUnique({ where: { id: p.sid }, select: { userId: true, revokedAt: true, expiresAt: true, user: { select: { status: true, mustChangePassword: true } } } }),
       );
       ok = !!s && s.userId === p.sub && !s.revokedAt && s.expiresAt > new Date() && s.user.status === 'ACTIVE';
       pendingPassword = !!s?.user.mustChangePassword;
-      pendingTwoFactor = !!s && mustSetupTwoFactor(s.user.roles, s.user.totpEnabled);
     }
     if (sessionCache.size > 10_000) sessionCache.clear();
-    const entry = { ok, until: Date.now() + SESSION_CACHE_MS, userId: p.sub, tenantId: p.tid, slug: tenant?.slug, domain: tenant?.domain, pendingPassword, pendingTwoFactor };
+    const entry = { ok, until: Date.now() + SESSION_CACHE_MS, userId: p.sub, tenantId: p.tid, slug: tenant?.slug, domain: tenant?.domain, pendingPassword };
     sessionCache.set(p.sid, entry);
     return entry;
   }
@@ -171,10 +158,8 @@ export class AuthGuard implements CanActivate {
       ip: req.ip,
     };
     req.actor = actor;
-    if ((session.pendingPassword || session.pendingTwoFactor) && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, handlers)) {
-      throw new ForbiddenException(session.pendingPassword
-        ? 'Choisissez d’abord un nouveau mot de passe dans « Mon compte »'
-        : 'Votre rôle demande la double authentification : activez-la d’abord dans « Mon compte »');
+    if (session.pendingPassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, handlers)) {
+      throw new ForbiddenException('Choisissez d’abord un nouveau mot de passe dans « Mon compte »');
     }
 
     const perms = this.reflector.getAllAndOverride<Permission[]>(REQUIRED_PERMISSIONS, handlers);

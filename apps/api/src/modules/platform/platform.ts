@@ -119,16 +119,14 @@ export class PlatformGuard implements CanActivate {
     }
     // Un compte désactivé ou dont le mot de passe a changé depuis perd sa session immédiatement.
     // Une déconnexion refuse tout jeton émis avant elle (SEC-021) ; « at » est l'heure d'émission en millisecondes.
-    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub }, select: { active: true, passwordChangedAt: true, sessionsRevokedAt: true, mustChangePassword: true, totpEnabled: true } });
+    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub }, select: { active: true, passwordChangedAt: true, sessionsRevokedAt: true, mustChangePassword: true } });
     const issuedAt = p.at ?? p.iat * 1000;
     if (!admin?.active || (admin.passwordChangedAt && admin.passwordChangedAt.getTime() > p.iat * 1000 + 999)
       || (admin.sessionsRevokedAt && admin.sessionsRevokedAt.getTime() >= issuedAt)) throw new UnauthorizedException('Session expirée');
     req.platformAdmin = { id: p.sub, name: p.name } satisfies PlatformActor;
     // Mot de passe provisoire : seuls le compte, le changement de mot de passe et la double authentification répondent (SEC-023).
-    // Double authentification obligatoire pour le Super Admin quand l'obligation est active (SEC-020).
-    const pending2fa = config.security.enforceTwoFactor && !admin.totpEnabled;
-    if ((admin.mustChangePassword || pending2fa) && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, [ctx.getHandler(), ctx.getClass()])) {
-      throw new ForbiddenException(admin.mustChangePassword ? 'Choisissez d’abord un nouveau mot de passe' : 'Activez d’abord la double authentification');
+    if (admin.mustChangePassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, [ctx.getHandler(), ctx.getClass()])) {
+      throw new ForbiddenException('Choisissez d’abord un nouveau mot de passe');
     }
     return true;
   }
@@ -258,7 +256,7 @@ export class PlatformService {
   async me(actor: PlatformActor) {
     const a = await this.db.platformAdmin.findUnique({ where: { id: actor.id } });
     if (!a?.active) throw new UnauthorizedException('Session expirée');
-    return { id: a.id, name: a.name, email: a.email, mustChangePassword: a.mustChangePassword, totpEnabled: a.totpEnabled, mustSetupTwoFactor: config.security.enforceTwoFactor && !a.totpEnabled, platformDomain: config.platformDomain || null };
+    return { id: a.id, name: a.name, email: a.email, mustChangePassword: a.mustChangePassword, totpEnabled: a.totpEnabled, platformDomain: config.platformDomain || null };
   }
 
   async changePassword(actor: PlatformActor, dto: PlatformPasswordDto) {
@@ -353,8 +351,7 @@ export class PlatformService {
     const user = await this.db.inTenant(id, async (tx) => {
       const u = await tx.user.findFirst({ where: { status: 'ACTIVE', roles: { some: { role: 'DIRECTION' } } }, orderBy: { createdAt: 'asc' } });
       if (!u) throw new NotFoundException("Cette école n'a aucun compte Direction actif");
-      // La 2FA est aussi retirée (téléphone perdu de la direction) : à réactiver à la prochaine connexion.
-      await tx.user.update({ where: { id: u.id }, data: { passwordHash: await hashPassword(password), mustChangePassword: true, failedLogins: 0, lockedUntil: null, totpEnabled: false, totpSecret: null, totpLastStep: null } });
+      await tx.user.update({ where: { id: u.id }, data: { passwordHash: await hashPassword(password), mustChangePassword: true, failedLogins: 0, lockedUntil: null } });
       await tx.session.updateMany({ where: { userId: u.id, revokedAt: null }, data: { revokedAt: new Date() } });
       forgetSessions({ userId: u.id });
       await this.schoolLog(tx, actor, id, 'platform.director_reset', 'User', u.id, { name: `${u.firstName} ${u.lastName}` });
