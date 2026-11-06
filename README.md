@@ -113,7 +113,7 @@ npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 69 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins, plateforme)
+npm test            # 75 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).

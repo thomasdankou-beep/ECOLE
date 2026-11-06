@@ -5,7 +5,6 @@ import { AuditService } from '../../common/audit.service';
 import { can } from '../../common/permissions';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
-import { assertOwned } from '../../common/ownership';
 import { nextNumber, normalizePhone, pad, toDate } from '../../common/util';
 import { hashPassword } from '../auth/auth.service';
 import { FilesService } from '../files/files.service';
@@ -79,7 +78,10 @@ export class StudentsService {
       const files = can(actor.role, 'students.write')
         ? (await tx.studentFile.findMany({ where: { studentId: id }, orderBy: { createdAt: 'asc' } })).map((f) => this.fileView(f))
         : undefined;
-      const { photoKey, ...rest } = s;
+      const { photoKey, ...all } = s;
+      // SEC-014 : la santé (allergies) n'est pas visible du comptable ni de l'élève (matrice RBAC, ligne Santé).
+      const { allergies, ...withoutHealth } = all;
+      const rest = actor.role === 'COMPTABLE' || actor.role === 'ELEVE' ? withoutHealth : all;
       return { ...rest, photoUrl: this.photoUrl(s), guardians, currentClass: current?.class ?? null, balance, hasAccount: !!s.userId, files };
     });
   }
@@ -91,6 +93,8 @@ export class StudentsService {
   /** Inscription : dossier élève, responsables, inscription dans la classe, comptes, factures (CDC §4.1 étape 6). */
   async enrollInTx(tx: Tx, actor: Actor, dto: EnrollStudentDto) {
     const yearId = await this.scope.currentYearId(tx);
+    // SEC-013 : un compte limité à un site n'inscrit que dans une classe de son site.
+    await this.scope.assertClass(tx, actor, dto.classId);
     const klass = await tx.class.findUnique({ where: { id: dto.classId }, include: { _count: { select: { enrollments: { where: { status: 'ACTIVE' } } } } } });
     if (!klass || klass.academicYearId !== yearId) throw new BadRequestException("Cette classe n'existe pas pour l'année en cours");
     if (klass.capacity && klass._count.enrollments >= klass.capacity) throw new ConflictException(`La classe ${klass.name} est complète (${klass.capacity} places)`);
@@ -174,6 +178,7 @@ export class StudentsService {
 
   update(actor: Actor, id: string, dto: UpdateStudentDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await this.scope.assertStudent(tx, actor, id);
       const s = await tx.student.update({
         where: { id },
         data: { ...dto, lastName: dto.lastName?.toUpperCase(), birthDate: dto.birthDate ? toDate(dto.birthDate) : undefined },
@@ -240,7 +245,7 @@ export class StudentsService {
 
   addGuardian(actor: Actor, id: string, dto: GuardianInput) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      await assertOwned(tx, { student: id });
+      await this.scope.assertStudent(tx, actor, id);
       const r = await this.linkGuardian(tx, actor, id, dto, false);
       await this.audit.log(tx, actor, 'student.guardian_added', 'Student', id, { phone: r.phone });
       return r;
@@ -250,7 +255,8 @@ export class StudentsService {
   changeClass(actor: Actor, id: string, dto: ChangeClassDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
-      await assertOwned(tx, { student: id, class: dto.classId });
+      await this.scope.assertStudent(tx, actor, id);
+      await this.scope.assertClass(tx, actor, dto.classId);
       const target = await tx.class.findUniqueOrThrow({ where: { id: dto.classId }, select: { academicYearId: true } });
       if (target.academicYearId !== yearId) throw new BadRequestException("Cette classe n'existe pas pour l'année en cours");
       const e = await tx.enrollment.update({ where: { studentId_academicYearId: { studentId: id, academicYearId: yearId } }, data: { classId: dto.classId } });
@@ -262,6 +268,7 @@ export class StudentsService {
   withdraw(actor: Actor, id: string, dto: WithdrawDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
+      await this.scope.assertStudent(tx, actor, id);
       await tx.student.update({ where: { id }, data: { status: dto.status } });
       await tx.enrollment.updateMany({ where: { studentId: id, academicYearId: yearId }, data: { status: dto.status } });
       await this.audit.log(tx, actor, 'student.withdrawn', 'Student', id, dto);

@@ -43,12 +43,12 @@ export class FinanceController {
   @Post('payments/desk') @Can('finance.write')
   desk(@CurrentActor() a: Actor, @Body() dto: DeskPaymentDto) { return this.s.deskPayment(a, dto); }
 
-  @Get('payments') @Can('finance.write')
+  @Get('payments') @Can('finance.write', 'dashboard.read')
   payments(@CurrentActor() a: Actor, @Query('status') status?: string, @Query('method') method?: string, @Query('from') from?: string, @Query('to') to?: string) {
     return this.s.payments(a, { status, method, from, to });
   }
 
-  @Get('payments/export.csv') @Can('finance.write')
+  @Get('payments/export.csv') @Can('finance.write', 'dashboard.read')
   @Header('Content-Type', 'text/csv; charset=utf-8')
   @Header('Content-Disposition', 'attachment; filename="encaissements.csv"')
   exportCsv(@CurrentActor() a: Actor, @Query('from') from?: string, @Query('to') to?: string) { return this.s.exportPaymentsCsv(a, from, to); }
@@ -59,13 +59,13 @@ export class FinanceController {
   @Post('receipts/:id/cancel') @Can('finance.write')
   cancelReceipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelReceiptDto) { return this.s.cancelReceipt(a, id, dto.reason); }
 
-  @Get('unpaid') @Can('finance.write')
+  @Get('unpaid') @Can('finance.write', 'dashboard.read')
   unpaid(@CurrentActor() a: Actor, @Query('classId') classId?: string) { return this.s.unpaid(a, classId); }
 
   @Post('reminders') @Can('finance.write')
   remind(@CurrentActor() a: Actor, @Body() dto: RemindDto) { return this.s.remind(a, dto); }
 
-  @Get('cash-closings') @Can('finance.write')
+  @Get('cash-closings') @Can('finance.write', 'dashboard.read')
   closings(@CurrentActor() a: Actor) { return this.s.cashClosings(a); }
 
   @Post('cash-closings') @Can('finance.write')

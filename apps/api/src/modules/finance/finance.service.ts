@@ -146,6 +146,7 @@ export class FinanceService {
   createInvoice(actor: Actor, dto: InvoiceDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { student: dto.studentId, feeType: dto.items.map((i) => i.feeTypeId) });
+      await this.scope.assertStudent(tx, actor, dto.studentId);
       const inv = await this.newInvoice(tx, actor, dto.studentId, dto.label, toDate(dto.dueDate), dto.items);
       await this.audit.log(tx, actor, 'invoice.created', 'Invoice', inv.id, { number: inv.number, total: inv.total });
       return inv;
@@ -158,10 +159,14 @@ export class FinanceService {
       actor.tenantId,
       async (tx) => {
         const fee = await tx.feeType.findUniqueOrThrow({ where: { id: dto.feeTypeId } });
+        if (dto.classId) await this.scope.assertClass(tx, actor, dto.classId);
+        // SEC-013 : un compte limité à un site ne facture que les élèves de son site.
+        const visible = await this.scope.studentIds(tx, actor);
         const enr = await tx.enrollment.findMany({
           where: {
             academicYearId: fee.academicYearId, status: 'ACTIVE',
             ...(dto.classId ? { classId: dto.classId } : {}),
+            ...(visible ? { studentId: { in: visible } } : {}),
             class: { ...(fee.levelId ? { levelId: fee.levelId } : {}), ...(fee.trackId ? { trackId: fee.trackId } : {}) },
           },
           select: { studentId: true },
@@ -184,6 +189,7 @@ export class FinanceService {
   cancelInvoice(actor: Actor, id: string, reason: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const inv = await tx.invoice.findUniqueOrThrow({ where: { id } });
+      await this.scope.assertStudent(tx, actor, inv.studentId);
       if (inv.paid > 0) throw new ConflictException('Cette facture a déjà reçu des paiements : annulez d’abord les reçus par un avoir');
       await tx.invoice.update({ where: { id }, data: { status: 'CANCELLED' } });
       await this.audit.log(tx, actor, 'invoice.cancelled', 'Invoice', id, { reason });
@@ -196,9 +202,13 @@ export class FinanceService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       if (dto.idempotencyKey) {
         const prev = await tx.payment.findUnique({ where: { tenantId_idempotencyKey: { tenantId: actor.tenantId, idempotencyKey: dto.idempotencyKey } }, include: { receipt: true } });
-        if (prev) return { payment: prev, receipt: prev.receipt, duplicate: true };
+        if (prev) {
+          await this.scope.assertStudent(tx, actor, prev.studentId);
+          return { payment: prev, receipt: prev.receipt, duplicate: true };
+        }
       }
       const inv = await tx.invoice.findUniqueOrThrow({ where: { id: dto.invoiceId } });
+      await this.scope.assertStudent(tx, actor, inv.studentId);
       this.assertPayable(inv, dto.amount);
       const year = new Date().getUTCFullYear();
       const payment = await tx.payment.create({
@@ -256,6 +266,7 @@ export class FinanceService {
   cancelReceipt(actor: Actor, id: string, reason: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const r = await tx.receipt.findUniqueOrThrow({ where: { id }, include: { payment: true } });
+      await this.scope.assertStudent(tx, actor, r.payment.studentId);
       if (r.cancelledAt) throw new ConflictException('Ce reçu est déjà annulé');
       await tx.receipt.update({ where: { id }, data: { cancelledAt: new Date(), cancelReason: reason, cancelledById: actor.userId } });
       await tx.payment.update({ where: { id: r.paymentId }, data: { status: 'CANCELLED' } });
@@ -289,9 +300,11 @@ export class FinanceService {
   }
 
   payments(actor: Actor, filters: { status?: string; method?: string; from?: string; to?: string }) {
-    return this.db.forTenant(actor.tenantId, (tx) =>
-      tx.payment.findMany({
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const visible = await this.scope.studentIds(tx, actor);
+      return tx.payment.findMany({
         where: {
+          ...(visible ? { studentId: { in: visible } } : {}),
           ...(filters.status ? { status: filters.status as any } : {}),
           ...(filters.method ? { method: filters.method as any } : {}),
           ...(filters.from || filters.to ? { createdAt: { gte: filters.from ? toDate(filters.from) : undefined, lt: filters.to ? new Date(toDate(filters.to).getTime() + 86400000) : undefined } } : {}),
@@ -299,8 +312,8 @@ export class FinanceService {
         include: { student: { select: { matricule: true, firstName: true, lastName: true } }, receipt: { select: { id: true, number: true, cancelledAt: true } }, invoice: { select: { label: true, number: true } } },
         orderBy: { createdAt: 'desc' },
         take: 500,
-      }),
-    );
+      });
+    });
   }
 
   // ------------------------------------------------------------ Impayés et relances
@@ -308,8 +321,10 @@ export class FinanceService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
       const today = toDate(isoDay(new Date()));
+      const visible = await this.scope.studentIds(tx, actor);
       const rows = await tx.invoice.findMany({
         where: {
+          ...(visible ? { studentId: { in: visible } } : {}),
           status: { in: ['OPEN', 'PARTIAL'] },
           dueDate: { lt: today },
           ...(classId ? { student: { enrollments: { some: { classId, academicYearId: yearId } } } } : {}),
@@ -355,8 +370,10 @@ export class FinanceService {
   remind(actor: Actor, dto: RemindDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
+      if (dto.classId) await this.scope.assertClass(tx, actor, dto.classId);
+      const visible = await this.scope.studentIds(tx, actor);
       const enr = await tx.enrollment.findMany({
-        where: { academicYearId: yearId, status: 'ACTIVE', ...(dto.classId ? { classId: dto.classId } : {}), ...(dto.studentIds?.length ? { studentId: { in: dto.studentIds } } : {}) },
+        where: { academicYearId: yearId, status: 'ACTIVE', ...(visible ? { studentId: { in: visible } } : {}), ...(dto.classId ? { classId: dto.classId } : {}), ...(dto.studentIds?.length ? { studentId: { in: dto.studentIds } } : {}) },
         select: { student: { select: { id: true, firstName: true, matricule: true } } },
       });
       const balances = await this.balances(tx, enr.map((e) => e.student.id));
@@ -383,13 +400,15 @@ export class FinanceService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const today = toDate(isoDay(new Date()));
       const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
-      const sum = async (where: Prisma.PaymentWhereInput) => (await tx.payment.aggregate({ where: { status: 'SUCCESS', ...where }, _sum: { amount: true }, _count: true }));
+      const visible = await this.scope.studentIds(tx, actor);
+      const mine = visible ? { studentId: { in: visible } } : {};
+      const sum = async (where: Prisma.PaymentWhereInput) => (await tx.payment.aggregate({ where: { status: 'SUCCESS', ...mine, ...where }, _sum: { amount: true }, _count: true }));
       const [todayAgg, monthAgg, invAgg, pending, byMethod] = await Promise.all([
         sum({ confirmedAt: { gte: today } }),
         sum({ confirmedAt: { gte: monthStart } }),
-        tx.invoice.aggregate({ where: { status: { not: 'CANCELLED' } }, _sum: { total: true, paid: true } }),
-        tx.payment.count({ where: { status: { in: ['INITIATED', 'PENDING'] } } }),
-        tx.payment.groupBy({ by: ['method'], where: { status: 'SUCCESS', confirmedAt: { gte: monthStart } }, _sum: { amount: true } }),
+        tx.invoice.aggregate({ where: { status: { not: 'CANCELLED' }, ...mine }, _sum: { total: true, paid: true } }),
+        tx.payment.count({ where: { status: { in: ['INITIATED', 'PENDING'] }, ...mine } }),
+        tx.payment.groupBy({ by: ['method'], where: { status: 'SUCCESS', confirmedAt: { gte: monthStart }, ...mine }, _sum: { amount: true } }),
       ]);
       const expected = invAgg._sum.total ?? 0;
       const collected = invAgg._sum.paid ?? 0;
@@ -423,7 +442,9 @@ export class FinanceService {
   }
 
   cashClosings(actor: Actor) {
-    return this.db.forTenant(actor.tenantId, (tx) => tx.cashClosing.findMany({ orderBy: { date: 'desc' }, take: 60 }));
+    // SEC-013 : un compte limité à un site ne voit que ses propres clôtures ; les autres voient celles de tous les caissiers.
+    const where = actor.siteIds.length ? { cashierId: actor.userId } : {};
+    return this.db.forTenant(actor.tenantId, (tx) => tx.cashClosing.findMany({ where, orderBy: { date: 'desc' }, take: 60 }));
   }
 
   /**

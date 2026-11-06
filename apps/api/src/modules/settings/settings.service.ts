@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { Prisma } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { Actor, forgetSessions } from '../../common/auth';
+import { can } from '../../common/permissions';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
@@ -144,8 +145,16 @@ export class SettingsService {
         tx.subject.findMany({ orderBy: { name: 'asc' } }),
         tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } }),
       ]);
+      // SEC-017 : la signature et le cachet (liens et clés de stockage) ne vont qu'à qui gère le paramétrage ;
+      // les documents imprimés les reçoivent par leur propre route.
+      const settings = tenantSettings(tenant.settings);
+      const identity = schoolIdentity(tenant, this.files);
+      if (!can(actor.role, 'settings.manage')) {
+        settings.identity = { ...settings.identity, signatureKey: null, stampKey: null } as typeof settings.identity;
+        Object.assign(identity, { signatureUrl: null, stampUrl: null });
+      }
       return {
-        tenant: { id: tenant.id, name: tenant.name, shortName: tenant.shortName, settings: tenantSettings(tenant.settings), identity: schoolIdentity(tenant, this.files) },
+        tenant: { id: tenant.id, name: tenant.name, shortName: tenant.shortName, settings, identity },
         currentYear: year, sites, years, levels, tracks, rooms, subjects,
       };
     });

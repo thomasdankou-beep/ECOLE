@@ -34,6 +34,7 @@ export class DocumentsService {
 
   private async issueInTx(tx: Tx, actor: Actor, kind: DocumentKind, studentId: string) {
     const yearId = await this.scope.currentYearId(tx);
+    await this.scope.assertStudent(tx, actor, studentId);
     const s = await tx.student.findUniqueOrThrow({
       where: { id: studentId },
       include: { enrollments: { where: { academicYearId: yearId, status: 'ACTIVE' }, include: { class: { include: { site: true, level: true, track: true } }, academicYear: true } } },
@@ -69,6 +70,7 @@ export class DocumentsService {
     return this.db.forTenant(
       actor.tenantId,
       async (tx) => {
+        await this.scope.assertClass(tx, actor, dto.classId);
         const enr = await tx.enrollment.findMany({ where: { classId: dto.classId, status: 'ACTIVE' }, select: { studentId: true } });
         const ids: string[] = [];
         for (const e of enr) ids.push((await this.issueInTx(tx, actor, dto.kind, e.studentId)).id);

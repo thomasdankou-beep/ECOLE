@@ -176,6 +176,7 @@ export class AttendanceService {
   review(actor: Actor, recordId: string, accept: boolean, comment?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const r = await tx.attendanceRecord.findUniqueOrThrow({ where: { id: recordId }, include: { student: true } });
+      await this.scope.assertStudent(tx, actor, r.studentId);
       await tx.attendanceRecord.update({ where: { id: recordId }, data: { justification: accept ? 'ACCEPTED' : 'REJECTED', reviewedById: actor.userId, reviewedAt: new Date() } });
       await this.notifications.notify(tx, actor.tenantId, await this.notifications.guardianUserIds(tx, r.studentId), {
         kind: 'justification', title: accept ? 'Justificatif accepté' : 'Justificatif refusé',
@@ -210,7 +211,12 @@ export class AttendanceService {
       const visible = await this.scope.studentIds(tx, actor);
       if (studentId) await this.scope.assertStudent(tx, actor, studentId);
       return tx.sanction.findMany({
-        where: { ...(visible ? { studentId: { in: visible } } : {}), ...(studentId ? { studentId } : {}), ...(['PARENT', 'ELEVE'].includes(actor.role) ? { status: 'VALIDATED' } : {}) },
+        where: {
+          ...(visible ? { studentId: { in: visible } } : {}), ...(studentId ? { studentId } : {}),
+          ...(['PARENT', 'ELEVE'].includes(actor.role) ? { status: 'VALIDATED' } : {}),
+          // SEC-018 : l'enseignant propose ; il suit ses propres propositions, pas le dossier disciplinaire de la classe.
+          ...(actor.role === 'ENSEIGNANT' ? { proposedById: actor.userId } : {}),
+        },
         include: { student: { select: { id: true, firstName: true, lastName: true, matricule: true } } },
         orderBy: { date: 'desc' },
         take: 300,

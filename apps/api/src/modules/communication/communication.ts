@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Injectable, NotFoundException, Param, Post, Query, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Injectable, NotFoundException, Param, Post, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Audience, Prisma } from '@prisma/client';
@@ -53,6 +53,13 @@ export class CommunicationService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       if (dto.audience === 'CLASS' && !dto.classId) throw new NotFoundException('Choisissez la classe');
       await assertOwned(tx, { class: dto.classId, site: dto.siteId });
+      // SEC-013 : un compte limité à un site n'écrit qu'aux familles de son site.
+      if (actor.siteIds.length) {
+        if (dto.classId) await this.scope.assertClass(tx, actor, dto.classId);
+        if ((dto.audience === 'ALL' || dto.audience === 'PARENTS') && !dto.siteId && actor.siteIds.length === 1) dto.siteId = actor.siteIds[0];
+        if ((dto.audience === 'ALL' || dto.audience === 'PARENTS') && !dto.siteId) throw new BadRequestException('Choisissez le site des familles à prévenir');
+        if (dto.siteId && !actor.siteIds.includes(dto.siteId)) throw new ForbiddenException('Site hors de votre périmètre');
+      }
       const a = await tx.announcement.create({ data: { tenantId: actor.tenantId, ...dto, urgent: !!dto.urgent, authorId: actor.userId } });
       // Destinataires construits à partir des inscriptions : aucune liste à tenir à la main (CDC §4.5).
       let userIds: string[] = [];

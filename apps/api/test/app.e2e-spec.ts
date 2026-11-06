@@ -985,3 +985,141 @@ describe("Jetons et adresses (SEC-011, SEC-012)", () => {
     expect(derivedKey('files').toString('hex')).not.toContain(Buffer.from(config.jwt.refreshSecret).toString('hex'));
   });
 });
+
+describe('Rôles et périmètre (SEC-013 à SEC-018)', () => {
+  let T = '';
+  let siteA = '';
+  let inStudent = '';
+  let outStudent = '';
+  let outClass = '';
+  let outReceipt = '';
+  let feeType = '';
+  const limited: Record<string, string> = {};
+  const inTenant = <X>(fn: (tx: any) => Promise<X>) =>
+    admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${T}, true)`;
+      return fn(tx);
+    });
+  const asLimited = (who: string) => ({
+    get: (url: string) => http.get(`/api/v1${url}`).set('Authorization', `Bearer ${limited[who]}`),
+    post: (url: string, body?: object) => http.post(`/api/v1${url}`).set('Authorization', `Bearer ${limited[who]}`).send(body ?? {}),
+    patch: (url: string, body?: object) => http.patch(`/api/v1${url}`).set('Authorization', `Bearer ${limited[who]}`).send(body ?? {}),
+  });
+  const ROLES = [['SECRETARIAT', PHONES.secretariat], ['COMPTABLE', PHONES.comptable]] as const;
+
+  beforeAll(async () => {
+    T = (await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } })).id;
+    await inTenant(async (tx) => {
+      const year = await tx.academicYear.findFirstOrThrow({ where: { isCurrent: true } });
+      const enr = await tx.enrollment.findMany({ where: { academicYearId: year.id, status: 'ACTIVE' }, include: { class: true } });
+      const sites = [...new Set(enr.map((e: any) => e.class.siteId))] as string[];
+      expect(sites.length).toBeGreaterThan(1);
+      siteA = sites[0];
+      const inn = enr.find((e: any) => e.class.siteId === siteA)!;
+      // Élève hors site A qui a un reçu valide, pour tenter de l'annuler.
+      const outs = enr.filter((e: any) => e.class.siteId !== siteA);
+      const rc = await tx.receipt.findFirst({ where: { cancelledAt: null, payment: { studentId: { in: outs.map((e: any) => e.studentId) } } }, include: { payment: true } });
+      const out = rc ? outs.find((e: any) => e.studentId === rc.payment.studentId)! : outs[0];
+      inStudent = inn.studentId;
+      outStudent = out.studentId;
+      outClass = out.classId;
+      outReceipt = rc?.id ?? '';
+      feeType = (await tx.feeType.findFirstOrThrow({ where: { academicYearId: year.id } })).id;
+      for (const [role, phone] of ROLES) {
+        const u = await tx.user.findFirstOrThrow({ where: { phone } });
+        await tx.userRole.updateMany({ where: { userId: u.id, role }, data: { siteId: siteA } });
+        // Le test de blocage après 5 échecs a verrouillé le secrétariat : on le déverrouille pour se reconnecter.
+        await tx.user.update({ where: { id: u.id }, data: { failedLogins: 0, lockedUntil: null } });
+      }
+    });
+    for (const [role, phone] of ROLES) limited[role] = await login(phone);
+  });
+
+  afterAll(async () => {
+    await inTenant(async (tx) => {
+      for (const [role, phone] of ROLES) {
+        const u = await tx.user.findFirstOrThrow({ where: { phone } });
+        await tx.userRole.updateMany({ where: { userId: u.id, role }, data: { siteId: null } });
+      }
+    });
+  });
+
+  it("un secrétariat limité à un site ne modifie, ne retire ni ne déplace un élève d'un autre site (SEC-013)", async () => {
+    const s = asLimited('SECRETARIAT');
+    expect((await s.patch(`/students/${outStudent}`, { birthPlace: 'Cotonou' })).status).toBe(403);
+    expect((await s.post(`/students/${outStudent}/guardians`, { firstName: 'P', lastName: 'X', phone: '0197999990', relation: 'Oncle' })).status).toBe(403);
+    expect((await s.post(`/students/${outStudent}/class`, { classId: outClass })).status).toBe(403);
+    expect((await s.post(`/students/${outStudent}/withdraw`, { status: 'WITHDRAWN', reason: 'test' })).status).toBe(403);
+    expect((await s.post(`/students/${inStudent}/class`, { classId: outClass })).status).toBe(403);
+    expect((await s.post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: outStudent })).status).toBe(403);
+    expect((await s.post('/documents/batch', { kind: 'CARTE_SCOLAIRE', classId: outClass })).status).toBe(403);
+    expect((await s.post('/announcements', { title: 't', body: 't', audience: 'CLASS', classId: outClass })).status).toBe(403);
+    // Son propre site reste modifiable.
+    expect((await s.patch(`/students/${inStudent}`, { birthPlace: 'Cotonou' })).status).toBe(200);
+    const st: any = await inTenant((tx) => tx.student.findUniqueOrThrow({ where: { id: outStudent } }));
+    expect(st.status).toBe('ACTIVE');
+  });
+
+  it("un comptable limité à un site ne voit ni ne touche les paiements d'un autre site (SEC-013)", async () => {
+    const c = asLimited('COMPTABLE');
+    const pay = await c.get('/finance/payments');
+    expect(pay.status).toBe(200);
+    expect(JSON.stringify(pay.body)).not.toContain(outStudent);
+    const unpaid = await c.get('/finance/unpaid');
+    expect(unpaid.status).toBe(200);
+    expect(unpaid.body.every((r: any) => r.student.id !== outStudent)).toBe(true);
+    expect((await c.post('/finance/invoices', { studentId: outStudent, label: 'test', dueDate: '2026-12-01', items: [{ label: 'x', amount: 1, feeTypeId: feeType }] })).status).toBe(403);
+    if (outReceipt) {
+      expect((await c.post(`/finance/receipts/${outReceipt}/cancel`, { reason: 'test' })).status).toBe(403);
+      const r: any = await inTenant((tx) => tx.receipt.findUniqueOrThrow({ where: { id: outReceipt } }));
+      expect(r.cancelledAt).toBeNull();
+    }
+    // Sans limite de site, le comptable voit toujours toute l'école.
+    const all = await as('comptable').get('/finance/payments');
+    expect(all.body.length).toBeGreaterThanOrEqual(pay.body.length);
+  });
+
+  it("les allergies ne sont visibles ni du comptable ni de l'élève (SEC-014)", async () => {
+    const me = await as('student').get('/students');
+    const own = await as('student').get(`/students/${me.body[0].id}`);
+    expect(own.status).toBe(200);
+    expect(own.body).not.toHaveProperty('allergies');
+    expect((await as('comptable').get(`/students/${me.body[0].id}`)).body).not.toHaveProperty('allergies');
+    expect((await as('vieScolaire').get(`/students/${me.body[0].id}`)).body).toHaveProperty('allergies');
+  });
+
+  it('la direction lit les paiements, les impayés et les clôtures sans pouvoir encaisser (SEC-016)', async () => {
+    for (const url of ['/finance/payments', '/finance/payments/export.csv', '/finance/unpaid', '/finance/cash-closings']) {
+      expect((await as('direction').get(url)).status).toBe(200);
+      expect((await as('secretariat').get(url)).status).toBe(403);
+    }
+    expect((await as('direction').post('/finance/cash-closings', { counted: 0 })).status).toBe(403);
+    expect((await as('direction').post('/finance/payments/desk', { invoiceId: '00000000-0000-4000-8000-000000000000', amount: 1, method: 'CASH' })).status).toBe(403);
+  });
+
+  it('la signature et le cachet ne sont envoyés qu’à la direction (SEC-017)', async () => {
+    for (const who of ['parent', 'teacher', 'student', 'comptable']) {
+      const r = await as(who).get('/settings');
+      expect(r.status).toBe(200);
+      expect(r.body.tenant.identity.signatureUrl).toBeNull();
+      expect(r.body.tenant.identity.stampUrl).toBeNull();
+      expect(r.body.tenant.settings.identity.signatureKey).toBeNull();
+      expect(r.body.tenant.settings.identity.stampKey).toBeNull();
+    }
+    const d = await as('direction').get('/settings');
+    expect(d.body.tenant.identity).toHaveProperty('signatureUrl');
+  });
+
+  it("l'enseignant ne voit que les sanctions qu'il a proposées (SEC-018)", async () => {
+    const me = await as('teacher').get('/auth/me');
+    const pupils = await as('teacher').get('/students');
+    const other = await as('vieScolaire').post('/sanctions', { studentId: pupils.body[0].id, kind: 'Avertissement', reason: 'Saisie de la vie scolaire (test)', date: '2026-11-06' });
+    expect(other.status).toBe(201);
+    const mine = await as('teacher').get('/sanctions');
+    expect(mine.body.some((x: any) => x.id === other.body.id)).toBe(false);
+    expect(mine.status).toBe(200);
+    expect(mine.body.every((x: any) => x.proposedById === me.body.user.id)).toBe(true);
+    const all = await as('vieScolaire').get('/sanctions');
+    expect(all.body.some((x: any) => x.proposedById !== me.body.user.id)).toBe(true);
+  });
+});
