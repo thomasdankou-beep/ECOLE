@@ -52,8 +52,19 @@ services:
       TENANT_SLUG: ${TENANT_SLUG-saint-kisito}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
       STORAGE_DIR: /repo/apps/api/storage
+      # Antivirus (SEC-026) : chaque fichier envoyé est analysé par le service « clamav » avant d'être enregistré.
+      # Si l'antivirus ne répond pas, l'envoi est refusé. Vide : pas d'analyse (déconseillé en production).
+      CLAMAV_HOST: ${CLAMAV_HOST-clamav}
     volumes:
       - uploads:/repo/apps/api/storage
+
+  # Antivirus ClamAV (SEC-026) : signatures mises à jour automatiquement plusieurs fois par jour.
+  # Environ 1 à 1,5 Go de mémoire ; 1 à 2 minutes au premier démarrage pour télécharger les signatures.
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    volumes:
+      - clamavdb:/var/lib/clamav
 
   web:
     build:
@@ -84,3 +95,4 @@ volumes:
   redisdata:
   uploads:
   caddydata:
+  clamavdb:
