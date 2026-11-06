@@ -12,7 +12,7 @@ type Tenant = {
   id: string; slug: string; name: string; shortName: string | null; country: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
   platformNotes: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
 };
-type Audit = { id: string; action: string; tenantId: string | null; createdAt: string; data: unknown };
+type Audit = { id: string; action: string; tenantId: string | null; createdAt: string; data: unknown; adminName: string | null; ip: string | null };
 type Secret = { title: string; school: string; identifier: string; password: string };
 
 const ACTIONS: Record<string, string> = {
@@ -22,6 +22,7 @@ const ACTIONS: Record<string, string> = {
   'platform.admin.created_cli': 'Compte Super Admin créé', 'platform.admin.reset_cli': 'Mot de passe Super Admin remis',
   'platform.auth.logout': 'Déconnexion', 'platform.auth.2fa_failed': 'Code de double authentification incorrect',
   'platform.auth.2fa_enabled': 'Double authentification activée', 'platform.auth.2fa_reset': 'Double authentification reconfigurée',
+  'platform.auth.refused': 'Connexion refusée (compte bloqué ou désactivé)', 'platform.auth.unknown_identifier': 'Connexion avec un e-mail inconnu',
 };
 const when = (d: string | null) => (d ? new Date(d).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '—');
 
@@ -190,8 +191,8 @@ function Schools({ admin }: { admin: Admin }) {
       {tab === 'journal' && (
         <Card className="overflow-x-auto p-0">
           <Table>
-            <thead><tr><th>Date</th><th>Action</th><th>École</th></tr></thead>
-            <tbody>{audit.map((a) => <tr key={a.id}><td className="text-sm">{when(a.createdAt)}</td><td>{ACTIONS[a.action] ?? a.action}</td><td>{a.tenantId ? names.get(a.tenantId) ?? '—' : '—'}</td></tr>)}</tbody>
+            <thead><tr><th>Date</th><th>Administrateur</th><th>Action</th><th>École</th><th>Adresse IP</th></tr></thead>
+            <tbody>{audit.map((a) => <tr key={a.id}><td className="text-sm">{when(a.createdAt)}</td><td className="font-bold">{a.adminName ?? '—'}</td><td>{ACTIONS[a.action] ?? a.action}</td><td>{a.tenantId ? names.get(a.tenantId) ?? '—' : '—'}</td><td className="font-mono text-xs">{a.ip ?? ''}</td></tr>)}</tbody>
           </Table>
         </Card>
       )}

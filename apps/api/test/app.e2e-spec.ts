@@ -1517,3 +1517,57 @@ describe("Sécurité v1.1, étape 5 : journal d'audit (SEC-031 à SEC-034, SEC-0
     expect(after.pop()).toMatchObject({ userName: 'Codjo ZINSOU', data: { route: 'GET /api/v1/audit', role: 'ENSEIGNANT' } });
   });
 });
+
+describe("Sécurité v1.1, étape 5 : page du journal et journal Super Admin (SEC-035, SEC-036)", () => {
+  const inTenant = (fn: (tx: any) => Promise<any>): Promise<any> => admin.$transaction(async (tx) => {
+    const t = await tx.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+    return fn(tx);
+  });
+
+  it('SEC-035 : toutes les lignes se lisent page par page, avec un libellé en français', async () => {
+    const total = await inTenant((tx) => tx.auditLog.count());
+    const seen = new Set<string>();
+    let before: string | undefined;
+    for (;;) {
+      const r = await as('direction').get(`/audit?limit=500${before ? `&before=${before}` : ''}`).expect(200);
+      for (const row of r.body) seen.add(row.id);
+      if (r.body.length < 500) break;
+      before = r.body.at(-1).id;
+    }
+    expect(seen.size).toBe(total);
+    const first = (await as('direction').get('/audit?action=auth.login&limit=1')).body[0];
+    expect(first.label).toBe('Connexion');
+    expect((await as('direction').get('/audit?before=pas-un-id')).status).toBe(400);
+  });
+
+  it("SEC-035 : l'export CSV contient les lignes filtrées, neutralise les formules et est lui-même tracé", async () => {
+    const st = (await as('direction').get('/students')).body[0];
+    await as('direction').patch(`/students/${st.id}`, { birthPlace: '=HYPERLINK("http://exemple.invalid")' }).expect(200);
+    const r = await as('direction').get('/audit/export.csv?action=student.updated').expect(200);
+    expect(r.headers['content-type']).toContain('text/csv');
+    expect(r.text.split('\r\n')[0]).toContain('date;utilisateur;action;libelle');
+    expect(r.text).toContain('Fiche élève modifiée');
+    expect(r.text).not.toMatch(/;"=HYPERLINK/);
+    expect(r.text).not.toContain('auth.login');
+    const exp = await inTenant((tx) => tx.auditLog.findFirst({ where: { action: 'audit.exported' }, orderBy: { createdAt: 'desc' } }));
+    expect(exp).toMatchObject({ userName: 'Bernard DOSSA' });
+    expect((await as('teacher').get('/audit/export.csv')).status).toBe(403);
+  });
+
+  it("SEC-036 : le journal Super Admin garde l'adresse IP et le nom de l'administrateur", async () => {
+    const email = 'journal-plateforme@test.local';
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Admin Journal"`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'ignore' });
+    const argon2 = await import('argon2');
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Journal-2026'), mustChangePassword: false } });
+    await http.post('/api/v1/platform/auth/login').set('X-Forwarded-For', '198.51.100.9').send({ email, password: 'mauvais' }).expect(401);
+    await http.post('/api/v1/platform/auth/login').set('X-Forwarded-For', '198.51.100.9').send({ email: 'inconnu@test.local', password: 'mauvais' }).expect(401);
+    const r = await http.post('/api/v1/platform/auth/login').set('X-Forwarded-For', '198.51.100.9').send({ email, password: 'Plateforme-Journal-2026' }).expect(201);
+    const cookie = (r.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('erp_pt='))!.split(';')[0];
+    const audit = (await http.get('/api/v1/platform/audit').set('Cookie', cookie).expect(200)).body as any[];
+    expect(audit.find((a) => a.action === 'platform.auth.login')).toMatchObject({ adminName: 'Admin Journal', ip: '198.51.100.9' });
+    expect(audit.find((a) => a.action === 'platform.auth.failed')).toMatchObject({ adminName: 'Admin Journal', ip: '198.51.100.9' });
+    const unknown = audit.find((a) => a.action === 'platform.auth.unknown_identifier');
+    expect(unknown).toMatchObject({ ip: '198.51.100.9', data: { identifier: 'in•••@test.local' } });
+  });
+});

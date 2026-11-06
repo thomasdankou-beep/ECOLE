@@ -14,6 +14,7 @@ import { Type } from 'class-transformer';
 import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
 import { ALLOW_PENDING_PASSWORD, AllowPendingPassword, forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
+import { maskIdentifier } from '../../common/audit.service';
 import { decrypt, encrypt } from '../../common/util';
 import { normalizePhone } from '../../common/util';
 import { config, tenantOrigin } from '../../config';
@@ -79,7 +80,7 @@ export class PlatformPasswordDto {
   @IsString() @MinLength(12, { message: 'Au moins 12 caractères' }) @MaxLength(200) password: string;
 }
 
-type PlatformActor = { id: string; name: string };
+type PlatformActor = { id: string; name: string; ip?: string | null };
 
 /**
  * Accès à la base pour la plateforme : création des écoles et comptage de leur activité.
@@ -123,7 +124,7 @@ export class PlatformGuard implements CanActivate {
     const issuedAt = p.at ?? p.iat * 1000;
     if (!admin?.active || (admin.passwordChangedAt && admin.passwordChangedAt.getTime() > p.iat * 1000 + 999)
       || (admin.sessionsRevokedAt && admin.sessionsRevokedAt.getTime() >= issuedAt)) throw new UnauthorizedException('Session expirée');
-    req.platformAdmin = { id: p.sub, name: p.name } satisfies PlatformActor;
+    req.platformAdmin = { id: p.sub, name: p.name, ip: req.ip } satisfies PlatformActor;
     // Mot de passe provisoire : seuls le compte, le changement de mot de passe et la double authentification répondent (SEC-023).
     if (admin.mustChangePassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, [ctx.getHandler(), ctx.getClass()])) {
       throw new ForbiddenException('Choisissez d’abord un nouveau mot de passe');
@@ -138,7 +139,7 @@ export class PlatformService {
   constructor(private db: PlatformDb, private jwt: JwtService) {}
 
   private log(admin: PlatformActor | null, action: string, tenantId: string | null, data?: unknown) {
-    return this.db.platformAuditLog.create({ data: { adminId: admin?.id ?? null, action, tenantId, data: (data ?? undefined) as any } });
+    return this.db.platformAuditLog.create({ data: { adminId: admin?.id ?? null, action, tenantId, data: (data ?? undefined) as any, ip: admin?.ip ?? (data as any)?.ip ?? null } });
   }
 
   /** Trace aussi dans le journal de l'école ce que la plateforme fait sur ses comptes (SEC-010). Jamais les notes internes. */
@@ -152,30 +153,32 @@ export class PlatformService {
     return this.jwt.sign({ sub: admin.id, name: admin.name, at: Date.now() }, { secret: config.jwt.accessSecret, audience: 'platform', expiresIn: SESSION_HOURS * 3600 });
   }
 
-  private async countFailure(admin: { id: string; failedLogins: number }, what: string) {
+  private async countFailure(admin: { id: string; name: string; failedLogins: number }, what: string, ip?: string) {
     const failed = admin.failedLogins + 1;
     const lock = failed >= config.security.maxFailedLogins;
     await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: lock ? 0 : failed, lockedUntil: lock ? new Date(Date.now() + config.security.lockMinutes * 60000) : null } });
-    await this.log(null, lock ? 'platform.auth.locked' : what, null, { adminId: admin.id });
+    await this.log({ id: admin.id, name: admin.name, ip }, lock ? 'platform.auth.locked' : what, null);
   }
 
-  private async open(admin: { id: string; name: string; email: string; mustChangePassword: boolean }) {
+  private async open(admin: { id: string; name: string; email: string; mustChangePassword: boolean }, ip?: string) {
     await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: 0, lockedUntil: null, lastLoginAt: new Date() } });
-    await this.log({ id: admin.id, name: admin.name }, 'platform.auth.login', null);
+    await this.log({ id: admin.id, name: admin.name, ip }, 'platform.auth.login', null);
     return { token: this.sign(admin), admin: { id: admin.id, name: admin.name, email: admin.email, mustChangePassword: admin.mustChangePassword } };
   }
 
   /** Mot de passe, puis code de l'application d'authentification si la double authentification est active (SEC-021). */
-  async login(dto: PlatformLoginDto) {
+  async login(dto: PlatformLoginDto, ip?: string) {
     const admin = await this.db.platformAdmin.findUnique({ where: { email: dto.email.trim().toLowerCase() } });
     const fail = new UnauthorizedException(LOGIN_FAILED);
     // Compte inconnu, désactivé ou bloqué : même calcul et même réponse (SEC-024).
     if (!admin || !admin.active || (admin.lockedUntil && admin.lockedUntil > new Date())) {
       await argon2.hash(dto.password);
+      if (admin) await this.log({ id: admin.id, name: admin.name, ip }, 'platform.auth.refused', null, { reason: admin.active ? 'compte bloqué' : 'compte désactivé' });
+      else await this.log(null, 'platform.auth.unknown_identifier', null, { ip, identifier: maskIdentifier(dto.email) });
       throw fail;
     }
     if (!(await argon2.verify(admin.passwordHash, dto.password))) {
-      await this.countFailure(admin, 'platform.auth.failed');
+      await this.countFailure(admin, 'platform.auth.failed', ip);
       throw fail;
     }
     if (admin.totpEnabled && admin.totpSecret) {
@@ -183,10 +186,10 @@ export class PlatformService {
       const challenge = this.jwt.sign({ sub: admin.id }, { secret: config.jwt.accessSecret, audience: PLATFORM_2FA_AUDIENCE, expiresIn: 300 });
       return { twoFactorRequired: true as const, challenge };
     }
-    return { twoFactorRequired: false as const, ...(await this.open(admin)) };
+    return { twoFactorRequired: false as const, ...(await this.open(admin, ip)) };
   }
 
-  async verifyTwoFactor(dto: PlatformTwoFactorDto) {
+  async verifyTwoFactor(dto: PlatformTwoFactorDto, ip?: string) {
     let p: { sub: string };
     try {
       p = this.jwt.verify(dto.challenge, { secret: config.jwt.accessSecret, audience: PLATFORM_2FA_AUDIENCE });
@@ -198,15 +201,15 @@ export class PlatformService {
     if (!admin?.active || !admin.totpEnabled || !admin.totpSecret || (admin.lockedUntil && admin.lockedUntil > new Date())) throw wrong;
     const step = totpStep(decrypt(admin.totpSecret), dto.code, admin.totpLastStep);
     if (step === null) {
-      await this.countFailure(admin, 'platform.auth.2fa_failed');
+      await this.countFailure(admin, 'platform.auth.2fa_failed', ip);
       throw wrong;
     }
     await this.db.platformAdmin.update({ where: { id: admin.id }, data: { totpLastStep: step } });
-    return this.open(admin);
+    return this.open(admin, ip);
   }
 
   /** Déconnexion : tous les jetons Super Admin déjà émis pour ce compte sont refusés (SEC-021). */
-  async logout(token: string | undefined) {
+  async logout(token: string | undefined, ip?: string) {
     if (!token) return;
     let p: { sub: string };
     try {
@@ -215,7 +218,7 @@ export class PlatformService {
       return;
     }
     await this.db.platformAdmin.updateMany({ where: { id: p.sub }, data: { sessionsRevokedAt: new Date() } });
-    await this.log({ id: p.sub, name: '' }, 'platform.auth.logout', null);
+    await this.log({ id: p.sub, name: '', ip }, 'platform.auth.logout', null);
   }
 
   /** Prépare la double authentification sans toucher au compte (même principe que les écoles, SEC-019). */
@@ -362,8 +365,12 @@ export class PlatformService {
     return { identifier: user.phone ?? user.email, name: `${user.firstName} ${user.lastName}`, temporaryPassword: password };
   }
 
-  audit() {
-    return this.db.platformAuditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 200 });
+  /** Journal de la plateforme avec le nom de l'administrateur et l'adresse IP (SEC-036). */
+  async audit() {
+    const rows = await this.db.platformAuditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 200 });
+    const ids = [...new Set(rows.map((r) => r.adminId).filter((x): x is string => !!x))];
+    const admins = new Map((await this.db.platformAdmin.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })).map((a) => [a.id, a.name]));
+    return rows.map((r) => ({ ...r, adminName: r.adminId ? admins.get(r.adminId) ?? null : null }));
   }
 
   /** Caddy ne délivre un certificat HTTPS que pour une adresse qui sert réellement une école (ou la plateforme). */
@@ -418,23 +425,23 @@ export class PlatformController {
   }
 
   @Post('platform/auth/login') @Throttle({ default: { limit: 10, ttl: 60000 } })
-  async login(@Body() dto: PlatformLoginDto, @Res({ passthrough: true }) res: Response) {
-    const r = await this.s.login(dto);
+  async login(@Req() req: Request, @Body() dto: PlatformLoginDto, @Res({ passthrough: true }) res: Response) {
+    const r = await this.s.login(dto, req.ip);
     if (r.twoFactorRequired) return { twoFactorRequired: true, challenge: r.challenge };
     this.cookie(res, r.token);
     return r.admin;
   }
 
   @Post('platform/auth/2fa/verify') @Throttle({ default: { limit: 10, ttl: 60000 } })
-  async verify(@Body() dto: PlatformTwoFactorDto, @Res({ passthrough: true }) res: Response) {
-    const r = await this.s.verifyTwoFactor(dto);
+  async verify(@Req() req: Request, @Body() dto: PlatformTwoFactorDto, @Res({ passthrough: true }) res: Response) {
+    const r = await this.s.verifyTwoFactor(dto, req.ip);
     this.cookie(res, r.token);
     return r.admin;
   }
 
   @Post('platform/auth/logout')
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    await this.s.logout(req.cookies?.[COOKIE]);
+    await this.s.logout(req.cookies?.[COOKIE], req.ip);
     this.cookie(res, null);
     return { ok: true };
   }

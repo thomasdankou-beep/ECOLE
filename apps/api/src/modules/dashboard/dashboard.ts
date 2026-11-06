@@ -1,6 +1,8 @@
-import { Controller, Get, Injectable, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Header, Injectable, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Actor, Can, CurrentActor } from '../../common/auth';
+import { AuditService } from '../../common/audit.service';
+import { auditLabel } from '../../common/audit-labels';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { isoDay, toDate } from '../../common/util';
@@ -9,7 +11,7 @@ import { EvaluationService } from '../evaluation/evaluation.service';
 /** Tableau de bord de la direction (CDC §2.1) et journal d'audit. */
 @Injectable()
 export class DashboardService {
-  constructor(private db: PrismaService, private scope: ScopeService, private evaluation: EvaluationService) {}
+  constructor(private db: PrismaService, private scope: ScopeService, private evaluation: EvaluationService, private audit: AuditService) {}
 
   direction(actor: Actor, siteId?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
@@ -76,20 +78,49 @@ export class DashboardService {
     });
   }
 
-  auditLog(actor: Actor, q: { action?: string; from?: string; to?: string; userId?: string }) {
-    return this.db.forTenant(actor.tenantId, (tx) =>
-      tx.auditLog.findMany({
-        where: {
-          ...(q.action ? { action: { startsWith: q.action } } : {}),
-          ...(q.userId ? { userId: q.userId } : {}),
-          ...(q.from || q.to ? { createdAt: { gte: q.from ? toDate(q.from) : undefined, lt: q.to ? new Date(toDate(q.to).getTime() + 86400000) : undefined } } : {}),
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 300,
-      }),
-    );
+  private auditWhere(q: AuditQuery) {
+    return {
+      ...(q.action ? { action: { startsWith: q.action } } : {}),
+      ...(q.userId ? { userId: q.userId } : {}),
+      ...(q.from || q.to ? { createdAt: { gte: q.from ? toDate(q.from) : undefined, lt: q.to ? new Date(toDate(q.to).getTime() + 86400000) : undefined } } : {}),
+    };
+  }
+
+  /**
+   * Journal d'audit page par page (SEC-035) : `before` = identifiant de la dernière ligne déjà affichée.
+   * Chaque ligne porte son libellé en français.
+   */
+  auditLog(actor: Actor, q: AuditQuery & { before?: string; limit?: string }) {
+    const limit = Math.min(Math.max(Number(q.limit) || 100, 1), 500);
+    if (q.before && !/^[0-9a-f-]{36}$/i.test(q.before)) throw new BadRequestException('Curseur invalide');
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const rows = await tx.auditLog.findMany({
+        where: this.auditWhere(q),
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit,
+        ...(q.before ? { cursor: { id: q.before }, skip: 1 } : {}),
+      });
+      return rows.map((r) => ({ ...r, label: auditLabel(r.action) }));
+    });
+  }
+
+  /** Export CSV du journal pour la Direction (SEC-035), au plus 20 000 lignes ; l'export est lui-même tracé. */
+  exportAuditCsv(actor: Actor, q: AuditQuery) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const rows = await tx.auditLog.findMany({ where: this.auditWhere(q), orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 20_000 });
+      await this.audit.log(tx, actor, 'audit.exported', 'AuditLog', null, { ...q, lignes: rows.length });
+      const esc = (v: unknown) => {
+        const t = String(v ?? '');
+        return `"${(/^[=+\-@\t\r]/.test(t) ? `'${t}` : t).replace(/"/g, '""')}"`; // pas de formule exécutée par le tableur
+      };
+      const head = ['date', 'utilisateur', 'action', 'libelle', 'objet', 'identifiant_objet', 'adresse_ip', 'details'];
+      const lines = rows.map((r) => [r.createdAt.toISOString(), r.userName, r.action, auditLabel(r.action), r.entity, r.entityId, r.ip, r.data ? JSON.stringify(r.data) : ''].map(esc).join(';'));
+      return '\uFEFF' + [head.join(';'), ...lines].join('\r\n');
+    });
   }
 }
+
+type AuditQuery = { action?: string; from?: string; to?: string; userId?: string };
 
 @ApiTags('Pilotage')
 @ApiBearerAuth()
@@ -101,7 +132,17 @@ export class DashboardController {
   direction(@CurrentActor() a: Actor, @Query('siteId') siteId?: string) { return this.s.direction(a, siteId); }
 
   @Get('audit') @Can('audit.read')
-  audit(@CurrentActor() a: Actor, @Query('action') action?: string, @Query('from') from?: string, @Query('to') to?: string, @Query('userId') userId?: string) {
-    return this.s.auditLog(a, { action, from, to, userId });
+  audit(
+    @CurrentActor() a: Actor, @Query('action') action?: string, @Query('from') from?: string, @Query('to') to?: string,
+    @Query('userId') userId?: string, @Query('before') before?: string, @Query('limit') limit?: string,
+  ) {
+    return this.s.auditLog(a, { action, from, to, userId, before, limit });
+  }
+
+  @Get('audit/export.csv') @Can('audit.read')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="journal-audit.csv"')
+  auditCsv(@CurrentActor() a: Actor, @Query('action') action?: string, @Query('from') from?: string, @Query('to') to?: string, @Query('userId') userId?: string) {
+    return this.s.exportAuditCsv(a, { action, from, to, userId });
   }
 }

@@ -77,6 +77,8 @@ model PlatformAuditLog {
   action    String
   tenantId  String?  @db.Uuid
   data      Json?
+  /// Adresse IP de l'action (SEC-036).
+  ip        String?
   createdAt DateTime @default(now())
 
   @@index([createdAt])
