@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "description": "ERP scolaire SaaS multi-établissements — pilote Lycée privé Saint Kisito-GESA (Bénin)",
-  "workspaces": ["apps/api", "apps/web"],
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
   "scripts": {
     "dev:api": "npm run start:dev -w apps/api",
     "dev:web": "npm run dev -w apps/web",
@@ -12,5 +15,14 @@
     "db:migrate": "npm run db:migrate -w apps/api",
     "db:seed": "npm run db:seed -w apps/api"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  },
+  "overrides": {
+    "multer": "2.5.0",
+    "body-parser": "2.4.0",
+    "@nestjs/swagger": {
+      "js-yaml": "5.4.3"
+    }
+  }
 }
