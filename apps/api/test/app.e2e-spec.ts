@@ -1421,3 +1421,99 @@ describe('Fichiers : contenu, métadonnées, effacement, antivirus (SEC-026 à S
     }
   });
 });
+
+describe("Sécurité v1.1, étape 5 : journal d'audit (SEC-031 à SEC-034, SEC-037)", () => {
+  const inTenant = (fn: (tx: any) => Promise<any>): Promise<any> => admin.$transaction(async (tx) => {
+    const t = await tx.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+    return fn(tx);
+  });
+  const since = new Date();
+  const rows = (action: string): Promise<any[]> => inTenant((tx) => tx.auditLog.findMany({ where: { action, createdAt: { gte: since } }, orderBy: { createdAt: 'asc' } }));
+  const loginFrom = (identifier: string, password = PASSWORD) =>
+    http.post('/api/v1/auth/login').set('X-Forwarded-For', '203.0.113.7').send({ tenant: 'saint-kisito', identifier, password });
+
+  it('SEC-031 : connexion, échec et identifiant inconnu portent le compte concerné et son adresse IP', async () => {
+    await loginFrom(PHONES.direction).expect(200);
+    await loginFrom(PHONES.comptable, 'mauvais-mot-de-passe').expect(401);
+    await loginFrom('+2290199999999', 'mauvais-mot-de-passe').expect(401);
+    const direction = await inTenant((tx) => tx.user.findFirstOrThrow({ where: { phone: PHONES.direction } }));
+    const ok = (await rows('auth.login')).pop();
+    expect(ok).toMatchObject({ userId: direction.id, userName: 'Bernard DOSSA', ip: '203.0.113.7' });
+    expect((await rows('auth.failed')).pop()).toMatchObject({ userName: 'Lucie AGBANGLA', ip: '203.0.113.7' });
+    const unknown = (await rows('auth.unknown_identifier')).pop();
+    expect(unknown.data.identifier).toBe('+229019•••99');
+    expect(JSON.stringify(unknown)).not.toContain('mauvais');
+    // Le filtre par personne retrouve ses connexions.
+    const mine = await as('direction').get(`/audit?userId=${direction.id}&action=auth.login`).expect(200);
+    expect(mine.body.length).toBeGreaterThan(0);
+  });
+
+  it('SEC-032 : appréciation, absent/dispensé, séance modifiée, session fermée et déconnexion sont tracés', async () => {
+    const mine = (await as('teacher').get('/evaluation/class-subjects')).body;
+    const elec = mine.classSubjects.find((c: any) => c.subject.code === 'ELEC');
+    const term = mine.terms[mine.terms.length - 1]; // le 1er trimestre est verrouillé par un test précédent
+    const book = (await as('teacher').get(`/evaluation/gradebook?classSubjectId=${elec.id}&termId=${term.id}`)).body;
+    const koffi = book.students.find((s: any) => s.firstName === 'Koffi');
+    const created = await as('teacher').post('/evaluation/assessments', { classSubjectId: elec.id, termId: term.id, title: 'Devoir journal', kind: 'DEVOIR', weight: 1, date: String(term.startDate).slice(0, 10) });
+    expect([created.status, created.body.message]).toEqual([201, undefined]);
+    const a = created.body;
+    await as('teacher').put(`/evaluation/assessments/${a.id}/grades`, { grades: [{ studentId: koffi.id, score: null }] }).expect(200);
+    await as('teacher').put(`/evaluation/assessments/${a.id}/grades`, { grades: [{ studentId: koffi.id, score: null, absent: true }] }).expect(200);
+    const g = (await rows('grades.saved')).filter((r) => r.entityId === a.id).pop();
+    expect(g.data.modified[0]).toMatchObject({ studentId: koffi.id, absent: { avant: false, après: true } });
+
+    const ap = { studentId: koffi.id, classSubjectId: elec.id, termId: term.id };
+    await as('teacher').put('/evaluation/appreciations', { ...ap, text: 'Bon trimestre (fictif)' }).expect(200);
+    await as('teacher').put('/evaluation/appreciations', { ...ap, text: 'Peut mieux faire (fictif)' }).expect(200);
+    const apps = (await rows('appreciation.saved')).slice(-2);
+    expect(apps[1].data).toMatchObject({ avant: 'Bon trimestre (fictif)', après: 'Peut mieux faire (fictif)' });
+
+    const lesson = await as('teacher').post('/lessons', { classSubjectId: elec.id, date: '2026-10-16', title: 'Séance journal', content: 'Avant' });
+    expect(lesson.status).toBe(201);
+    await as('teacher').patch(`/lessons/${lesson.body.id}`, { content: 'Après' }).expect(200);
+    expect((await rows('lesson.updated')).pop().data).toMatchObject({ content: { avant: 'Avant', après: 'Après' } });
+
+    const l2 = await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: PHONES.secretariat, password: PASSWORD }).expect(200);
+    const cookie = (l2.headers['set-cookie'] as unknown as string[])[0].split(';')[0];
+    const sessions = (await as('secretariat').get('/auth/sessions')).body as any[];
+    const other = sessions.find((s) => s.id === decodeURIComponent(cookie.split('=')[1]).split('.')[1])!;
+    await as('secretariat').del(`/auth/sessions/${other.id}`).expect(200);
+    expect((await rows('auth.session_revoked')).pop()).toMatchObject({ entityId: other.id, userName: 'Mireille ADJOVI' });
+    const logouts = (await rows('auth.logout')).length;
+    await http.post('/api/v1/auth/logout').set('Cookie', cookie).expect(204);
+    expect((await rows('auth.logout')).length).toBe(logouts); // session déjà fermée : rien à tracer
+    const l3 = await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: PHONES.secretariat, password: PASSWORD }).expect(200);
+    await http.post('/api/v1/auth/logout').set('Cookie', (l3.headers['set-cookie'] as unknown as string[])[0].split(';')[0]).expect(204);
+    expect((await rows('auth.logout')).pop()).toMatchObject({ userName: 'Mireille ADJOVI' });
+  });
+
+  it("SEC-033 et SEC-037 : l'ancienne valeur est gardée, sans allergies ni téléphone en clair", async () => {
+    const created = await as('direction').post('/staff', { firstName: 'Agent', lastName: 'JOURNAL', phone: '+2290190008801', roles: [{ role: 'SECRETARIAT' }] }).expect(201);
+    const id = created.body.id ?? created.body.user?.id ?? (await inTenant((tx) => tx.user.findFirstOrThrow({ where: { phone: '+2290190008801' } }))).id;
+    await as('direction').patch(`/staff/${id}`, { roles: [{ role: 'COMPTABLE' }], phone: '+2290190008802' }).expect(200);
+    const changed = (await rows('user.roles_changed')).pop();
+    expect(changed.data.roles).toEqual({ avant: ['SECRETARIAT'], après: ['COMPTABLE'] });
+    expect(changed.data.phone).toEqual({ avant: '+229019•••01', après: '+229019•••02' });
+
+    const fee = await inTenant((tx) => tx.feeType.findFirstOrThrow({ where: { active: true } }));
+    await as('direction').patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount + 500 }).expect(200);
+    expect((await rows('fee_type.updated')).pop().data.amount).toEqual({ avant: fee.amount, après: fee.amount + 500 });
+    await as('direction').patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount }).expect(200);
+
+    const st = (await as('direction').get('/students')).body[0];
+    await as('direction').patch(`/students/${st.id}`, { allergies: 'Arachide (fictif)', birthPlace: 'Cotonou (fictif)' }).expect(200);
+    const upd = (await rows('student.updated')).pop();
+    expect(upd.data.allergies).toBe('modifié');
+    expect(upd.data.birthPlace).toMatchObject({ après: 'Cotonou (fictif)' });
+    expect(JSON.stringify(upd.data)).not.toContain('Arachide');
+  });
+
+  it("SEC-034 : un accès refusé est tracé une seule fois par fenêtre de 10 minutes", async () => {
+    const before = (await rows('access.denied')).length;
+    for (let i = 0; i < 3; i++) await as('teacher').get('/audit').expect(403);
+    const after = await rows('access.denied');
+    expect(after.length - before).toBe(1);
+    expect(after.pop()).toMatchObject({ userName: 'Codjo ZINSOU', data: { route: 'GET /api/v1/audit', role: 'ENSEIGNANT' } });
+  });
+});

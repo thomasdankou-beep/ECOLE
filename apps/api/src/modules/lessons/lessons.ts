@@ -2,7 +2,7 @@ import { Body, Controller, ForbiddenException, Get, Injectable, Param, ParseUUID
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { IsDateString, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { Actor, Can, CurrentActor } from '../../common/auth';
-import { AuditService } from '../../common/audit.service';
+import { AuditService, auditChanges } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { isoDay, toDate } from '../../common/util';
@@ -89,7 +89,9 @@ export class LessonsService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const l = await tx.lesson.findUniqueOrThrow({ where: { id } });
       if (l.authorId !== actor.userId) throw new ForbiddenException('Seul l’auteur peut modifier cette séance');
-      return tx.lesson.update({ where: { id }, data: { ...dto, homeworkDue: dto.homeworkDue ? toDate(dto.homeworkDue) : undefined } });
+      const updated = await tx.lesson.update({ where: { id }, data: { ...dto, homeworkDue: dto.homeworkDue ? toDate(dto.homeworkDue) : undefined } });
+      await this.audit.log(tx, actor, 'lesson.updated', 'Lesson', id, auditChanges(l, updated, Object.keys(dto))); // SEC-032
+      return updated;
     });
   }
 }

@@ -99,7 +99,7 @@ export class AuthController {
   @Post('logout')
   @HttpCode(204)
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    await this.auth.logout(req.cookies?.[COOKIE]);
+    await this.auth.logout(req.cookies?.[COOKIE], req.ip);
     res.clearCookie(COOKIE, { path: '/api/v1/auth' });
   }
 

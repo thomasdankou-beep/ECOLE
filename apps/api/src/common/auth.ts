@@ -13,6 +13,7 @@ import { RoleCode } from '@prisma/client';
 import { config } from '../config';
 import { can, Permission } from './permissions';
 import { PrismaService } from './prisma.service';
+import { AuditService } from './audit.service';
 
 /**
  * Validité des sessions, vérifiée à chaque appel (SEC-004) : école active, session non révoquée,
@@ -20,6 +21,8 @@ import { PrismaService } from './prisma.service';
  * une déconnexion, un changement de mot de passe ou une suspension l'efface tout de suite.
  */
 const SESSION_CACHE_MS = 30_000;
+const DENIED_WINDOW_MS = 10 * 60_000;
+const deniedSeen = new Map<string, number>();
 const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null; pendingPassword?: boolean }>();
 
 /** Audience des jetons d'accès d'école (SEC-012) : un jeton Super Admin ou de double authentification n'est jamais accepté ici. */
@@ -100,7 +103,23 @@ export const CurrentActor = createParamDecorator((_: unknown, ctx: ExecutionCont
 /** Authentification (jeton d'accès) puis autorisation (permission du rôle actif). */
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private reflector: Reflector, private jwt: JwtService, private db: PrismaService) {}
+  constructor(private reflector: Reflector, private jwt: JwtService, private db: PrismaService, private audit: AuditService) {}
+
+  /**
+   * SEC-034 : un accès refusé est tracé dans le journal de l'école, au plus une fois par personne et par route
+   * toutes les 10 minutes (on ne peut pas remplir le journal). Une erreur d'écriture ne change pas le refus.
+   */
+  private async denied(req: any, who: { tenantId: string; userId: string; name: string }, reason: string, role?: string) {
+    const route = `${req.method} ${req.route?.path ?? String(req.path ?? '').slice(0, 120)}`;
+    const key = `${who.tenantId}:${who.userId}:${route}:${reason}`;
+    const now = Date.now();
+    if ((deniedSeen.get(key) ?? 0) > now) return;
+    if (deniedSeen.size > 10_000) deniedSeen.clear();
+    deniedSeen.set(key, now + DENIED_WINDOW_MS);
+    await this.db
+      .forTenant(who.tenantId, (tx) => this.audit.log(tx, { ...who, ip: req.ip }, 'access.denied', 'Route', null, { route, reason, role }))
+      .catch(() => undefined);
+  }
 
   private async sessionValid(p: AccessTokenPayload) {
     const hit = sessionCache.get(p.sid);
@@ -140,6 +159,7 @@ export class AuthGuard implements CanActivate {
     // SEC-011 : le jeton d'une école n'est accepté que sur l'adresse de cette école.
     const called = schoolFromHost(req.headers.host, config.platformDomain);
     if (called && !(called.slug ? called.slug === session.slug : called.domain === session.domain)) {
+      await this.denied(req, { tenantId: payload.tid, userId: payload.sub, name: payload.name }, `adresse d'une autre école (${String(req.headers.host ?? '').slice(0, 80)})`);
       throw new ForbiddenException("Ce compte appartient à une autre école : connectez-vous depuis l'adresse de votre école");
     }
 
@@ -164,6 +184,7 @@ export class AuthGuard implements CanActivate {
 
     const perms = this.reflector.getAllAndOverride<Permission[]>(REQUIRED_PERMISSIONS, handlers);
     if (perms?.length && !perms.some((p) => can(actor.role, p))) {
+      await this.denied(req, actor, `droit manquant : ${perms.join(' ou ')}`, actor.role);
       throw new ForbiddenException("Votre rôle ne permet pas cette action");
     }
     return true;

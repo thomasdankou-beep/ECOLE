@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Payment, Prisma } from '@prisma/client';
 import { Actor } from '../../common/auth';
-import { AuditService } from '../../common/audit.service';
+import { AuditService, auditChanges } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { assertOwned } from '../../common/ownership';
@@ -81,8 +81,9 @@ export class FinanceService {
   updateFeeType(actor: Actor, id: string, dto: Partial<FeeTypeDto>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { level: dto.levelId, track: dto.trackId });
+      const before = await tx.feeType.findUniqueOrThrow({ where: { id } });
       const f = await tx.feeType.update({ where: { id }, data: { ...dto, dueDate: dto.dueDate ? toDate(dto.dueDate) : undefined } });
-      await this.audit.log(tx, actor, 'fee_type.updated', 'FeeType', id, dto);
+      await this.audit.log(tx, actor, 'fee_type.updated', 'FeeType', id, { name: f.name, ...auditChanges(before, f, Object.keys(dto)) }); // SEC-033
       return f;
     });
   }

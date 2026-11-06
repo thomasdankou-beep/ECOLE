@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { Actor } from '../../common/auth';
-import { AuditService } from '../../common/audit.service';
+import { AuditService, auditChanges, maskIdentifier } from '../../common/audit.service';
 import { can } from '../../common/permissions';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
@@ -179,11 +179,13 @@ export class StudentsService {
   update(actor: Actor, id: string, dto: UpdateStudentDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await this.scope.assertStudent(tx, actor, id);
+      const before = await tx.student.findUniqueOrThrow({ where: { id } });
       const s = await tx.student.update({
         where: { id },
         data: { ...dto, lastName: dto.lastName?.toUpperCase(), birthDate: dto.birthDate ? toDate(dto.birthDate) : undefined },
       });
-      await this.audit.log(tx, actor, 'student.updated', 'Student', id, dto);
+      // SEC-033 et SEC-037 : avant et après, sans recopier les allergies.
+      await this.audit.log(tx, actor, 'student.updated', 'Student', id, auditChanges(before, s, Object.keys(dto)));
       return s;
     });
   }
@@ -251,7 +253,7 @@ export class StudentsService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await this.scope.assertStudent(tx, actor, id);
       const r = await this.linkGuardian(tx, actor, id, dto, false);
-      await this.audit.log(tx, actor, 'student.guardian_added', 'Student', id, { phone: r.phone });
+      await this.audit.log(tx, actor, 'student.guardian_added', 'Student', id, { phone: maskIdentifier(r.phone) }); // SEC-037
       return r;
     });
   }

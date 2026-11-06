@@ -8,7 +8,7 @@ import * as QRCode from 'qrcode';
 import { logoUrl, tenantSettings } from '../settings/settings.service';
 import { config } from '../../config';
 import { AccessTokenPayload, Actor, forgetSessions, SCHOOL_AUDIENCE } from '../../common/auth';
-import { AuditService } from '../../common/audit.service';
+import { AuditService, auditSubject, maskIdentifier } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
 import { createSmsProvider } from '../notifications/sms.provider';
@@ -108,7 +108,10 @@ export class AuthService {
       // Compte inconnu, désactivé ou bloqué : même calcul et même réponse (SEC-024).
       if (!user || user.status !== 'ACTIVE' || (user.lockedUntil && user.lockedUntil > new Date())) {
         await argon2.hash(password); // temps constant : ne révèle pas l'existence du compte
-        throw fail;
+        // SEC-031 : la tentative est tracée (identifiant masqué si le compte n'existe pas), la réponse reste la même.
+        if (user) await this.audit.log(tx, auditSubject(user, meta.ip), 'auth.refused', 'User', user.id, { reason: user.status !== 'ACTIVE' ? 'compte désactivé' : 'compte bloqué' });
+        else await this.audit.log(tx, null, 'auth.unknown_identifier', 'User', null, { tenantId: tenant.id, ip: meta.ip, identifier: maskIdentifier(identifier) });
+        return new Deferred(fail);
       }
       if (!(await argon2.verify(user.passwordHash, password))) {
         await this.countFailure(tx, user, tenant.id, meta);
@@ -134,7 +137,7 @@ export class AuthService {
       where: { id: user.id },
       data: { failedLogins: lock ? 0 : failed, lockedUntil: lock ? new Date(Date.now() + config.security.lockMinutes * 60000) : null },
     });
-    await this.audit.log(tx, null, lock ? 'auth.locked' : `${what}.failed`, 'User', user.id, { tenantId, ip: meta.ip });
+    await this.audit.log(tx, auditSubject({ ...user, tenantId }, meta.ip), lock ? 'auth.locked' : `${what}.failed`, 'User', user.id);
   }
 
   async verifyTwoFactor(challenge: string, code: string, meta: SessionMeta) {
@@ -173,7 +176,7 @@ export class AuthService {
       },
     });
     await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
-    await this.audit.log(tx, null, 'auth.login', 'User', user.id, { tenantId: user.tenantId, ip: meta.ip, userAgent: meta.userAgent });
+    await this.audit.log(tx, auditSubject(user, meta.ip), 'auth.login', 'User', user.id, { userAgent: meta.userAgent?.slice(0, 300) });
     return this.issue(user, session.id, token);
   }
 
@@ -204,7 +207,7 @@ export class AuthService {
       if (s.refreshTokenHash !== sha256(token)) {
         await tx.session.update({ where: { id: s.id }, data: { revokedAt: new Date() } });
         forgetSessions({ sessionId: s.id });
-        await this.audit.log(tx, null, 'auth.refresh_reuse', 'Session', s.id, { tenantId, ip: meta.ip });
+        await this.audit.log(tx, auditSubject(s.user, meta.ip), 'auth.refresh_reuse', 'Session', s.id);
         return new Deferred(new UnauthorizedException('Session expirée'));
       }
       const next = randomBytes(48).toString('base64url');
@@ -214,12 +217,16 @@ export class AuthService {
   }
 
   /** Ne révoque que la session dont le cookie est complet et exact (SEC-025). */
-  async logout(cookie: string | undefined) {
+  async logout(cookie: string | undefined, ip?: string) {
     const [tenantId, sessionId, token] = (cookie ?? '').split('.');
     if (!tenantId || !sessionId || !token || !/^[0-9a-f-]{36}$/i.test(tenantId) || !/^[0-9a-f-]{36}$/i.test(sessionId)) return;
-    const r = await this.db.forTenant(tenantId, (tx) =>
-      tx.session.updateMany({ where: { id: sessionId, refreshTokenHash: sha256(token), revokedAt: null }, data: { revokedAt: new Date() } }),
-    );
+    const r = await this.db.forTenant(tenantId, async (tx) => {
+      const s = await tx.session.findFirst({ where: { id: sessionId, refreshTokenHash: sha256(token), revokedAt: null }, include: { user: true } });
+      if (!s) return { count: 0 };
+      await tx.session.update({ where: { id: s.id }, data: { revokedAt: new Date() } });
+      await this.audit.log(tx, auditSubject(s.user, ip), 'auth.logout', 'Session', s.id); // SEC-032
+      return { count: 1 };
+    });
     if (r.count) forgetSessions({ sessionId });
   }
 
@@ -244,9 +251,11 @@ export class AuthService {
   }
 
   revokeSession(actor: Actor, id: string) {
-    return this.db.forTenant(actor.tenantId, (tx) =>
-      tx.session.updateMany({ where: { id, userId: actor.userId }, data: { revokedAt: new Date() } }),
-    ).then((r) => {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const r = await tx.session.updateMany({ where: { id, userId: actor.userId, revokedAt: null }, data: { revokedAt: new Date() } });
+      if (r.count) await this.audit.log(tx, actor, 'auth.session_revoked', 'Session', id); // SEC-032
+      return r;
+    }).then((r) => {
       forgetSessions({ sessionId: id });
       return r;
     });
@@ -334,7 +343,7 @@ export class AuthService {
       await tx.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(password), mustChangePassword: false, failedLogins: 0, lockedUntil: null } });
       await tx.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
       forgetSessions({ userId: user.id });
-      await this.audit.log(tx, null, 'auth.password_reset', 'User', user.id, { tenantId: tenant.id });
+      await this.audit.log(tx, auditSubject(user), 'auth.password_reset', 'User', user.id);
       return { ok: true };
     }));
   }

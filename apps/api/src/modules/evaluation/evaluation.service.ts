@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { AssessmentKind } from '@prisma/client';
 import { Actor } from '../../common/auth';
-import { AuditService } from '../../common/audit.service';
+import { AuditService, auditChanges } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { toDate } from '../../common/util';
@@ -197,7 +197,7 @@ export class EvaluationService {
       const a = await tx.assessment.findUniqueOrThrow({ where: { id } });
       await this.assertEditable(tx, actor, a.classSubjectId, a.termId);
       const u = await tx.assessment.update({ where: { id }, data: { title: input.title, kind: input.kind, weight: input.weight, maxScore: input.maxScore, date: input.date ? toDate(input.date) : undefined } });
-      await this.audit.log(tx, actor, 'assessment.updated', 'Assessment', id, input);
+      await this.audit.log(tx, actor, 'assessment.updated', 'Assessment', id, auditChanges(a, u, Object.keys(input))); // SEC-033
       return u;
     });
   }
@@ -209,7 +209,8 @@ export class EvaluationService {
       const cs = await this.assertEditable(tx, actor, a.classSubjectId, a.termId);
       const enrolled = new Set((await tx.enrollment.findMany({ where: { classId: cs.classId, status: 'ACTIVE' }, select: { studentId: true } })).map((e) => e.studentId));
       const max = Number(a.maxScore);
-      const changes: { studentId: string; before: number | null; after: number | null }[] = [];
+      // SEC-032 : absent, dispensé et commentaire comptent aussi comme des modifications.
+      const changes: Record<string, unknown>[] = [];
       for (const e of entries) {
         if (!enrolled.has(e.studentId)) throw new BadRequestException("Un élève n'appartient pas à cette classe");
         if (e.score !== null && (e.score < 0 || e.score > max || Number.isNaN(e.score))) throw new BadRequestException(`Les notes vont de 0 à ${max}`);
@@ -221,7 +222,13 @@ export class EvaluationService {
           update: { score, absent: !!e.absent, exempt: !!e.exempt, comment: e.comment, updatedById: actor.userId },
         });
         const before = prev?.score === null || prev?.score === undefined ? null : Number(prev.score);
-        if (prev && before !== score) changes.push({ studentId: e.studentId, before, after: score });
+        if (prev) {
+          const c: Record<string, unknown> = { studentId: e.studentId, before, after: score };
+          if (prev.absent !== !!e.absent) c.absent = { avant: prev.absent, après: !!e.absent };
+          if (prev.exempt !== !!e.exempt) c.exempt = { avant: prev.exempt, après: !!e.exempt };
+          if ((prev.comment ?? null) !== (e.comment ?? null)) c.comment = { avant: prev.comment ?? null, après: e.comment ?? null };
+          if (before !== score || Object.keys(c).length > 3) changes.push(c);
+        }
       }
       await this.audit.log(tx, actor, 'grades.saved', 'Assessment', assessmentId, { count: entries.length, modified: changes });
       return { saved: entries.length };
@@ -253,11 +260,18 @@ export class EvaluationService {
   saveAppreciation(actor: Actor, dto: { studentId: string; classSubjectId: string; termId: string; text: string }) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await this.assertEditable(tx, actor, dto.classSubjectId, dto.termId);
-      return tx.appreciation.upsert({
-        where: { studentId_classSubjectId_termId: { studentId: dto.studentId, classSubjectId: dto.classSubjectId, termId: dto.termId } },
+      const where = { studentId_classSubjectId_termId: { studentId: dto.studentId, classSubjectId: dto.classSubjectId, termId: dto.termId } };
+      const prev = await tx.appreciation.findUnique({ where, select: { text: true } });
+      const saved = await tx.appreciation.upsert({
+        where,
         create: { tenantId: actor.tenantId, ...dto, authorId: actor.userId },
         update: { text: dto.text, authorId: actor.userId },
       });
+      // SEC-032 : appréciation du bulletin, ancien et nouveau texte.
+      if (prev?.text !== dto.text) {
+        await this.audit.log(tx, actor, 'appreciation.saved', 'Appreciation', saved.id, { studentId: dto.studentId, classSubjectId: dto.classSubjectId, termId: dto.termId, avant: prev?.text ?? null, après: dto.text });
+      }
+      return saved;
     });
   }
 

@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { Actor, forgetSessions } from '../../common/auth';
 import { can } from '../../common/permissions';
-import { AuditService } from '../../common/audit.service';
+import { AuditService, auditChanges } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { assertOwned } from '../../common/ownership';
@@ -196,7 +196,11 @@ export class SettingsService {
         ...(names.shortName !== undefined ? { shortName: names.shortName.trim() || null } : {}),
       };
       await tx.tenant.update({ where: { id: t.id }, data: { settings: merged as any, ...rename } });
-      await this.audit.log(tx, actor, 'settings.updated', 'Tenant', t.id, { ...settings, ...rename });
+      // SEC-033 : ancienne et nouvelle valeur des seules rubriques modifiées.
+      await this.audit.log(tx, actor, 'settings.updated', 'Tenant', t.id, {
+        ...auditChanges(t.settings as Record<string, unknown>, merged as Record<string, unknown>, Object.keys(incoming)),
+        ...auditChanges(t, rename),
+      });
       return merged;
     });
   }
@@ -229,8 +233,9 @@ export class SettingsService {
 
   updateSite(actor: Actor, id: string, dto: Partial<SiteDto>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      const before = await tx.site.findUniqueOrThrow({ where: { id } });
       const site = await tx.site.update({ where: { id }, data: dto });
-      await this.audit.log(tx, actor, 'site.updated', 'Site', id, dto);
+      await this.audit.log(tx, actor, 'site.updated', 'Site', id, auditChanges(before, site, Object.keys(dto)));
       return site;
     });
   }
@@ -351,8 +356,9 @@ export class SettingsService {
   private simpleUpdate(actor: Actor, model: 'level' | 'track' | 'room' | 'subject', id: string, dto: object, conflict: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { site: (dto as { siteId?: string }).siteId });
+      const before = await (tx[model] as any).findUnique({ where: { id } });
       const row = await (tx[model] as any).update({ where: { id }, data: dto }).catch((e: unknown) => uniqueViolation(e, conflict));
-      await this.audit.log(tx, actor, `${model}.updated`, model, id, dto);
+      await this.audit.log(tx, actor, `${model}.updated`, model, id, auditChanges(before, row, Object.keys(dto)));
       return row;
     });
   }
@@ -408,8 +414,9 @@ export class SettingsService {
   updateClass(actor: Actor, id: string, dto: Partial<ClassDto>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { site: dto.siteId, level: dto.levelId, track: dto.trackId, user: dto.headTeacherId });
+      const before = await tx.class.findUniqueOrThrow({ where: { id } });
       const c = await tx.class.update({ where: { id }, data: dto });
-      await this.audit.log(tx, actor, 'class.updated', 'Class', id, dto);
+      await this.audit.log(tx, actor, 'class.updated', 'Class', id, auditChanges(before, c, Object.keys(dto)));
       return c;
     });
   }
@@ -418,12 +425,13 @@ export class SettingsService {
   upsertClassSubject(actor: Actor, classId: string, dto: ClassSubjectDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { class: classId, subject: dto.subjectId });
+      const prev = await tx.classSubject.findUnique({ where: { classId_subjectId: { classId, subjectId: dto.subjectId } }, select: { coefficient: true } });
       const cs = await tx.classSubject.upsert({
         where: { classId_subjectId: { classId, subjectId: dto.subjectId } },
         create: { tenantId: actor.tenantId, classId, subjectId: dto.subjectId, coefficient: dto.coefficient },
         update: { coefficient: dto.coefficient },
       });
-      await this.audit.log(tx, actor, 'class_subject.upserted', 'ClassSubject', cs.id, dto);
+      await this.audit.log(tx, actor, 'class_subject.upserted', 'ClassSubject', cs.id, { classId, subjectId: dto.subjectId, ...auditChanges(prev, cs, ['coefficient']) });
       return cs;
     });
   }
@@ -438,6 +446,8 @@ export class SettingsService {
         select: { id: true },
       });
       if (!classes.length) throw new BadRequestException('Aucune classe ne correspond à ce niveau et à cette filière cette année');
+      // SEC-033 : coefficients avant la modification, classe par classe.
+      const before = await tx.classSubject.findMany({ where: { subjectId: dto.subjectId, classId: { in: classes.map((c) => c.id) } }, select: { classId: true, coefficient: true } });
       for (const c of classes) {
         if (dto.coefficient === null) {
           const cs = await tx.classSubject.findUnique({ where: { classId_subjectId: { classId: c.id, subjectId: dto.subjectId } } });
@@ -455,7 +465,10 @@ export class SettingsService {
           });
         }
       }
-      await this.audit.log(tx, actor, 'class_subject.bulk', 'Subject', dto.subjectId, { ...dto, classes: classes.length });
+      await this.audit.log(tx, actor, 'class_subject.bulk', 'Subject', dto.subjectId, {
+        ...dto, classes: classes.length,
+        avant: Object.fromEntries(before.map((b) => [b.classId, b.coefficient === null ? null : Number(b.coefficient)])),
+      });
       return { classes: classes.length };
     });
   }
@@ -535,6 +548,7 @@ export class SettingsService {
   updateStaff(actor: Actor, id: string, dto: StaffUpdateDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { user: id, site: dto.roles?.map((r) => r.siteId), subject: dto.subjectIds });
+      const before = await tx.user.findUniqueOrThrow({ where: { id }, include: { roles: { where: { role: { notIn: ['PARENT', 'ELEVE'] } } } } });
       const data: Prisma.UserUpdateInput = {
         firstName: dto.firstName, lastName: dto.lastName, email: dto.email?.toLowerCase(),
         phone: dto.phone ? normalizePhone(dto.phone) : undefined,
@@ -553,7 +567,16 @@ export class SettingsService {
         await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
         forgetSessions({ userId: id });
       }
-      await this.audit.log(tx, actor, dto.roles ? 'user.roles_changed' : 'user.updated', 'User', id, dto);
+      // SEC-033 : rôles et champs avant et après (téléphone et e-mail masqués, SEC-037).
+      const role = (r: { role: string; siteId?: string | null }) => (r.siteId ? `${r.role}@${r.siteId}` : r.role);
+      const rolesBefore = before.roles.map(role).sort();
+      const rolesAfter = dto.roles?.map(role).sort();
+      const after = { firstName: data.firstName, lastName: data.lastName, email: data.email, phone: data.phone, status: data.status };
+      await this.audit.log(tx, actor, rolesAfter && JSON.stringify(rolesAfter) !== JSON.stringify(rolesBefore) ? 'user.roles_changed' : 'user.updated', 'User', id, {
+        ...auditChanges(before, after),
+        ...(rolesAfter && JSON.stringify(rolesAfter) !== JSON.stringify(rolesBefore) ? { roles: { avant: rolesBefore, après: rolesAfter } } : {}),
+        ...(dto.subjectIds ? { subjectIds: dto.subjectIds } : {}),
+      });
       return { ok: true };
     });
   }
