@@ -8,6 +8,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?à définir dans .env}
       ERP_OWNER_PASSWORD: ${ERP_OWNER_PASSWORD:?à définir dans .env}
       ERP_APP_PASSWORD: ${ERP_APP_PASSWORD:?à définir dans .env}
+      ERP_PLATFORM_PASSWORD: ${ERP_PLATFORM_PASSWORD:-}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
@@ -30,7 +31,10 @@ services:
       redis: { condition: service_started }
     environment:
       DATABASE_URL: postgresql://erp_app:${ERP_APP_PASSWORD}@postgres:5432/erp
+      # Propriétaire : migrations au démarrage et commandes d'administration seulement ; retiré du processus de l'API (Dockerfile).
       DATABASE_ADMIN_URL: postgresql://erp_owner:${ERP_OWNER_PASSWORD}@postgres:5432/erp
+      # Super Admin : rôle dédié, sans droits de propriétaire (SEC-009).
+      DATABASE_PLATFORM_URL: postgresql://erp_platform:${ERP_PLATFORM_PASSWORD:?à définir dans .env (relancer ./installer-serveur.sh ou ./demarrer.sh)}@postgres:5432/erp
       REDIS_URL: redis://redis:6379
       PORT: 4000
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}

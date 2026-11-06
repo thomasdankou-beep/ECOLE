@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
 import { promises as fs } from 'fs';
 import { join, normalize } from 'path';
-import { config } from '../../config';
+import { derivedKey } from '../../config';
 
 const ALLOWED: Record<string, string> = {
   'image/jpeg': 'jpg',
@@ -37,7 +37,7 @@ export class FilesService {
   }
 
   private sign(key: string, exp: number) {
-    return createHmac('sha256', config.jwt.refreshSecret).update(`${key}:${exp}`).digest('base64url');
+    return createHmac('sha256', derivedKey('files')).update(`${key}:${exp}`).digest('base64url');
   }
 
   /** URL de téléchargement valable 15 minutes. */

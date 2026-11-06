@@ -38,7 +38,7 @@ if [ -n "${CODESPACE_NAME:-}" ] && grep -q '^WEB_ORIGIN=http://localhost' .env; 
 fi
 
 # Complète chaque secret vide ou absent (cas d'un .env copié à la main sans être rempli).
-for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
+for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
   if grep -q "^$k=." .env; then continue; fi
   if grep -q "^$k=" .env; then
     sed -i.bak "s|^$k=.*|$k=$(secret)|" .env
@@ -50,6 +50,8 @@ done
 rm -f .env.bak
 
 echo "Construction et démarrage des services (le premier lancement prend plusieurs minutes)..."
+docker compose up -d postgres
+./infra/postgres/role-plateforme.sh
 docker compose up -d --build
 
 echo "Préparation de la base et des données de démonstration..."

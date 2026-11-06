@@ -19,5 +19,6 @@ WORKDIR /repo/apps/api
 RUN mkdir -p storage && chown -R node:node storage
 USER node
 EXPOSE 4000
-# Applique les migrations (rôle propriétaire) puis démarre l'API (rôle applicatif).
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main.js"]
+# Applique les migrations (rôle propriétaire) puis démarre l'API sans le mot de passe du propriétaire
+# (SEC-009) : le processus de l'API n'utilise que erp_app (écoles) et erp_platform (Super Admin).
+CMD ["sh", "-c", "npx prisma migrate deploy && exec env -u DATABASE_ADMIN_URL node dist/main.js"]

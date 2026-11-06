@@ -106,14 +106,14 @@ Prérequis : Node 22, PostgreSQL 16, Redis 7 (facultatif : sans Redis, les relan
 
 ```bash
 npm install
-# Rôles et base (une fois) : voir infra/postgres/init-roles.sh, avec les mots de passe de apps/api/.env
+# Rôles et base (une fois) : voir infra/postgres/init-roles.sh (erp_owner, erp_app, erp_platform), avec les mots de passe de apps/api/.env
 cp apps/api/.env.example apps/api/.env      # puis générer les secrets
 cp apps/web/.env.example apps/web/.env.local
 npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 45 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins, plateforme)
+npm test            # 69 tests (calcul des moyennes, sécurité, isolation des écoles, paiements, bulletins, plateforme)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).

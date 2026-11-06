@@ -7,7 +7,7 @@ import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
 import { logoUrl, tenantSettings } from '../settings/settings.service';
 import { config } from '../../config';
-import { AccessTokenPayload, Actor, forgetSessions } from '../../common/auth';
+import { AccessTokenPayload, Actor, forgetSessions, SCHOOL_AUDIENCE } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
@@ -111,7 +111,7 @@ export class AuthService {
       await tx.user.update({ where: { id: user.id }, data: { failedLogins: 0, lockedUntil: null } });
 
       if (user.totpEnabled) {
-        const challenge = this.jwt.sign({ sub: user.id, tid: tenant.id, purpose: '2fa' }, { secret: config.jwt.accessSecret, expiresIn: 300 });
+        const challenge = this.jwt.sign({ sub: user.id, tid: tenant.id, purpose: '2fa' }, { secret: config.jwt.accessSecret, audience: '2fa', expiresIn: 300 });
         return { twoFactorRequired: true as const, challenge };
       }
       const needs2fa = config.security.enforceTwoFactor && user.roles.some((r) => config.security.twoFactorRoles.includes(r.role));
@@ -123,7 +123,7 @@ export class AuthService {
   async verifyTwoFactor(challenge: string, code: string, meta: SessionMeta) {
     let p: { sub: string; tid: string; purpose: string };
     try {
-      p = this.jwt.verify(challenge, { secret: config.jwt.accessSecret });
+      p = this.jwt.verify(challenge, { secret: config.jwt.accessSecret, audience: '2fa' });
     } catch {
       throw new UnauthorizedException('Délai dépassé, reconnectez-vous');
     }
@@ -164,7 +164,7 @@ export class AuthService {
       roles: user.roles.map((r) => ({ role: r.role, siteId: r.siteId })),
     };
     return {
-      accessToken: this.jwt.sign(payload, { secret: config.jwt.accessSecret, expiresIn: config.jwt.accessTtlSeconds }),
+      accessToken: this.jwt.sign(payload, { secret: config.jwt.accessSecret, audience: SCHOOL_AUDIENCE, expiresIn: config.jwt.accessTtlSeconds }),
       refreshCookie: `${user.tenantId}.${sessionId}.${refreshToken}`,
       expiresIn: config.jwt.accessTtlSeconds,
     };

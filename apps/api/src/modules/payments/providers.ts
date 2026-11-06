@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'crypto';
-import { config } from '../../config';
+import { config, derivedKey } from '../../config';
 
 /**
  * Couche d'abstraction des paiements en ligne (master prompt §5) : la logique métier
@@ -69,7 +69,7 @@ export class SandboxProvider implements PaymentProvider {
   private static amounts = new Map<string, number>();
 
   static sign(body: string) {
-    return createHmac('sha256', config.jwt.refreshSecret).update(`sandbox:${body}`).digest('hex');
+    return createHmac('sha256', derivedKey('sandbox-payments')).update(`sandbox:${body}`).digest('hex');
   }
 
   static decide(transactionId: string, success: boolean) {

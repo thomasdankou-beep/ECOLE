@@ -11,5 +11,6 @@ try {
 } catch {}
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://erp_app:erp_app_dev@localhost:5432/erp_test';
 process.env.DATABASE_ADMIN_URL = process.env.TEST_DATABASE_ADMIN_URL ?? 'postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test';
+process.env.DATABASE_PLATFORM_URL = process.env.TEST_DATABASE_PLATFORM_URL ?? 'postgresql://erp_platform:erp_platform_dev@localhost:5432/erp_test';
 process.env.STORAGE_DIR = '/tmp/erp-test-storage';
 process.env.DEFAULT_TENANT = 'saint-kisito';

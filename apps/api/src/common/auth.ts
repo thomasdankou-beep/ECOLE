@@ -20,7 +20,31 @@ import { PrismaService } from './prisma.service';
  * une déconnexion, un changement de mot de passe ou une suspension l'efface tout de suite.
  */
 const SESSION_CACHE_MS = 30_000;
-const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string }>();
+const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null }>();
+
+/** Audience des jetons d'accès d'école (SEC-012) : un jeton Super Admin ou de double authentification n'est jamais accepté ici. */
+export const SCHOOL_AUDIENCE = 'school';
+
+/** Sous-domaines de la plateforme qui ne désignent pas une école. */
+export const RESERVED_SUBDOMAINS = ['www', 'admin', 'api', 'plateforme', 'app', 'mail', 'static'];
+
+/**
+ * École désignée par l'adresse appelée (SEC-011), en mode plateforme seulement :
+ * « slug » pour <slug>.<domaine de la plateforme>, « domain » pour une autre adresse (domaine propre possible),
+ * null quand l'adresse ne désigne aucune école (adresse interne, accueil de la plateforme).
+ */
+export function schoolFromHost(rawHost: string | undefined, platformDomain: string): { slug?: string; domain?: string } | null {
+  if (!platformDomain) return null;
+  const host = (rawHost ?? '').toLowerCase().split(':')[0].trim();
+  if (!host || host === platformDomain || host === `www.${platformDomain}`) return null;
+  if (host.endsWith(`.${platformDomain}`)) {
+    const sub = host.slice(0, -(platformDomain.length + 1));
+    return sub.includes('.') || RESERVED_SUBDOMAINS.includes(sub) ? null : { slug: sub };
+  }
+  // Adresse sans point (api, localhost) ou adresse IP : appel interne, pas une adresse d'école.
+  if (!host.includes('.') || /^[\d.]+$/.test(host)) return null;
+  return { domain: host };
+}
 
 /** Oublie les sessions gardées en mémoire : d'un utilisateur, de toute une école, ou une seule. */
 export function forgetSessions(filter: { userId?: string; tenantId?: string; sessionId?: string }, again = true) {
@@ -71,10 +95,10 @@ export const CurrentActor = createParamDecorator((_: unknown, ctx: ExecutionCont
 export class AuthGuard implements CanActivate {
   constructor(private reflector: Reflector, private jwt: JwtService, private db: PrismaService) {}
 
-  private async sessionValid(p: AccessTokenPayload): Promise<boolean> {
+  private async sessionValid(p: AccessTokenPayload) {
     const hit = sessionCache.get(p.sid);
-    if (hit && hit.until > Date.now() && hit.tenantId === p.tid && hit.userId === p.sub) return hit.ok;
-    const tenant = await this.db.tenant.findUnique({ where: { id: p.tid }, select: { status: true } });
+    if (hit && hit.until > Date.now() && hit.tenantId === p.tid && hit.userId === p.sub) return hit;
+    const tenant = await this.db.tenant.findUnique({ where: { id: p.tid }, select: { status: true, slug: true, domain: true } });
     let ok = tenant?.status === 'ACTIVE';
     if (ok) {
       const s = await this.db.forTenant(p.tid, (tx) =>
@@ -83,8 +107,9 @@ export class AuthGuard implements CanActivate {
       ok = !!s && s.userId === p.sub && !s.revokedAt && s.expiresAt > new Date() && s.user.status === 'ACTIVE';
     }
     if (sessionCache.size > 10_000) sessionCache.clear();
-    sessionCache.set(p.sid, { ok, until: Date.now() + SESSION_CACHE_MS, userId: p.sub, tenantId: p.tid });
-    return ok;
+    const entry = { ok, until: Date.now() + SESSION_CACHE_MS, userId: p.sub, tenantId: p.tid, slug: tenant?.slug, domain: tenant?.domain };
+    sessionCache.set(p.sid, entry);
+    return entry;
   }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
@@ -96,12 +121,18 @@ export class AuthGuard implements CanActivate {
     if (!header?.startsWith('Bearer ')) throw new UnauthorizedException('Connexion requise');
     let payload: AccessTokenPayload;
     try {
-      payload = this.jwt.verify<AccessTokenPayload>(header.slice(7), { secret: config.jwt.accessSecret });
+      payload = this.jwt.verify<AccessTokenPayload>(header.slice(7), { secret: config.jwt.accessSecret, audience: SCHOOL_AUDIENCE });
     } catch {
       throw new UnauthorizedException('Session expirée');
     }
     if (!payload.roles?.length) throw new ForbiddenException('Aucun rôle attribué');
-    if (!payload.tid || !payload.sid || !(await this.sessionValid(payload))) throw new UnauthorizedException('Session expirée');
+    const session = payload.tid && payload.sid ? await this.sessionValid(payload) : null;
+    if (!session?.ok) throw new UnauthorizedException('Session expirée');
+    // SEC-011 : le jeton d'une école n'est accepté que sur l'adresse de cette école.
+    const called = schoolFromHost(req.headers.host, config.platformDomain);
+    if (called && !(called.slug ? called.slug === session.slug : called.domain === session.domain)) {
+      throw new ForbiddenException("Ce compte appartient à une autre école : connectez-vous depuis l'adresse de votre école");
+    }
 
     const wanted = req.headers['x-active-role'] as RoleCode | undefined;
     const active = wanted ? payload.roles.find((r) => r.role === wanted) : payload.roles[0];

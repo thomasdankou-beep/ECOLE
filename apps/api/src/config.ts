@@ -1,3 +1,4 @@
+import { createHmac } from 'crypto';
 // Configuration lue depuis l'environnement (voir .env.example).
 const env = process.env;
 
@@ -59,4 +60,12 @@ export function tenantOrigin(tenant: { slug: string; domain?: string | null }) {
   if (tenant.domain) return `https://${tenant.domain}`;
   if (config.platformDomain) return `https://${tenant.slug}.${config.platformDomain}`;
   return config.webOrigin;
+}
+
+/**
+ * Clé propre à un usage, dérivée du secret de signature (SEC-012) : une signature de lien de fichier
+ * ne peut pas servir pour un autre usage, et inversement.
+ */
+export function derivedKey(purpose: 'files' | 'sandbox-payments') {
+  return createHmac('sha256', config.jwt.refreshSecret).update(`cahiora:${purpose}`).digest();
 }

@@ -12,6 +12,9 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { consoleSms } from '../src/modules/notifications/sms.provider';
+import { PlatformDb } from '../src/modules/platform/platform';
+import { JwtService } from '@nestjs/jwt';
+import { config } from '../src/config';
 
 const PASSWORD = 'Kisito2026';
 const PHONES = { direction: '+2290190000010', secretariat: '+2290190000011', teacher: '+2290190000001', vieScolaire: '+2290190000012', comptable: '+2290190000013', parent: '+2290197000001' };
@@ -504,6 +507,33 @@ describe('Plateforme : plusieurs écoles sur un même serveur', () => {
     expect((await http.get(`/api/v1/platform/resolve?host=${slug}.example.org`)).body.slug).toBe(slug);
     expect((await http.get('/api/v1/platform/resolve?host=localhost:3000')).body.slug).toBe('saint-kisito');
   });
+
+  it("le Super Admin travaille avec un rôle de base dédié, sans droits de propriétaire (SEC-009)", async () => {
+    const pdb = app.get(PlatformDb);
+    const who = await pdb.$queryRaw<{ u: string; owner: boolean; bypass: boolean }[]>`
+      SELECT current_user AS u, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass,
+             EXISTS (SELECT 1 FROM pg_tables WHERE tableowner = current_user) AS owner`;
+    expect(who[0]).toEqual({ u: 'erp_platform', owner: false, bypass: false });
+    await expect(pdb.$executeRawUnsafe('ALTER TABLE students DISABLE ROW LEVEL SECURITY')).rejects.toThrow();
+    await expect(pdb.$queryRaw`SELECT count(*) FROM grades`).rejects.toThrow(/permission denied/);
+    // Hors transaction d'une école, il ne voit aucun élève.
+    expect(Number((await pdb.$queryRaw<{ n: bigint }[]>`SELECT count(*) AS n FROM students`)[0].n)).toBe(0);
+  });
+
+  it("la direction voit dans son journal la réinitialisation et la suspension faites par la plateforme (SEC-010)", async () => {
+    const reset = await http.post(`/api/v1/platform/tenants/${tenantId}/reset-director`).set('Cookie', cookie);
+    expect(reset.status).toBe(201);
+    await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ status: 'SUSPENDED', platformNotes: 'Note interne fictive' }).expect(200);
+    await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ status: 'ACTIVE' }).expect(200);
+    const r = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: reset.body.identifier, password: reset.body.temporaryPassword });
+    const log = await http.get('/api/v1/audit?action=platform').set('Authorization', `Bearer ${r.body.accessToken}`);
+    expect(log.status).toBe(200);
+    const actions = log.body.map((e: any) => e.action);
+    expect(actions).toEqual(expect.arrayContaining(['platform.tenant.created', 'platform.director_reset', 'platform.tenant.suspended', 'platform.tenant.reactivated']));
+    expect(log.body.every((e: any) => e.userName.startsWith('Super Admin de la plateforme'))).toBe(true);
+    // Les notes internes de la plateforme ne sont jamais recopiées chez l'école.
+    expect(JSON.stringify(log.body)).not.toContain('Note interne fictive');
+  });
 });
 
 describe('Fiche de renseignement chargée et frais par public', () => {
@@ -905,5 +935,53 @@ describe('Cloisonnement dans la base elle-même (SEC-006, SEC-007, SEC-001 optio
           SELECT 1 FROM pg_trigger t WHERE t.tgrelid = con.conrelid AND t.tgname = 'same_tenant_refs'
             AND position(ca.attname || '\\000' IN encode(t.tgargs, 'escape')) > 0)`;
     expect(missing).toEqual([]);
+  });
+});
+
+describe("Jetons et adresses (SEC-011, SEC-012)", () => {
+  it("le jeton d'une école est refusé sur l'adresse d'une autre école, en mode plateforme (SEC-011)", async () => {
+    const before = config.platformDomain;
+    (config as any).platformDomain = 'cahiora.test';
+    try {
+      const other = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+      const ok = await http.get('/api/v1/students').set('Host', 'saint-kisito.cahiora.test').set('Authorization', `Bearer ${tokens.direction}`);
+      expect(ok.status).toBe(200);
+      const wrong = await http.get('/api/v1/students').set('Host', 'autre-ecole.cahiora.test').set('Authorization', `Bearer ${tokens.direction}`);
+      expect(wrong.status).toBe(403);
+      const foreignDomain = await http.get('/api/v1/students').set('Host', 'ecole-inconnue.example.org').set('Authorization', `Bearer ${tokens.direction}`);
+      expect(foreignDomain.status).toBe(403);
+      // Adresse interne (appel entre services) : pas de contrôle d'adresse.
+      expect((await http.get('/api/v1/students').set('Host', 'api:4000').set('Authorization', `Bearer ${tokens.direction}`)).status).toBe(200);
+      expect(other.slug).toBe('saint-kisito');
+    } finally {
+      (config as any).platformDomain = before;
+    }
+  });
+
+  it("seul un jeton d'accès d'école est accepté par l'API des écoles (SEC-012)", async () => {
+    const jwt = app.get(JwtService);
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const u = await admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+      return tx.user.findFirstOrThrow({ where: { phone: PHONES.direction }, include: { roles: true } });
+    });
+    const real: any = jwt.decode(tokens.direction);
+    const base = { sub: u.id, tid: t.id, sid: real.sid, name: 'x', roles: u.roles.map((r) => ({ role: r.role, siteId: r.siteId })) };
+    const secret = config.jwt.accessSecret;
+    const noAudience = jwt.sign(base, { secret, expiresIn: 300 });
+    const platform = jwt.sign(base, { secret, audience: 'platform', expiresIn: 300 });
+    const challenge = jwt.sign({ ...base, purpose: '2fa' }, { secret, audience: '2fa', expiresIn: 300 });
+    const school = jwt.sign(base, { secret, audience: 'school', expiresIn: 300 });
+    const get = (tok: string) => http.get('/api/v1/students').set('Authorization', `Bearer ${tok}`);
+    expect((await get(noAudience)).status).toBe(401);
+    expect((await get(platform)).status).toBe(401);
+    expect((await get(challenge)).status).toBe(401);
+    expect((await get(school)).status).toBe(200);
+  });
+
+  it('les liens de fichiers sont signés avec une clé propre, distincte du bac à sable des paiements (SEC-012)', () => {
+    const { derivedKey } = require('../src/config');
+    expect(derivedKey('files').equals(derivedKey('sandbox-payments'))).toBe(false);
+    expect(derivedKey('files').toString('hex')).not.toContain(Buffer.from(config.jwt.refreshSecret).toString('hex'));
   });
 });

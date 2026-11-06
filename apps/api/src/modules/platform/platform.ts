@@ -9,7 +9,7 @@ import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
 import { IsEmail, IsEnum, IsOptional, IsString, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
-import { forgetSessions, Public } from '../../common/auth';
+import { forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
 import { normalizePhone } from '../../common/util';
 import { config, tenantOrigin } from '../../config';
 import { hashPassword } from '../auth/auth.service';
@@ -19,7 +19,6 @@ import { temporaryPassword } from '../settings/settings.service';
 const COOKIE = 'erp_pt';
 const SESSION_HOURS = 8;
 /** Sous-domaines réservés à la plateforme. */
-const RESERVED = ['www', 'admin', 'api', 'plateforme', 'app', 'mail', 'static'];
 
 export class DirectorInput {
   @IsString() @MaxLength(80) firstName: string;
@@ -62,13 +61,16 @@ export class PlatformPasswordDto {
 type PlatformActor = { id: string; name: string };
 
 /**
- * Accès propriétaire à la base pour la plateforme : création des écoles et comptage de leur activité.
- * Le rôle applicatif des écoles (erp_app) ne peut ni créer d'école ni lire les tables de la plateforme.
+ * Accès à la base pour la plateforme : création des écoles et comptage de leur activité.
+ * Rôle dédié erp_platform (SEC-009) : ni propriétaire des tables ni exempté de la Row Level Security,
+ * avec seulement les droits utiles à la plateforme (migration securite_lot3). Le rôle applicatif des
+ * écoles (erp_app) ne peut ni créer d'école ni lire les tables de la plateforme.
+ * Sans DATABASE_PLATFORM_URL (poste de développement), l'accès propriétaire est utilisé comme avant.
  */
 @Injectable()
 export class PlatformDb extends PrismaClient implements OnModuleDestroy {
   constructor() {
-    super({ datasources: { db: { url: process.env.DATABASE_ADMIN_URL ?? process.env.DATABASE_URL } } });
+    super({ datasources: { db: { url: process.env.DATABASE_PLATFORM_URL || process.env.DATABASE_ADMIN_URL || process.env.DATABASE_URL } } });
   }
   async onModuleDestroy() {
     await this.$disconnect();
@@ -109,6 +111,13 @@ export class PlatformService {
 
   private log(admin: PlatformActor | null, action: string, tenantId: string | null, data?: unknown) {
     return this.db.platformAuditLog.create({ data: { adminId: admin?.id ?? null, action, tenantId, data: (data ?? undefined) as any } });
+  }
+
+  /** Trace aussi dans le journal de l'école ce que la plateforme fait sur ses comptes (SEC-010). Jamais les notes internes. */
+  private schoolLog(tx: Prisma.TransactionClient, admin: PlatformActor, tenantId: string, action: string, entity: string, entityId: string, data?: Record<string, unknown>) {
+    return tx.auditLog.createMany({
+      data: [{ tenantId, userId: null, userName: `Super Admin de la plateforme (${admin.name})`, action, entity, entityId, data: (data ?? undefined) as any }],
+    });
   }
 
   async login(dto: PlatformLoginDto) {
@@ -181,13 +190,15 @@ export class PlatformService {
     });
     const director = await this.db.inTenant(tenant.id, async (tx) => {
       await tx.site.create({ data: { tenantId: tenant.id, name: dto.siteName.trim() } });
-      return tx.user.create({
+      const u = await tx.user.create({
         data: {
           tenantId: tenant.id, firstName: dto.director.firstName.trim(), lastName: dto.director.lastName.trim().toUpperCase(), phone,
           email: dto.director.email?.toLowerCase() ?? null, passwordHash: await hashPassword(password), mustChangePassword: true,
           roles: { create: [{ tenantId: tenant.id, role: 'DIRECTION' }] },
         },
       });
+      await this.schoolLog(tx, actor, tenant.id, 'platform.tenant.created', 'User', u.id, { slug: dto.slug });
+      return u;
     });
     await this.log(actor, 'platform.tenant.created', tenant.id, { slug: dto.slug, name: dto.name, directorId: director.id });
     await this.sms.send(phone, `Votre espace ${tenant.shortName ?? tenant.name} est prêt : ${tenantOrigin(tenant)}/connexion. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Changez-le à la première connexion.`);
@@ -212,6 +223,11 @@ export class PlatformService {
       },
     });
     if (dto.status) forgetSessions({ tenantId: id });
+    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
+    if (Object.keys(visible).length) {
+      const action = visible.status ? `platform.tenant.${visible.status === 'SUSPENDED' ? 'suspended' : 'reactivated'}` : 'platform.tenant.updated';
+      await this.db.inTenant(id, (tx) => this.schoolLog(tx, actor, id, action, 'Tenant', id, visible));
+    }
     await this.log(actor, dto.status && dto.status !== t.status ? `platform.tenant.${dto.status === 'SUSPENDED' ? 'suspended' : 'reactivated'}` : 'platform.tenant.updated', id, dto);
     return updated;
   }
@@ -227,6 +243,7 @@ export class PlatformService {
       await tx.user.update({ where: { id: u.id }, data: { passwordHash: await hashPassword(password), mustChangePassword: true, failedLogins: 0, lockedUntil: null } });
       await tx.session.updateMany({ where: { userId: u.id, revokedAt: null }, data: { revokedAt: new Date() } });
       forgetSessions({ userId: u.id });
+      await this.schoolLog(tx, actor, id, 'platform.director_reset', 'User', u.id, { name: `${u.firstName} ${u.lastName}` });
       return u;
     });
     await this.log(actor, 'platform.tenant.director_reset', id, { userId: user.id });
