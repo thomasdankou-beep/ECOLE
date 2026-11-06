@@ -15,6 +15,9 @@
 		on_demand
 	}
 	encode zstd gzip
+	# SEC-047 : le navigateur n'utilise plus que le HTTPS pendant un an (ignoré par les navigateurs tant que
+	# le site est en http). « ? » : l'API pose déjà le sien (helmet), il n'est pas doublé.
+	header ?Strict-Transport-Security "max-age=31536000"
 	handle /api/* {
 		reverse_proxy api:4000
 	}

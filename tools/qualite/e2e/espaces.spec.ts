@@ -106,3 +106,25 @@ test('pages publiques : accueil et pré-inscription', async ({ page }) => {
   await page.goto('/preinscription');
   await expect(page.getByRole('button', { name: /Envoyer/ })).toBeVisible();
 });
+
+test('politique de contenu (SEC-047) : en-tête présent et aucune page ne la dépasse', async ({ page }) => {
+  const ecarts: string[] = [];
+  page.on('console', (m) => { if (/Content Security Policy|Content-Security-Policy/i.test(m.text())) ecarts.push(m.text()); });
+  const r = await page.goto('/');
+  expect(r?.headers()['content-security-policy-report-only']).toContain("default-src 'self'");
+  await page.goto('/preinscription');
+  await connexion(page, COMPTES.direction);
+  for (const p of ['/espace', '/espace/eleves', '/espace/audit', '/espace/parametres', '/espace/emploi-du-temps']) {
+    await page.goto(p);
+    await page.getByRole('heading').first().waitFor();
+    await page.waitForTimeout(500);
+  }
+  expect(ecarts).toEqual([]);
+});
+
+test('documentation de l’API fermée en production (SEC-045)', async ({ request }) => {
+  // Caddy envoie /api/* à l'API : c'est donc l'API qui doit répondre 404.
+  const api = process.env.API_URL ?? 'http://localhost:4000';
+  expect((await request.get(`${api}/api/docs`)).status()).toBe(404);
+  expect((await request.get(`${api}/api/v1/public/saint-kisito`)).status()).toBe(200);
+});

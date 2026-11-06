@@ -92,6 +92,7 @@ jobs:
           SMS_PROVIDER: console
           CLAMAV_HOST: ''
           ENFORCE_2FA: 'false'
+          API_DOCS: 'false'
         run: |
           # Jeu de démonstration remis à neuf après les tests de l'API (base de test seulement).
           (cd apps/api && DATABASE_ADMIN_URL=$DB_OWNER NODE_ENV=development npx ts-node --transpile-only prisma/seed.ts)

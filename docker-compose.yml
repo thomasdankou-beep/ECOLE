@@ -60,6 +60,8 @@ services:
       SMS_PROVIDER: ${SMS_PROVIDER:-console}
       # SEC-044 : texte des SMS « console » dans les journaux, poste de démonstration seulement.
       SMS_CONSOLE_SHOW_TEXT: ${SMS_CONSOLE_SHOW_TEXT:-false}
+      # SEC-045 : documentation /api/docs, fermée en production sauf API_DOCS=true.
+      API_DOCS: ${API_DOCS:-false}
       TENANT_SLUG: ${TENANT_SLUG-saint-kisito}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
       # SEC-038 : true sur le serveur (posé par installer-serveur.sh) ; le jeu de démonstration y est refusé.

@@ -80,7 +80,7 @@ docker compose exec api npm run db:seed   # données de démonstration, poste de
 
 Pour arrêter : `docker compose down` (les données sont conservées).
 
-Le site est sur http://localhost:8080. La documentation de l’API (OpenAPI) est sur http://localhost:8080/api/docs.
+Le site est sur http://localhost:8080. La documentation de l’API (OpenAPI) est sur http://localhost:8080/api/docs après avoir mis `API_DOCS=true` dans `.env` ; elle est fermée par défaut en production (SEC-045). En développement (`npm run dev:api`), elle est sur http://localhost:4000/api/docs.
 
 Pour la production : renseignez `SITE_ADDRESS` avec le nom de domaine (HTTPS automatique par Caddy), `WEB_ORIGIN` avec l’adresse publique, `COOKIE_SECURE=true` `SHOW_DEMO_ACCOUNTS=false` et `PRODUCTION_SERVER=true` (posé par `installer-serveur.sh`). Ne lancez jamais le jeu de démonstration sur le serveur : il refuse d’effacer une école qui n’est pas marquée « démonstration », et refuse de tourner quand `PRODUCTION_SERVER=true` (SEC-038).
 
