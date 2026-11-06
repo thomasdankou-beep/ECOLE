@@ -17,6 +17,7 @@ const FIELD: Record<string, string> = {
   firstName: 'prénom', lastName: 'nom', phone: 'téléphone', email: 'e-mail', status: 'statut', roles: 'rôles', amount: 'montant',
   name: 'nom', dueDate: 'échéance', coefficient: 'coefficient', birthDate: 'naissance', birthPlace: 'lieu de naissance', allergies: 'allergies',
   sex: 'sexe', content: 'contenu', title: 'titre', weight: 'poids', maxScore: 'barème', reason: 'motif', identifier: 'identifiant', route: 'page',
+  userAgent: 'appareil', role: 'rôle', userId: 'filtre personne', action: 'filtre action', from: 'du', to: 'au', lignes: 'lignes', count: 'notes saisies',
 };
 
 const show = (v: unknown) => (v === null || v === undefined || v === '' ? '∅' : Array.isArray(v) ? v.join(', ') : typeof v === 'object' ? JSON.stringify(v) : String(v));
