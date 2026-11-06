@@ -38,7 +38,7 @@ Un seul serveur sert toutes les écoles clientes. Chaque école a sa propre adre
 1. Dans `.env` : `PLATFORM_DOMAIN=` le domaine de la plateforme, `SITE_ADDRESS=https://`, `TENANT_SLUG=` vide, `SHOW_DEMO_ACCOUNTS=false`. Le DNS doit envoyer `*.<domaine>` vers le serveur ; Caddy obtient un certificat HTTPS pour chaque école réelle, et seulement pour elles.
 2. Créer le premier compte Super Admin (le mot de passe provisoire s’affiche une seule fois) :
    `docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`
-3. Se connecter sur `https://<domaine>/plateforme/connexion`, choisir son mot de passe, puis « Nouvelle école ». Le chef d’établissement reçoit son mot de passe provisoire par SMS et l’écran l’affiche une fois.
+3. Se connecter sur `https://<domaine>/plateforme/connexion`, choisir son mot de passe, puis « Nouvelle école ». Le chef d’établissement reçoit son mot de passe provisoire par SMS et l’écran l’affiche une fois. Tant qu’aucun fournisseur SMS n’est branché, aucun SMS ne part : notez le mot de passe affiché à l’écran. Les journaux du serveur n’écrivent jamais le texte des SMS, donc ni les mots de passe ni les codes (SEC-044).
 
 Sans `PLATFORM_DOMAIN`, l’installation sert une seule école (`TENANT_SLUG`), comme avant. Le domaine de la plateforme et la tarification des abonnements restent à décider (voir INFORMATION MANQUANTE).
 

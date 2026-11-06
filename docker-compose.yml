@@ -1,7 +1,14 @@
 # Lancement complet en local ou sur un serveur : docker compose up -d --build
 # Copiez d'abord .env.docker.example en .env et remplissez les secrets.
+# SEC-048 : journaux de chaque service limités à 5 fichiers de 10 Mo (le journal d'audit, lui, est dans la base).
+x-journaux: &journaux
+  logging:
+    driver: json-file
+    options: { max-size: 10m, max-file: "5" }
+
 services:
   postgres:
+    <<: *journaux
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -18,12 +25,14 @@ services:
       retries: 20
 
   redis:
+    <<: *journaux
     image: redis:7-alpine
     restart: unless-stopped
     volumes:
       - redisdata:/data
 
   api:
+    <<: *journaux
     build: { context: ., dockerfile: apps/api/Dockerfile }
     restart: unless-stopped
     depends_on:
@@ -49,6 +58,8 @@ services:
       CINETPAY_SITE_ID: ${CINETPAY_SITE_ID:-}
       CINETPAY_SECRET_KEY: ${CINETPAY_SECRET_KEY:-}
       SMS_PROVIDER: ${SMS_PROVIDER:-console}
+      # SEC-044 : texte des SMS « console » dans les journaux, poste de démonstration seulement.
+      SMS_CONSOLE_SHOW_TEXT: ${SMS_CONSOLE_SHOW_TEXT:-false}
       TENANT_SLUG: ${TENANT_SLUG-saint-kisito}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
       # SEC-038 : true sur le serveur (posé par installer-serveur.sh) ; le jeu de démonstration y est refusé.
@@ -64,12 +75,14 @@ services:
   # Antivirus ClamAV (SEC-026) : signatures mises à jour automatiquement plusieurs fois par jour.
   # Environ 1 à 1,5 Go de mémoire ; 1 à 2 minutes au premier démarrage pour télécharger les signatures.
   clamav:
+    <<: *journaux
     image: clamav/clamav:1.4
     restart: unless-stopped
     volumes:
       - clamavdb:/var/lib/clamav
 
   web:
+    <<: *journaux
     build:
       context: .
       dockerfile: apps/web/Dockerfile
@@ -81,6 +94,7 @@ services:
     depends_on: [api]
 
   caddy:
+    <<: *journaux
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on: [web, api]
