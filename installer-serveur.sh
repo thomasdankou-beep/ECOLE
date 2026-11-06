@@ -66,6 +66,8 @@ for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASS
   setkv "$k" "$v"
   echo "Secret $k généré."
 done
+# SEC-038 : ce serveur héberge de vraies écoles ; le jeu de démonstration y est refusé. Ajoutée une seule fois.
+if ! grep -q "^PRODUCTION_SERVER=" .env; then setkv PRODUCTION_SERVER true; echo "Serveur marqué production : données de démonstration interdites (PRODUCTION_SERVER=true)."; fi
 chmod 600 .env
 
 if [ -n "$domaine" ]; then

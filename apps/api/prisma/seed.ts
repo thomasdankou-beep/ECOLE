@@ -5,13 +5,16 @@
  * coordonnées et pièces à fournir (fiche de renseignement, chargée depuis data/ecoles/saint-kisito-2026-2027.json).
  * FICTIF : toutes les personnes, notes, absences, factures et paiements, coefficients (INFORMATION MANQUANTE).
  *
- * Usage : npm run db:seed (réinitialise l'établissement « saint-kisito »).
+ * Usage : npm run db:seed (réinitialise l'établissement de démonstration « saint-kisito »).
+ * Refuse d'effacer une école qui n'est pas marquée « démonstration », et de tourner sur un serveur
+ * de production (SEC-038, voir src/common/demo-seed-guard.ts).
  */
 import { AssessmentKind, Cycle, PrismaClient, RoleCode } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { randomBytes } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { demoSeedRefusal, isDemoTenant } from '../src/common/demo-seed-guard';
 import { applySchoolData, SchoolData } from '../src/modules/settings/school-data';
 
 const SCHOOL_DATA = JSON.parse(readFileSync(join(__dirname, '..', 'data', 'ecoles', 'saint-kisito-2026-2027.json'), 'utf8')) as SchoolData;
@@ -29,6 +32,12 @@ async function main() {
   const existing = await db.tenant.findUnique({ where: { slug: SLUG } });
   if (existing && process.env.SEED_IF_EMPTY === '1') {
     console.log('Données déjà présentes, jeu de démonstration non rechargé.');
+    return;
+  }
+  const refusal = demoSeedRefusal(existing, process.env);
+  if (refusal) {
+    console.error(`Jeu de démonstration refusé (SEC-038). ${refusal}`);
+    process.exitCode = 2;
     return;
   }
   if (existing) {
@@ -285,6 +294,9 @@ function settings() {
 
 /** Supprime les données de l'établissement de démonstration avant de le recréer. */
 async function wipe(tenantId: string) {
+  // Seconde vérification au plus près de l'effacement (SEC-038).
+  const t = await db.tenant.findUnique({ where: { id: tenantId }, select: { slug: true, settings: true } });
+  if (!isDemoTenant(t)) throw new Error(`Effacement refusé : « ${t?.slug ?? tenantId} » n'est pas une école de démonstration (SEC-038).`);
   await db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
     // Les déclencheurs « ajout seul » protègent reçus, paiements, notes et audit : suspendus le temps du nettoyage de la démo seulement.

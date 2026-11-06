@@ -51,6 +51,9 @@ services:
       SMS_PROVIDER: ${SMS_PROVIDER:-console}
       TENANT_SLUG: ${TENANT_SLUG-saint-kisito}
       PLATFORM_DOMAIN: ${PLATFORM_DOMAIN:-}
+      # SEC-038 : true sur le serveur (posé par installer-serveur.sh) ; le jeu de démonstration y est refusé.
+      PRODUCTION_SERVER: ${PRODUCTION_SERVER:-false}
+      ALLOW_DEMO_RESET: ${ALLOW_DEMO_RESET:-}
       STORAGE_DIR: /repo/apps/api/storage
       # Antivirus (SEC-026) : chaque fichier envoyé est analysé par le service « clamav » avant d'être enregistré.
       # Si l'antivirus ne répond pas, l'envoi est refusé. Vide : pas d'analyse (déconseillé en production).

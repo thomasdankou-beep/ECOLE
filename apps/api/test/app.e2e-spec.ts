@@ -1571,3 +1571,45 @@ describe("Sécurité v1.1, étape 5 : page du journal et journal Super Admin (SE
     expect(unknown).toMatchObject({ ip: '198.51.100.9', data: { identifier: 'in•••@test.local' } });
   });
 });
+
+describe("Sécurité v1.1, étape 6 : le jeu de démonstration n'efface jamais une vraie école (SEC-038)", () => {
+  const seed = (env: Record<string, string> = {}) => {
+    try {
+      execSync('npx ts-node --transpile-only prisma/seed.ts', { env: { ...process.env, ...env }, stdio: 'pipe', cwd: `${__dirname}/..` });
+      return { code: 0, err: '' };
+    } catch (e: any) {
+      return { code: e.status as number, err: String(e.stderr ?? '') };
+    }
+  };
+  const snapshot = async (tenantId: string) =>
+    admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      const [students, audit, receipts, grades] = await Promise.all([tx.student.count(), tx.auditLog.count(), tx.receipt.count(), tx.grade.count()]);
+      return { students, audit, receipts, grades };
+    });
+
+  it("refuse d'effacer une école sans la marque « démonstration », même avec ALLOW_DEMO_RESET=1", async () => {
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const before = await snapshot(t.id);
+    expect(before.students).toBeGreaterThan(0);
+    await admin.tenant.update({ where: { id: t.id }, data: { settings: { ...(t.settings as object), demo: false } } });
+    try {
+      const r = seed({ ALLOW_DEMO_RESET: '1' });
+      expect(r.code).toBe(2);
+      expect(r.err).toContain("n'est pas une école de démonstration");
+      expect(await snapshot(t.id)).toEqual(before);
+      expect((await admin.tenant.findUniqueOrThrow({ where: { id: t.id } })).settings).toMatchObject({ demo: false });
+    } finally {
+      await admin.tenant.update({ where: { id: t.id }, data: { settings: t.settings as object } });
+    }
+  }, 120000);
+
+  it('refuse de tourner sur un serveur de production (PRODUCTION_SERVER=true) sans autorisation écrite', async () => {
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const before = await snapshot(t.id);
+    const r = seed({ PRODUCTION_SERVER: 'true' });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('Serveur de production');
+    expect(await snapshot(t.id)).toEqual(before);
+  }, 120000);
+});

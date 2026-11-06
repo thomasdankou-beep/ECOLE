@@ -75,14 +75,14 @@ Lancement manuel, si vous préférez :
 ```bash
 cp .env.docker.example .env      # puis remplir les secrets (openssl rand -base64 48)
 docker compose up -d --build
-docker compose exec api npm run db:seed   # données de démonstration (facultatif)
+docker compose exec api npm run db:seed   # données de démonstration, poste de test uniquement (efface l'école de démonstration)
 ```
 
 Pour arrêter : `docker compose down` (les données sont conservées).
 
 Le site est sur http://localhost:8080. La documentation de l’API (OpenAPI) est sur http://localhost:8080/api/docs.
 
-Pour la production : renseignez `SITE_ADDRESS` avec le nom de domaine (HTTPS automatique par Caddy), `WEB_ORIGIN` avec l’adresse publique, `COOKIE_SECURE=true` et `SHOW_DEMO_ACCOUNTS=false`, et ne lancez pas le jeu de démonstration.
+Pour la production : renseignez `SITE_ADDRESS` avec le nom de domaine (HTTPS automatique par Caddy), `WEB_ORIGIN` avec l’adresse publique, `COOKIE_SECURE=true` `SHOW_DEMO_ACCOUNTS=false` et `PRODUCTION_SERVER=true` (posé par `installer-serveur.sh`). Ne lancez jamais le jeu de démonstration sur le serveur : il refuse d’effacer une école qui n’est pas marquée « démonstration », et refuse de tourner quand `PRODUCTION_SERVER=true` (SEC-038).
 
 ### Comptes de démonstration (données fictives)
 
