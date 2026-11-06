@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Pencil, Plus, Trash2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ImageUp, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, Table, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
@@ -19,7 +19,7 @@ type Settings = {
   tenant: { name: string; shortName: string | null; identity: SchoolIdentity; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
-  sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean }[];
+  sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean; photoUrl: string | null }[];
   levels: { id: string; name: string; cycle: string; position: number }[];
   tracks: { id: string; code: string; name: string; cycle: string }[];
   rooms: { id: string; name: string; siteId: string; kind: RoomKind; capacity: number | null }[];
@@ -200,11 +200,14 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Section title="Sites">
-        <p className="mb-2 text-sm text-muted">Les sites actifs sont affichés sur la page d’accueil publique de l’école.</p>
+        <p className="mb-2 text-sm text-muted">Les sites actifs sont affichés sur la page d’accueil publique de l’école, avec leur photo s’il y en a une.</p>
         <ul className="mb-3 grid gap-1.5">{s.sites.map((x) => (
-          <li key={x.id} className="flex items-start justify-between gap-2 rounded-lg bg-sunk px-3 py-2">
-            <span><b>{x.name}</b>{!x.active && <Badge className="ml-2">Inactif</Badge>}<span className="block text-sm text-muted">{x.address}{x.phone ? ` · ${x.phone}` : ''}</span></span>
-            <Button size="sm" variant="ghost" onClick={() => setEdit({ kind: 'site', id: x.id, name: x.name, address: x.address ?? '', phone: x.phone ?? '', active: x.active })}>Modifier</Button>
+          <li key={x.id} className="grid gap-2 rounded-lg bg-sunk px-3 py-2">
+            <div className="flex items-start justify-between gap-2">
+              <span><b>{x.name}</b>{!x.active && <Badge className="ml-2">Inactif</Badge>}<span className="block text-sm text-muted">{x.address}{x.phone ? ` · ${x.phone}` : ''}</span></span>
+              <Button size="sm" variant="ghost" onClick={() => setEdit({ kind: 'site', id: x.id, name: x.name, address: x.address ?? '', phone: x.phone ?? '', active: x.active })}>Modifier</Button>
+            </div>
+            <SitePhoto site={x} onChange={reload} />
           </li>
         ))}</ul>
         <form className="grid gap-2" onSubmit={(e) => { e.preventDefault(); post('/sites', { name: site.name, address: site.address || undefined, phone: site.phone || undefined }, 'Site ajouté', () => setSite({ name: '', address: '', phone: '' })); }}>
@@ -259,6 +262,30 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
       <Dialog open={!!edit} onOpenChange={(o) => !o && setEdit(null)}>
         {edit && <RefDialog edit={edit} setEdit={setEdit} sites={s.sites} done={() => { setEdit(null); reload(); }} />}
       </Dialog>
+    </div>
+  );
+}
+
+/** Photo d'un site (bâtiment, entrée…) affichée sur sa carte en page d'accueil. */
+function SitePhoto({ site, onChange }: { site: Settings['sites'][number]; onChange: () => void }) {
+  const toast = useToast();
+  const { busy, run } = useAction();
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <div className="flex items-center gap-3">
+      {site.photoUrl
+        ? <img src={site.photoUrl} alt={`Photo du site ${site.name}`} className="h-16 w-24 flex-none rounded object-cover" />
+        : <span className="grid h-16 w-24 flex-none place-items-center rounded bg-white text-center text-xs text-muted">Aucune photo</span>}
+      <input ref={input} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={async (e) => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        const body = new FormData();
+        body.append('file', file);
+        if (await run(() => api.post(`/sites/${site.id}/photo`, body), toast, 'Photo du site enregistrée')) onChange();
+      }} />
+      <Button type="button" size="sm" variant="outline" loading={busy} onClick={() => input.current?.click()}><ImageUp className="size-4" /> {site.photoUrl ? 'Remplacer la photo' : 'Ajouter une photo'}</Button>
+      {site.photoUrl && <Button type="button" size="sm" variant="ghost" aria-label={`Retirer la photo du site ${site.name}`} onClick={async () => { if (await run(() => api.del(`/sites/${site.id}/photo`), toast, 'Photo du site retirée')) onChange(); }}><Trash2 className="size-4" /></Button>}
     </div>
   );
 }

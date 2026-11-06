@@ -9,7 +9,7 @@ import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { logoUrl, tenantSettings } from '../settings/settings.service';
+import { logoUrl, sitePhotoUrl, tenantSettings } from '../settings/settings.service';
 import { HonorsService } from './honors';
 
 class AnnouncementDto {
@@ -91,7 +91,8 @@ export class PublicService {
     if (t.status === 'SUSPENDED') return { name: t.name, shortName: t.shortName, suspended: true, branding };
     return this.db.forTenant(t.id, async (tx) => {
       const [sites, tracks, levels, honors] = await Promise.all([
-        tx.site.findMany({ where: { active: true }, select: { id: true, name: true, address: true, phone: true }, orderBy: { name: 'asc' } }),
+        tx.site.findMany({ where: { active: true }, select: { id: true, name: true, address: true, phone: true, photoKey: true }, orderBy: { name: 'asc' } })
+          .then((rows) => rows.map(({ photoKey, ...x }) => ({ ...x, photoUrl: photoKey ? sitePhotoUrl(slug, x.id, photoKey) : null }))),
         tx.track.findMany({ select: { code: true, name: true, cycle: true }, orderBy: { name: 'asc' } }),
         tx.level.findMany({ select: { name: true, cycle: true }, orderBy: { position: 'asc' } }),
         HonorsService.publicList(tx, slug),

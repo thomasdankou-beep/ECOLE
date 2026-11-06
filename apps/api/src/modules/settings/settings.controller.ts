@@ -1,8 +1,9 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { MAX_UPLOAD_BYTES } from '../files/files.service';
-import { Actor, Can, CurrentActor } from '../../common/auth';
+import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import {
   AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, RoomUpdateDto,
   SiteDto, StaffDto, StaffUpdateDto, SubjectDto, SubjectUpdateDto, TenantSettingsDto, TrackDto, TrackUpdateDto,
@@ -45,6 +46,24 @@ export class SettingsController {
 
   @Patch('sites/:id') @Can('settings.manage')
   updateSite(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: SiteDto) { return this.s.updateSite(a, id, dto); }
+
+  @Post('sites/:id/photo') @Can('settings.manage')
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
+  setSitePhoto(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) { return this.s.setSitePhoto(a, id, file); }
+
+  @Delete('sites/:id/photo') @Can('settings.manage')
+  removeSitePhoto(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.setSitePhoto(a, id); }
+
+  @Public()
+  @Get('public/:tenant/sites/:id/photo')
+  async publicSitePhoto(@Param('tenant') tenant: string, @Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
+    const f = await this.s.publicSitePhoto(tenant, id);
+    res.setHeader('Content-Type', f.mime);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(f.buffer);
+  }
 
   @Post('academic-years') @Can('settings.manage')
   createYear(@CurrentActor() a: Actor, @Body() dto: AcademicYearDto) { return this.s.createYear(a, dto); }

@@ -624,6 +624,30 @@ describe("Élèves à l'honneur sur le site public", () => {
   });
 });
 
+describe("Photo de chaque site sur la page d'accueil", () => {
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+
+  it("la direction envoie, remplace et retire la photo d'un site ; l'accueil public l'affiche", async () => {
+    const site = (await http.get('/api/v1/public/saint-kisito')).body.sites[0];
+    expect(site.photoUrl).toBeNull();
+    expect(JSON.stringify(site)).not.toContain('photoKey');
+    const send = (role: 'direction' | 'secretariat', type = 'image/png') =>
+      http.post(`/api/v1/sites/${site.id}/photo`).set('Authorization', `Bearer ${tokens[role]}`).attach('file', PNG, { filename: 'site.png', contentType: type });
+    expect((await send('secretariat')).status).toBe(403);
+    expect((await send('direction', 'application/pdf')).status).toBe(400);
+    expect((await send('direction')).status).toBe(201);
+    const url = (await http.get('/api/v1/public/saint-kisito')).body.sites.find((x: { id: string }) => x.id === site.id).photoUrl;
+    expect(url).toMatch(new RegExp(`^/api/v1/public/saint-kisito/sites/${site.id}/photo\\?v=`));
+    const photo = await http.get(url);
+    expect(photo.status).toBe(200);
+    expect(photo.headers['content-type']).toContain('image/png');
+    expect((await as('direction').get('/settings')).body.sites.find((x: { id: string }) => x.id === site.id).photoUrl).toBe(url);
+    await as('direction').del(`/sites/${site.id}/photo`).expect(200);
+    expect((await http.get('/api/v1/public/saint-kisito')).body.sites.find((x: { id: string }) => x.id === site.id).photoUrl).toBeNull();
+    expect((await http.get(`/api/v1/public/saint-kisito/sites/${site.id}/photo`)).status).toBe(404);
+  });
+});
+
 describe("Photo et pièces du dossier de l'élève", () => {
   const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
   const PDF = Buffer.from('%PDF-1.4\n%test\n');

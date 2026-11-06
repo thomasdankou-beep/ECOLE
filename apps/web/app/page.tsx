@@ -328,14 +328,17 @@ export default function Home() {
           <h2 className="mt-2 text-4xl font-bold sm:text-5xl">{sites.length === 1 ? 'Notre site' : 'Nos sites'}</h2>
           <div className="mt-8 grid gap-5 sm:grid-cols-2">
             {sites.map((site) => (
-              <div key={site.id} className="flex gap-4 rounded-3xl bg-surface p-6 ring-1 ring-line">
-                <span className="grid size-12 flex-none place-items-center rounded-2xl bg-brand-soft text-brand"><MapPin className="size-6" /></span>
-                <div className="min-w-0">
-                  <h3 className="text-2xl font-bold text-brand">{site.name}</h3>
-                  {site.address && <p className="mt-1 text-muted">{site.address}</p>}
-                  {site.phone && (
-                    <a href={telHref(site.phone, s?.country)} className="mt-2 inline-flex items-center gap-2 font-bold hover:underline"><Phone className="size-4 text-good" /> {site.phone}</a>
-                  )}
+              <div key={site.id} className="overflow-hidden rounded-3xl bg-surface ring-1 ring-line">
+                {site.photoUrl && <img src={site.photoUrl} alt={`Le site de ${site.name}`} width={1200} height={675} loading="lazy" decoding="async" className="aspect-video w-full object-cover" />}
+                <div className="flex gap-4 p-6">
+                  <span className="grid size-12 flex-none place-items-center rounded-2xl bg-brand-soft text-brand"><MapPin className="size-6" /></span>
+                  <div className="min-w-0">
+                    <h3 className="text-2xl font-bold text-brand">{site.name}</h3>
+                    {site.address && <p className="mt-1 text-muted">{site.address}</p>}
+                    {site.phone && (
+                      <a href={telHref(site.phone, s?.country)} className="mt-2 inline-flex items-center gap-2 font-bold hover:underline"><Phone className="size-4 text-good" /> {site.phone}</a>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

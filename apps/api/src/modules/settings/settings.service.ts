@@ -66,6 +66,9 @@ export function tenantSettings(raw: unknown): typeof DEFAULT_SETTINGS {
   };
 }
 
+/** Adresse publique de la photo d'un site ; la fin de la clé change à chaque envoi, ce qui renouvelle le cache. */
+export const sitePhotoUrl = (slug: string, id: string, key: string) => `/api/v1/public/${slug}/sites/${id}/photo?v=${key.split('/').pop()!.slice(0, 8)}`;
+
 /** Adresse publique du logo : celui envoyé par la direction, sinon celui de l'installation, sinon aucun. */
 export function logoUrl(tenant: { slug?: string; settings: unknown }) {
   const b = tenantSettings(tenant.settings).branding;
@@ -129,9 +132,10 @@ export class SettingsService {
   /** Référentiel complet pour les écrans de paramétrage et les listes déroulantes. */
   overview(actor: Actor) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      const actorSlug = (await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { slug: true } })).slug;
       const year = await tx.academicYear.findFirst({ where: { isCurrent: true }, include: { terms: { orderBy: { position: 'asc' } } } });
       const [sites, years, levels, tracks, rooms, subjects, tenant] = await Promise.all([
-        tx.site.findMany({ orderBy: { name: 'asc' } }),
+        tx.site.findMany({ orderBy: { name: 'asc' } }).then((rows) => rows.map(({ photoKey, ...x }) => ({ ...x, photoUrl: photoKey ? sitePhotoUrl(actorSlug, x.id, photoKey) : null }))),
         tx.academicYear.findMany({ orderBy: { startDate: 'desc' }, include: { terms: { orderBy: { position: 'asc' } } } }),
         tx.level.findMany({ orderBy: { position: 'asc' } }),
         tx.track.findMany({ orderBy: { name: 'asc' } }),
@@ -210,6 +214,25 @@ export class SettingsService {
       await this.audit.log(tx, actor, 'site.updated', 'Site', id, dto);
       return site;
     });
+  }
+
+  setSitePhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une photo (JPEG, PNG ou WebP)');
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const photoKey = file ? await this.files.save(actor.tenantId, 'sites', file) : null;
+      const site = await tx.site.update({ where: { id }, data: { photoKey } });
+      await this.audit.log(tx, actor, file ? 'site.photo_set' : 'site.photo_removed', 'Site', id);
+      return { id: site.id, hasPhoto: !!site.photoKey };
+    });
+  }
+
+  /** Photo d'un site pour la page d'accueil publique : seulement un site actif d'une école active. */
+  async publicSitePhoto(slug: string, id: string) {
+    const t = await this.db.tenant.findUnique({ where: { slug } });
+    if (!t || t.status === 'SUSPENDED') throw new NotFoundException();
+    const site = await this.db.forTenant(t.id, (tx) => tx.site.findUnique({ where: { id } }));
+    if (!site?.photoKey || !site.active) throw new NotFoundException('Aucune photo');
+    return this.files.readKey(site.photoKey);
   }
 
   // ------------------------------------------------------------ Années et périodes

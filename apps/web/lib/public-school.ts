@@ -22,7 +22,7 @@ export type PublicSchool = {
   };
   /// Élèves mis à l'honneur par la direction, avec l'accord des parents.
   honors?: { id: string; displayName: string; className: string; term: string; distinction: string | null; average: number | null; photoUrl: string | null }[];
-  sites: { id: string; name: string; address: string | null; phone: string | null }[];
+  sites: { id: string; name: string; address: string | null; phone: string | null; photoUrl?: string | null }[];
   tracks: { code: string; name: string; cycle: string }[];
   levels: { name: string; cycle: string }[];
 };
