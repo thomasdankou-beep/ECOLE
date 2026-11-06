@@ -7,7 +7,7 @@ import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Fi
 import { ApiError } from '@/lib/api';
 import { pf } from '@/lib/platform';
 
-type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; platformDomain: string | null };
+type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; platformDomain: string | null };
 type Tenant = {
   id: string; slug: string; name: string; shortName: string | null; country: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
   platformNotes: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
@@ -20,6 +20,8 @@ const ACTIONS: Record<string, string> = {
   'platform.auth.password_changed': 'Mot de passe changé', 'platform.tenant.created': 'École créée', 'platform.tenant.updated': 'École modifiée',
   'platform.tenant.suspended': 'École suspendue', 'platform.tenant.reactivated': 'École réactivée', 'platform.tenant.director_reset': 'Mot de passe Direction remis',
   'platform.admin.created_cli': 'Compte Super Admin créé', 'platform.admin.reset_cli': 'Mot de passe Super Admin remis',
+  'platform.auth.logout': 'Déconnexion', 'platform.auth.2fa_failed': 'Code de double authentification incorrect',
+  'platform.auth.2fa_enabled': 'Double authentification activée', 'platform.auth.2fa_reset': 'Double authentification reconfigurée',
 };
 const when = (d: string | null) => (d ? new Date(d).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '—');
 
@@ -39,8 +41,47 @@ export default function Plateforme() {
           <Button variant="ghost" size="sm" onClick={async () => { await pf('POST', '/auth/logout'); router.replace('/plateforme/connexion'); }}><LogOut className="size-4" /> Se déconnecter</Button>
         </span>
       </header>
-      {admin.mustChangePassword ? <ChangePassword done={() => setAdmin({ ...admin, mustChangePassword: false })} /> : <Schools admin={admin} />}
+      {admin.mustChangePassword ? <ChangePassword done={() => setAdmin({ ...admin, mustChangePassword: false })} /> : (
+        <>
+          {!admin.totpEnabled && <TwoFactor done={() => setAdmin({ ...admin, totpEnabled: true })} />}
+          <Schools admin={admin} />
+        </>
+      )}
     </div>
+  );
+}
+
+/** Double authentification du Super Admin (SEC-021) : proposée tant qu'elle n'est pas active. */
+function TwoFactor({ done }: { done: () => void }) {
+  const [setup, setSetup] = useState<{ qr: string; secret: string; setupToken: string } | null>(null);
+  const [code, setCode] = useState('');
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const act = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try { await fn(); } catch (err) { setError(err); } finally { setBusy(false); }
+  };
+  return (
+    <Card className="mb-4 grid gap-3 border-warn">
+      <h2 className="flex items-center gap-2 text-lg font-bold"><KeyRound className="size-5" /> Activez la double authentification</h2>
+      {setup ? (
+        <form className="grid max-w-sm gap-3" onSubmit={(e) => { e.preventDefault(); act(async () => { await pf('POST', '/auth/2fa/enable', { code: code.trim(), setupToken: setup.setupToken }); done(); }); }}>
+          <p className="text-sm">Scannez ce QR code avec Google Authenticator ou une application équivalente, puis saisissez le code affiché.</p>
+          <img src={setup.qr} alt="QR code de configuration" className="mx-auto size-44 rounded bg-white p-2" />
+          <p className="break-all text-center font-mono text-xs text-muted">{setup.secret}</p>
+          <Field label="Code à 6 chiffres"><Input inputMode="numeric" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} required className="text-center font-mono text-xl tracking-[0.3em]" /></Field>
+          <ErrorNote error={error} />
+          <Button type="submit" loading={busy}>Activer</Button>
+        </form>
+      ) : (
+        <div className="grid gap-3">
+          <p className="text-muted">Ce compte peut créer, suspendre et réinitialiser toutes les écoles. Avec la double authentification, votre mot de passe seul ne suffit plus : un code de votre téléphone est demandé à chaque connexion.</p>
+          <ErrorNote error={error} />
+          <Button className="justify-self-start" variant="outline" loading={busy} onClick={() => act(async () => setSetup(await pf('POST', '/auth/2fa/setup', {})))}>Configurer</Button>
+        </div>
+      )}
+    </Card>
   );
 }
 

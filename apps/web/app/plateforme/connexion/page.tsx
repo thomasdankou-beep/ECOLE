@@ -10,6 +10,8 @@ export default function PlateformeConnexion() {
   const router = useRouter();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [challenge, setChallenge] = useState<string | null>(null);
+  const [code, setCode] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   return (
@@ -24,7 +26,16 @@ export default function PlateformeConnexion() {
           setBusy(true);
           setError(null);
           try {
-            await pf('POST', '/auth/login', { email: email.trim(), password });
+            if (challenge) {
+              await pf('POST', '/auth/2fa/verify', { challenge, code: code.trim() });
+              return router.replace('/plateforme');
+            }
+            const r = await pf<{ twoFactorRequired?: boolean; challenge?: string }>('POST', '/auth/login', { email: email.trim(), password });
+            if (r.twoFactorRequired && r.challenge) {
+              setChallenge(r.challenge);
+              setPassword('');
+              return;
+            }
             router.replace('/plateforme');
           } catch (err) {
             setError(err);
@@ -33,10 +44,22 @@ export default function PlateformeConnexion() {
           }
         }}>
           <h1 className="text-3xl font-bold">Connexion Super Admin</h1>
-          <Field label="Adresse e-mail"><Input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required /></Field>
-          <Field label="Mot de passe"><Input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></Field>
-          <ErrorNote error={error} />
-          <Button type="submit" loading={busy}>Se connecter</Button>
+          {challenge ? (
+            <>
+              <p className="text-muted">Saisissez le code à 6 chiffres affiché par votre application d’authentification.</p>
+              <Field label="Code"><Input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} required autoFocus className="text-center font-mono text-xl tracking-[0.3em]" /></Field>
+              <ErrorNote error={error} />
+              <Button type="submit" loading={busy}>Valider</Button>
+              <Button type="button" variant="ghost" onClick={() => { setChallenge(null); setCode(''); setError(null); }}>Recommencer</Button>
+            </>
+          ) : (
+            <>
+              <Field label="Adresse e-mail"><Input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required /></Field>
+              <Field label="Mot de passe"><Input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></Field>
+              <ErrorNote error={error} />
+              <Button type="submit" loading={busy}>Se connecter</Button>
+            </>
+          )}
         </form>
       </div>
     </main>

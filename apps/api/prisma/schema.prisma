@@ -59,6 +59,12 @@ model PlatformAdmin {
   /// Mot de passe remis par la ligne de commande : à changer à la première connexion.
   mustChangePassword Boolean @default(true)
   passwordChangedAt  DateTime?
+  /// Double authentification du Super Admin (SEC-021).
+  totpSecret   String?
+  totpEnabled  Boolean   @default(false)
+  totpLastStep Int?
+  /// Déconnexion : tout jeton émis avant cette date est refusé (SEC-021).
+  sessionsRevokedAt DateTime?
   createdAt    DateTime  @default(now())
 
   @@map("platform_admins")
@@ -251,6 +257,8 @@ model User {
   lockedUntil        DateTime?
   totpSecret         String?
   totpEnabled        Boolean    @default(false)
+  /// Pas de temps (30 s) du dernier code accepté : un code ne sert qu'une fois (SEC-022).
+  totpLastStep       Int?
   lastLoginAt        DateTime?
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt

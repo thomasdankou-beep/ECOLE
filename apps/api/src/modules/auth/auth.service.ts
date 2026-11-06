@@ -48,6 +48,25 @@ export function assertPasswordPolicy(pw: string) {
 
 export const hashPassword = (pw: string) => argon2.hash(pw, { type: argon2.argon2id });
 
+/** Message unique d'échec de connexion (SEC-024) : ne dit ni si le compte existe, ni s'il est bloqué. */
+export const LOGIN_FAILED = 'Identifiant ou mot de passe incorrect. Après 5 erreurs, le compte est bloqué 15 minutes.';
+
+/**
+ * Vérifie un code de l'application d'authentification et renvoie son pas de temps (30 s), ou null.
+ * Un code dont le pas a déjà servi est refusé (SEC-022) : un code vu par-dessus l'épaule ne se rejoue pas.
+ */
+export function totpStep(secret: string, code: string, lastStep: number | null | undefined): number | null {
+  const token = code.replace(/\s/g, '');
+  if (!/^\d{6}$/.test(token)) return null;
+  const delta = authenticator.checkDelta(token, secret);
+  if (delta === null) return null;
+  const step = Math.floor(Date.now() / 30000) + delta;
+  return lastStep != null && step <= lastStep ? null : step;
+}
+
+/** Jeton de configuration de la double authentification (SEC-019) : le nouveau secret n'est enregistré qu'avec un code valide. */
+export const TOTP_SETUP_AUDIENCE = '2fa-setup';
+
 @Injectable()
 export class AuthService {
   private sms = createSmsProvider(config.smsProvider);
@@ -85,27 +104,14 @@ export class AuthService {
     const tenant = await this.tenantBySlug(tenantSlug);
     return settle(this.db.forTenant(tenant.id, async (tx) => {
       const user = await this.findByIdentifier(tx, identifier);
-      const fail = new UnauthorizedException('Identifiant ou mot de passe incorrect');
-      if (!user || user.status !== 'ACTIVE') {
+      const fail = new UnauthorizedException(LOGIN_FAILED);
+      // Compte inconnu, désactivé ou bloqué : même calcul et même réponse (SEC-024).
+      if (!user || user.status !== 'ACTIVE' || (user.lockedUntil && user.lockedUntil > new Date())) {
         await argon2.hash(password); // temps constant : ne révèle pas l'existence du compte
         throw fail;
       }
-      if (user.lockedUntil && user.lockedUntil > new Date()) {
-        const min = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
-        throw new ForbiddenException(`Compte bloqué après plusieurs échecs. Réessayez dans ${min} min.`);
-      }
       if (!(await argon2.verify(user.passwordHash, password))) {
-        const failed = user.failedLogins + 1;
-        const lock = failed >= config.security.maxFailedLogins;
-        await tx.user.update({
-          where: { id: user.id },
-          data: {
-            failedLogins: lock ? 0 : failed,
-            // Blocage progressif : 15 min, doublé à chaque nouveau blocage le même jour serait une évolution.
-            lockedUntil: lock ? new Date(Date.now() + config.security.lockMinutes * 60000) : null,
-          },
-        });
-        await this.audit.log(tx, null, lock ? 'auth.locked' : 'auth.failed', 'User', user.id, { tenantId: tenant.id, ip: meta.ip });
+        await this.countFailure(tx, user, tenant.id, meta);
         return new Deferred(fail);
       }
       await tx.user.update({ where: { id: user.id }, data: { failedLogins: 0, lockedUntil: null } });
@@ -120,6 +126,17 @@ export class AuthService {
     }));
   }
 
+  /** Échec de mot de passe ou de code : compté, blocage après 5 échecs (SEC-022 pour les codes). */
+  private async countFailure(tx: Tx, user: User, tenantId: string, meta: SessionMeta, what = 'auth') {
+    const failed = user.failedLogins + 1;
+    const lock = failed >= config.security.maxFailedLogins;
+    await tx.user.update({
+      where: { id: user.id },
+      data: { failedLogins: lock ? 0 : failed, lockedUntil: lock ? new Date(Date.now() + config.security.lockMinutes * 60000) : null },
+    });
+    await this.audit.log(tx, null, lock ? 'auth.locked' : `${what}.failed`, 'User', user.id, { tenantId, ip: meta.ip });
+  }
+
   async verifyTwoFactor(challenge: string, code: string, meta: SessionMeta) {
     let p: { sub: string; tid: string; purpose: string };
     try {
@@ -128,14 +145,19 @@ export class AuthService {
       throw new UnauthorizedException('Délai dépassé, reconnectez-vous');
     }
     if (p.purpose !== '2fa') throw new UnauthorizedException();
-    return this.db.forTenant(p.tid, async (tx) => {
+    return settle(this.db.forTenant(p.tid, async (tx) => {
       const user = await tx.user.findUniqueOrThrow({ where: { id: p.sub }, include: { roles: true } });
-      if (!user.totpSecret || !authenticator.check(code.replace(/\s/g, ''), decrypt(user.totpSecret))) {
-        throw new UnauthorizedException('Code incorrect');
+      const wrong = new UnauthorizedException('Code incorrect. Après 5 erreurs, le compte est bloqué 15 minutes.');
+      if (user.status !== 'ACTIVE' || !user.totpEnabled || !user.totpSecret || (user.lockedUntil && user.lockedUntil > new Date())) throw wrong;
+      const step = totpStep(decrypt(user.totpSecret), code, user.totpLastStep);
+      if (step === null) {
+        await this.countFailure(tx, user, p.tid, meta, 'auth.2fa');
+        return new Deferred(wrong);
       }
+      await tx.user.update({ where: { id: user.id }, data: { totpLastStep: step, failedLogins: 0 } });
       const tokens = await this.openSession(tx, user, meta);
       return { twoFactorRequired: false as const, ...tokens, mustChangePassword: user.mustChangePassword };
-    });
+    }));
   }
 
   private async openSession(tx: Tx, user: User & { roles: { role: any; siteId: string | null }[] }, meta: SessionMeta) {
@@ -191,11 +213,14 @@ export class AuthService {
     }));
   }
 
+  /** Ne révoque que la session dont le cookie est complet et exact (SEC-025). */
   async logout(cookie: string | undefined) {
-    const [tenantId, sessionId] = (cookie ?? '').split('.');
-    if (!tenantId || !sessionId) return;
-    await this.db.forTenant(tenantId, (tx) => tx.session.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: new Date() } }));
-    forgetSessions({ sessionId });
+    const [tenantId, sessionId, token] = (cookie ?? '').split('.');
+    if (!tenantId || !sessionId || !token || !/^[0-9a-f-]{36}$/i.test(tenantId) || !/^[0-9a-f-]{36}$/i.test(sessionId)) return;
+    const r = await this.db.forTenant(tenantId, (tx) =>
+      tx.session.updateMany({ where: { id: sessionId, refreshTokenHash: sha256(token), revokedAt: null }, data: { revokedAt: new Date() } }),
+    );
+    if (r.count) forgetSessions({ sessionId });
   }
 
   /** Déconnexion à distance de tous les appareils (CDC §6.1). */
@@ -314,25 +339,47 @@ export class AuthService {
     }));
   }
 
-  setupTwoFactor(actor: Actor) {
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+  /**
+   * Prépare la double authentification sans toucher au compte (SEC-019) : le nouveau secret part dans un
+   * jeton signé de 10 minutes et n'est enregistré que par enableTwoFactor, avec un code valide.
+   * Si elle est déjà active, le code actuel est exigé pour la reconfigurer.
+   */
+  setupTwoFactor(actor: Actor, currentCode?: string) {
+    return settle(this.db.forTenant(actor.tenantId, async (tx) => {
       const user = await tx.user.findUniqueOrThrow({ where: { id: actor.userId } });
+      const tenant = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { shortName: true, name: true } });
+      if (user.totpEnabled && user.totpSecret) {
+        if (!currentCode) throw new ForbiddenException("La double authentification est déjà active : saisissez le code actuel de votre application pour la reconfigurer");
+        const step = totpStep(decrypt(user.totpSecret), currentCode, user.totpLastStep);
+        if (step === null) {
+          await this.countFailure(tx, user, actor.tenantId, { ip: actor.ip }, 'auth.2fa');
+          return new Deferred(new ForbiddenException('Code actuel incorrect'));
+        }
+        await tx.user.update({ where: { id: user.id }, data: { totpLastStep: step } });
+      }
       const secret = authenticator.generateSecret();
-      await tx.user.update({ where: { id: user.id }, data: { totpSecret: encrypt(secret), totpEnabled: false } });
       const label = user.email ?? user.phone ?? user.id;
-      const otpauth = authenticator.keyuri(label, 'ERP Saint Kisito-GESA', secret);
-      return { otpauth, qr: await QRCode.toDataURL(otpauth), secret };
-    });
+      const otpauth = authenticator.keyuri(label, tenant.shortName ?? tenant.name, secret);
+      const setupToken = this.jwt.sign({ sub: user.id, tid: actor.tenantId, sec: encrypt(secret) }, { secret: config.jwt.accessSecret, audience: TOTP_SETUP_AUDIENCE, expiresIn: 600 });
+      return { otpauth, qr: await QRCode.toDataURL(otpauth), secret, setupToken };
+    }));
   }
 
-  enableTwoFactor(actor: Actor, code: string) {
+  enableTwoFactor(actor: Actor, code: string, setupToken: string) {
+    let p: { sub: string; tid: string; sec: string };
+    try {
+      p = this.jwt.verify(setupToken, { secret: config.jwt.accessSecret, audience: TOTP_SETUP_AUDIENCE });
+    } catch {
+      throw new BadRequestException('Configuration expirée : recommencez en cliquant sur « Configurer »');
+    }
+    if (p.sub !== actor.userId || p.tid !== actor.tenantId) throw new ForbiddenException();
+    const secret = decrypt(p.sec);
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const user = await tx.user.findUniqueOrThrow({ where: { id: actor.userId } });
-      if (!user.totpSecret || !authenticator.check(code.replace(/\s/g, ''), decrypt(user.totpSecret))) {
-        throw new BadRequestException('Code incorrect');
-      }
-      await tx.user.update({ where: { id: user.id }, data: { totpEnabled: true } });
-      await this.audit.log(tx, actor, 'auth.2fa_enabled', 'User', user.id);
+      const step = totpStep(secret, code, null);
+      if (step === null) throw new BadRequestException('Code incorrect');
+      await tx.user.update({ where: { id: user.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step } });
+      await this.audit.log(tx, actor, user.totpEnabled ? 'auth.2fa_reset' : 'auth.2fa_enabled', 'User', user.id);
       return { ok: true };
     });
   }

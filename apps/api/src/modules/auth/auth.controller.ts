@@ -1,10 +1,10 @@
 import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { IsNotEmpty, IsString, Length, MaxLength } from 'class-validator';
+import { IsNotEmpty, IsOptional, IsString, Length, MaxLength } from 'class-validator';
 import type { Request, Response } from 'express';
 import { config } from '../../config';
-import { Actor, CurrentActor, Public } from '../../common/auth';
+import { Actor, AllowPendingPassword, CurrentActor, Public } from '../../common/auth';
 import { AuthService } from './auth.service';
 
 class LoginDto {
@@ -28,8 +28,13 @@ class ResetDto extends ForgotDto {
   @IsString() @Length(6, 6) code: string;
   @IsString() @MaxLength(200) password: string;
 }
-class CodeDto {
+class SetupDto {
+  /** Code actuel, exigé quand la double authentification est déjà active (SEC-019). */
+  @IsOptional() @IsString() @Length(6, 8) code?: string;
+}
+class EnableDto {
   @IsString() @Length(6, 8) code: string;
+  @IsString() @IsNotEmpty() @MaxLength(2000) setupToken: string;
 }
 
 const COOKIE = 'erp_rt';
@@ -99,6 +104,7 @@ export class AuthController {
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Post('logout-all')
   @HttpCode(200)
   logoutAll(@CurrentActor() actor: Actor) {
@@ -106,24 +112,28 @@ export class AuthController {
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Get('me')
   me(@CurrentActor() actor: Actor) {
     return this.auth.me(actor);
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Get('sessions')
   sessions(@CurrentActor() actor: Actor) {
     return this.auth.sessions(actor);
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Delete('sessions/:id')
   revoke(@CurrentActor() actor: Actor, @Param('id', ParseUUIDPipe) id: string) {
     return this.auth.revokeSession(actor, id);
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Post('change-password')
   @HttpCode(200)
   changePassword(@CurrentActor() actor: Actor, @Body() dto: ChangePasswordDto) {
@@ -147,16 +157,20 @@ export class AuthController {
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Post('2fa/setup')
   @HttpCode(200)
-  setup(@CurrentActor() actor: Actor) {
-    return this.auth.setupTwoFactor(actor);
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  setup(@CurrentActor() actor: Actor, @Body() dto: SetupDto) {
+    return this.auth.setupTwoFactor(actor, dto.code);
   }
 
   @ApiBearerAuth()
+  @AllowPendingPassword()
   @Post('2fa/enable')
   @HttpCode(200)
-  enable(@CurrentActor() actor: Actor, @Body() dto: CodeDto) {
-    return this.auth.enableTwoFactor(actor, dto.code);
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  enable(@CurrentActor() actor: Actor, @Body() dto: EnableDto) {
+    return this.auth.enableTwoFactor(actor, dto.code, dto.setupToken);
   }
 }

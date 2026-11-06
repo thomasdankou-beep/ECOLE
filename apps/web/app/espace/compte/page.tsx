@@ -18,7 +18,7 @@ export default function Compte() {
   const toast = useToast();
   const { busy, run } = useAction();
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
-  const [totp, setTotp] = useState<{ qr: string; secret: string } | null>(null);
+  const [totp, setTotp] = useState<{ qr: string; secret: string; setupToken: string } | null>(null);
   const [code, setCode] = useState('');
   const sessions = useApi<{ id: string; userAgent: string | null; ip: string | null; createdAt: string; lastUsedAt: string | null; current?: boolean }[]>('/auth/sessions');
   const [large, setLarge] = useState(() => typeof document !== 'undefined' && document.documentElement.dataset.largeText === 'true');
@@ -43,7 +43,7 @@ export default function Compte() {
         </Section>
         <Section title="Double authentification" action={me?.user.totpEnabled ? <Badge tone="good"><ShieldCheck className="size-3" /> Activée</Badge> : <Badge>Désactivée</Badge>}>
           {me?.user.totpEnabled ? <p className="text-muted">Un code de votre application d’authentification est demandé à chaque connexion.</p> : totp ? (
-            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post('/auth/2fa/enable', { code }), toast, 'Double authentification activée')) { setTotp(null); reload(); } }}>
+            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post('/auth/2fa/enable', { code, setupToken: totp.setupToken }), toast, 'Double authentification activée')) { setTotp(null); reload(); } }}>
               <p className="text-sm">Scannez ce QR code avec Google Authenticator ou une application équivalente, puis saisissez le code affiché.</p>
               <img src={totp.qr} alt="QR code de configuration" className="mx-auto size-44 rounded bg-white p-2" />
               <p className="break-all text-center font-mono text-xs text-muted">{totp.secret}</p>
@@ -53,7 +53,7 @@ export default function Compte() {
           ) : (
             <div className="grid gap-3">
               <p className="text-muted">Recommandée pour la direction et la comptabilité : même avec votre mot de passe, personne ne peut se connecter sans votre téléphone.</p>
-              <Button variant="outline" loading={busy} onClick={async () => { const r = await run(() => api.post<{ qr: string; secret: string }>('/auth/2fa/setup'), toast); if (r) setTotp(r); }}>Configurer</Button>
+              <Button variant="outline" loading={busy} onClick={async () => { const r = await run(() => api.post<{ qr: string; secret: string; setupToken: string }>('/auth/2fa/setup', {}), toast); if (r) setTotp(r); }}>Configurer</Button>
             </div>
           )}
         </Section>

@@ -101,9 +101,17 @@ export function schoolIdentity(tenant: { name: string; slug?: string; settings: 
 }
 
 /** Mot de passe provisoire lisible, à changer à la première connexion. */
+/**
+ * Mot de passe provisoire (SEC-023) : 10 caractères tirés au hasard, au moins une lettre et un chiffre,
+ * sans caractères faciles à confondre dans un SMS (0/O, 1/l/I). Environ 10^17 possibilités.
+ */
+const TEMP_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 export function temporaryPassword() {
-  const words = ['Ecole', 'Savoir', 'Reussir', 'Cahier', 'Classe', 'Lecon'];
-  return `${words[randomInt(words.length)]}${randomInt(1000, 10000)}`;
+  for (;;) {
+    let pw = '';
+    for (let i = 0; i < 10; i++) pw += TEMP_ALPHABET[randomInt(TEMP_ALPHABET.length)];
+    if (/[a-zA-Z]/.test(pw) && /\d/.test(pw)) return pw;
+  }
 }
 
 /** Textes du site public : chaînes et listes courtes uniquement ; les images restent celles fournies avec l'installation. */

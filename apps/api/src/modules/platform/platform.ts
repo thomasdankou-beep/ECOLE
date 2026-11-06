@@ -1,23 +1,30 @@
 import {
-  BadRequestException, Body, CanActivate, ConflictException, Controller, ExecutionContext, Get, Injectable, NotFoundException,
+  BadRequestException, Body, CanActivate, ConflictException, ForbiddenException, Controller, ExecutionContext, Get, Injectable, NotFoundException,
   OnModuleDestroy, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res, UnauthorizedException, UseGuards,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import { authenticator } from 'otplib';
+import * as QRCode from 'qrcode';
 import { Prisma, PrismaClient, TenantStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
-import { IsEmail, IsEnum, IsOptional, IsString, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
-import { forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
+import { ALLOW_PENDING_PASSWORD, AllowPendingPassword, forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
+import { decrypt, encrypt } from '../../common/util';
 import { normalizePhone } from '../../common/util';
 import { config, tenantOrigin } from '../../config';
-import { hashPassword } from '../auth/auth.service';
+import { hashPassword, totpStep, TOTP_SETUP_AUDIENCE } from '../auth/auth.service';
 import { createSmsProvider } from '../notifications/sms.provider';
 import { temporaryPassword } from '../settings/settings.service';
 
 const COOKIE = 'erp_pt';
 const SESSION_HOURS = 8;
+const PLATFORM_2FA_AUDIENCE = 'platform-2fa';
+const LOGIN_FAILED = 'Adresse e-mail ou mot de passe incorrect. Après 5 erreurs, le compte est bloqué 15 minutes.';
 /** Sous-domaines réservés à la plateforme. */
 
 export class DirectorInput {
@@ -53,6 +60,20 @@ export class PlatformLoginDto {
   @IsString() password: string;
 }
 
+export class PlatformTwoFactorDto {
+  @IsString() @IsNotEmpty() @MaxLength(2000) challenge: string;
+  @IsString() @Length(6, 8) code: string;
+}
+
+export class PlatformSetupDto {
+  @IsOptional() @IsString() @Length(6, 8) code?: string;
+}
+
+export class PlatformEnableDto {
+  @IsString() @Length(6, 8) code: string;
+  @IsString() @IsNotEmpty() @MaxLength(2000) setupToken: string;
+}
+
 export class PlatformPasswordDto {
   @IsString() current: string;
   @IsString() @MinLength(12, { message: 'Au moins 12 caractères' }) @MaxLength(200) password: string;
@@ -85,21 +106,28 @@ export class PlatformDb extends PrismaClient implements OnModuleDestroy {
 
 @Injectable()
 export class PlatformGuard implements CanActivate {
-  constructor(private jwt: JwtService, private db: PlatformDb) {}
+  constructor(private jwt: JwtService, private db: PlatformDb, private reflector: Reflector) {}
   async canActivate(ctx: ExecutionContext) {
     const req = ctx.switchToHttp().getRequest();
     const token = req.cookies?.[COOKIE];
     if (!token) throw new UnauthorizedException('Connexion requise');
-    let p: { sub: string; name: string; iat: number };
+    let p: { sub: string; name: string; iat: number; at?: number };
     try {
       p = this.jwt.verify(token, { secret: config.jwt.accessSecret, audience: 'platform' });
     } catch {
       throw new UnauthorizedException('Session expirée');
     }
     // Un compte désactivé ou dont le mot de passe a changé depuis perd sa session immédiatement.
-    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub }, select: { active: true, passwordChangedAt: true } });
-    if (!admin?.active || (admin.passwordChangedAt && admin.passwordChangedAt.getTime() > p.iat * 1000 + 999)) throw new UnauthorizedException('Session expirée');
+    // Une déconnexion refuse tout jeton émis avant elle (SEC-021) ; « at » est l'heure d'émission en millisecondes.
+    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub }, select: { active: true, passwordChangedAt: true, sessionsRevokedAt: true, mustChangePassword: true } });
+    const issuedAt = p.at ?? p.iat * 1000;
+    if (!admin?.active || (admin.passwordChangedAt && admin.passwordChangedAt.getTime() > p.iat * 1000 + 999)
+      || (admin.sessionsRevokedAt && admin.sessionsRevokedAt.getTime() >= issuedAt)) throw new UnauthorizedException('Session expirée');
     req.platformAdmin = { id: p.sub, name: p.name } satisfies PlatformActor;
+    // Mot de passe provisoire : seuls le compte, le changement de mot de passe et la double authentification répondent (SEC-023).
+    if (admin.mustChangePassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, [ctx.getHandler(), ctx.getClass()])) {
+      throw new ForbiddenException('Choisissez d’abord un nouveau mot de passe');
+    }
     return true;
   }
 }
@@ -120,31 +148,115 @@ export class PlatformService {
     });
   }
 
+  private sign(admin: { id: string; name: string }) {
+    return this.jwt.sign({ sub: admin.id, name: admin.name, at: Date.now() }, { secret: config.jwt.accessSecret, audience: 'platform', expiresIn: SESSION_HOURS * 3600 });
+  }
+
+  private async countFailure(admin: { id: string; failedLogins: number }, what: string) {
+    const failed = admin.failedLogins + 1;
+    const lock = failed >= config.security.maxFailedLogins;
+    await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: lock ? 0 : failed, lockedUntil: lock ? new Date(Date.now() + config.security.lockMinutes * 60000) : null } });
+    await this.log(null, lock ? 'platform.auth.locked' : what, null, { adminId: admin.id });
+  }
+
+  private async open(admin: { id: string; name: string; email: string; mustChangePassword: boolean }) {
+    await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: 0, lockedUntil: null, lastLoginAt: new Date() } });
+    await this.log({ id: admin.id, name: admin.name }, 'platform.auth.login', null);
+    return { token: this.sign(admin), admin: { id: admin.id, name: admin.name, email: admin.email, mustChangePassword: admin.mustChangePassword } };
+  }
+
+  /** Mot de passe, puis code de l'application d'authentification si la double authentification est active (SEC-021). */
   async login(dto: PlatformLoginDto) {
     const admin = await this.db.platformAdmin.findUnique({ where: { email: dto.email.trim().toLowerCase() } });
-    const fail = new UnauthorizedException('Adresse e-mail ou mot de passe incorrect');
-    if (!admin || !admin.active) {
+    const fail = new UnauthorizedException(LOGIN_FAILED);
+    // Compte inconnu, désactivé ou bloqué : même calcul et même réponse (SEC-024).
+    if (!admin || !admin.active || (admin.lockedUntil && admin.lockedUntil > new Date())) {
       await argon2.hash(dto.password);
       throw fail;
     }
-    if (admin.lockedUntil && admin.lockedUntil > new Date()) throw new UnauthorizedException('Compte verrouillé quelques minutes après plusieurs échecs');
     if (!(await argon2.verify(admin.passwordHash, dto.password))) {
-      const failed = admin.failedLogins + 1;
-      const lock = failed >= config.security.maxFailedLogins;
-      await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: lock ? 0 : failed, lockedUntil: lock ? new Date(Date.now() + config.security.lockMinutes * 60000) : null } });
-      await this.log(null, lock ? 'platform.auth.locked' : 'platform.auth.failed', null, { adminId: admin.id });
+      await this.countFailure(admin, 'platform.auth.failed');
       throw fail;
     }
-    await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: 0, lockedUntil: null, lastLoginAt: new Date() } });
-    await this.log({ id: admin.id, name: admin.name }, 'platform.auth.login', null);
-    const token = this.jwt.sign({ sub: admin.id, name: admin.name }, { secret: config.jwt.accessSecret, audience: 'platform', expiresIn: SESSION_HOURS * 3600 });
-    return { token, admin: { id: admin.id, name: admin.name, email: admin.email, mustChangePassword: admin.mustChangePassword } };
+    if (admin.totpEnabled && admin.totpSecret) {
+      await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: 0 } });
+      const challenge = this.jwt.sign({ sub: admin.id }, { secret: config.jwt.accessSecret, audience: PLATFORM_2FA_AUDIENCE, expiresIn: 300 });
+      return { twoFactorRequired: true as const, challenge };
+    }
+    return { twoFactorRequired: false as const, ...(await this.open(admin)) };
+  }
+
+  async verifyTwoFactor(dto: PlatformTwoFactorDto) {
+    let p: { sub: string };
+    try {
+      p = this.jwt.verify(dto.challenge, { secret: config.jwt.accessSecret, audience: PLATFORM_2FA_AUDIENCE });
+    } catch {
+      throw new UnauthorizedException('Délai dépassé, reconnectez-vous');
+    }
+    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub } });
+    const wrong = new UnauthorizedException('Code incorrect. Après 5 erreurs, le compte est bloqué 15 minutes.');
+    if (!admin?.active || !admin.totpEnabled || !admin.totpSecret || (admin.lockedUntil && admin.lockedUntil > new Date())) throw wrong;
+    const step = totpStep(decrypt(admin.totpSecret), dto.code, admin.totpLastStep);
+    if (step === null) {
+      await this.countFailure(admin, 'platform.auth.2fa_failed');
+      throw wrong;
+    }
+    await this.db.platformAdmin.update({ where: { id: admin.id }, data: { totpLastStep: step } });
+    return this.open(admin);
+  }
+
+  /** Déconnexion : tous les jetons Super Admin déjà émis pour ce compte sont refusés (SEC-021). */
+  async logout(token: string | undefined) {
+    if (!token) return;
+    let p: { sub: string };
+    try {
+      p = this.jwt.verify(token, { secret: config.jwt.accessSecret, audience: 'platform', ignoreExpiration: true });
+    } catch {
+      return;
+    }
+    await this.db.platformAdmin.updateMany({ where: { id: p.sub }, data: { sessionsRevokedAt: new Date() } });
+    await this.log({ id: p.sub, name: '' }, 'platform.auth.logout', null);
+  }
+
+  /** Prépare la double authentification sans toucher au compte (même principe que les écoles, SEC-019). */
+  async setupTwoFactor(actor: PlatformActor, currentCode?: string) {
+    const a = await this.db.platformAdmin.findUniqueOrThrow({ where: { id: actor.id } });
+    if (a.totpEnabled && a.totpSecret) {
+      if (!currentCode) throw new ForbiddenException("La double authentification est déjà active : saisissez le code actuel pour la reconfigurer");
+      const step = totpStep(decrypt(a.totpSecret), currentCode, a.totpLastStep);
+      if (step === null) {
+        await this.countFailure(a, 'platform.auth.2fa_failed');
+        throw new ForbiddenException('Code actuel incorrect');
+      }
+      await this.db.platformAdmin.update({ where: { id: a.id }, data: { totpLastStep: step } });
+    }
+    const secret = authenticator.generateSecret();
+    const otpauth = authenticator.keyuri(a.email, 'Plateforme Cahiora', secret);
+    const setupToken = this.jwt.sign({ sub: a.id, sec: encrypt(secret) }, { secret: config.jwt.accessSecret, audience: `platform-${TOTP_SETUP_AUDIENCE}`, expiresIn: 600 });
+    return { otpauth, qr: await QRCode.toDataURL(otpauth), secret, setupToken };
+  }
+
+  async enableTwoFactor(actor: PlatformActor, dto: PlatformEnableDto) {
+    let p: { sub: string; sec: string };
+    try {
+      p = this.jwt.verify(dto.setupToken, { secret: config.jwt.accessSecret, audience: `platform-${TOTP_SETUP_AUDIENCE}` });
+    } catch {
+      throw new BadRequestException('Configuration expirée : recommencez');
+    }
+    if (p.sub !== actor.id) throw new ForbiddenException();
+    const secret = decrypt(p.sec);
+    const step = totpStep(secret, dto.code, null);
+    if (step === null) throw new BadRequestException('Code incorrect');
+    const a = await this.db.platformAdmin.findUniqueOrThrow({ where: { id: actor.id } });
+    await this.db.platformAdmin.update({ where: { id: a.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step } });
+    await this.log(actor, a.totpEnabled ? 'platform.auth.2fa_reset' : 'platform.auth.2fa_enabled', null);
+    return { ok: true };
   }
 
   async me(actor: PlatformActor) {
     const a = await this.db.platformAdmin.findUnique({ where: { id: actor.id } });
     if (!a?.active) throw new UnauthorizedException('Session expirée');
-    return { id: a.id, name: a.name, email: a.email, mustChangePassword: a.mustChangePassword, platformDomain: config.platformDomain || null };
+    return { id: a.id, name: a.name, email: a.email, mustChangePassword: a.mustChangePassword, totpEnabled: a.totpEnabled, platformDomain: config.platformDomain || null };
   }
 
   async changePassword(actor: PlatformActor, dto: PlatformPasswordDto) {
@@ -152,8 +264,7 @@ export class PlatformService {
     if (!(await argon2.verify(a.passwordHash, dto.current))) throw new BadRequestException('Mot de passe actuel incorrect');
     await this.db.platformAdmin.update({ where: { id: a.id }, data: { passwordHash: await hashPassword(dto.password), mustChangePassword: false, passwordChangedAt: new Date() } });
     await this.log(actor, 'platform.auth.password_changed', null);
-    const token = this.jwt.sign({ sub: a.id, name: a.name }, { secret: config.jwt.accessSecret, audience: 'platform', expiresIn: SESSION_HOURS * 3600 });
-    return { token };
+    return { token: this.sign(a) };
   }
 
   /** Écoles clientes avec leur activité (effectifs, comptes, sites). */
@@ -306,27 +417,42 @@ export class PlatformController {
     return { ok: true };
   }
 
-  @Post('platform/auth/login')
+  @Post('platform/auth/login') @Throttle({ default: { limit: 10, ttl: 60000 } })
   async login(@Body() dto: PlatformLoginDto, @Res({ passthrough: true }) res: Response) {
     const r = await this.s.login(dto);
+    if (r.twoFactorRequired) return { twoFactorRequired: true, challenge: r.challenge };
+    this.cookie(res, r.token);
+    return r.admin;
+  }
+
+  @Post('platform/auth/2fa/verify') @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async verify(@Body() dto: PlatformTwoFactorDto, @Res({ passthrough: true }) res: Response) {
+    const r = await this.s.verifyTwoFactor(dto);
     this.cookie(res, r.token);
     return r.admin;
   }
 
   @Post('platform/auth/logout')
-  logout(@Res({ passthrough: true }) res: Response) {
+  async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    await this.s.logout(req.cookies?.[COOKIE]);
     this.cookie(res, null);
     return { ok: true };
   }
 
-  @Post('platform/auth/password') @UseGuards(PlatformGuard)
+  @Post('platform/auth/2fa/setup') @UseGuards(PlatformGuard) @AllowPendingPassword() @Throttle({ default: { limit: 10, ttl: 60000 } })
+  setup2fa(@Req() req: Request, @Body() dto: PlatformSetupDto) { return this.s.setupTwoFactor((req as any).platformAdmin, dto.code); }
+
+  @Post('platform/auth/2fa/enable') @UseGuards(PlatformGuard) @AllowPendingPassword() @Throttle({ default: { limit: 10, ttl: 60000 } })
+  enable2fa(@Req() req: Request, @Body() dto: PlatformEnableDto) { return this.s.enableTwoFactor((req as any).platformAdmin, dto); }
+
+  @Post('platform/auth/password') @UseGuards(PlatformGuard) @AllowPendingPassword()
   async password(@Req() req: Request, @Body() dto: PlatformPasswordDto, @Res({ passthrough: true }) res: Response) {
     const r = await this.s.changePassword((req as any).platformAdmin, dto);
     this.cookie(res, r.token);
     return { ok: true };
   }
 
-  @Get('platform/me') @UseGuards(PlatformGuard)
+  @Get('platform/me') @UseGuards(PlatformGuard) @AllowPendingPassword()
   me(@Req() req: Request) { return this.s.me((req as any).platformAdmin); }
 
   @Get('platform/tenants') @UseGuards(PlatformGuard)

@@ -20,7 +20,7 @@ import { PrismaService } from './prisma.service';
  * une déconnexion, un changement de mot de passe ou une suspension l'efface tout de suite.
  */
 const SESSION_CACHE_MS = 30_000;
-const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null }>();
+const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null; pendingPassword?: boolean }>();
 
 /** Audience des jetons d'accès d'école (SEC-012) : un jeton Super Admin ou de double authentification n'est jamais accepté ici. */
 export const SCHOOL_AUDIENCE = 'school';
@@ -82,6 +82,13 @@ export interface AccessTokenPayload {
 export const IS_PUBLIC = 'isPublic';
 export const Public = () => SetMetadata(IS_PUBLIC, true);
 
+/**
+ * Routes encore ouvertes tant que le mot de passe provisoire n'a pas été changé (SEC-023) :
+ * son compte, le changement de mot de passe, la double authentification, les appareils connectés.
+ */
+export const ALLOW_PENDING_PASSWORD = 'allowPendingPassword';
+export const AllowPendingPassword = () => SetMetadata(ALLOW_PENDING_PASSWORD, true);
+
 export const REQUIRED_PERMISSIONS = 'permissions';
 /** Exige au moins une des permissions listées pour le rôle actif. */
 export const Can = (...perms: Permission[]) => SetMetadata(REQUIRED_PERMISSIONS, perms);
@@ -100,14 +107,16 @@ export class AuthGuard implements CanActivate {
     if (hit && hit.until > Date.now() && hit.tenantId === p.tid && hit.userId === p.sub) return hit;
     const tenant = await this.db.tenant.findUnique({ where: { id: p.tid }, select: { status: true, slug: true, domain: true } });
     let ok = tenant?.status === 'ACTIVE';
+    let pendingPassword = false;
     if (ok) {
       const s = await this.db.forTenant(p.tid, (tx) =>
-        tx.session.findUnique({ where: { id: p.sid }, select: { userId: true, revokedAt: true, expiresAt: true, user: { select: { status: true } } } }),
+        tx.session.findUnique({ where: { id: p.sid }, select: { userId: true, revokedAt: true, expiresAt: true, user: { select: { status: true, mustChangePassword: true } } } }),
       );
       ok = !!s && s.userId === p.sub && !s.revokedAt && s.expiresAt > new Date() && s.user.status === 'ACTIVE';
+      pendingPassword = !!s?.user.mustChangePassword;
     }
     if (sessionCache.size > 10_000) sessionCache.clear();
-    const entry = { ok, until: Date.now() + SESSION_CACHE_MS, userId: p.sub, tenantId: p.tid, slug: tenant?.slug, domain: tenant?.domain };
+    const entry = { ok, until: Date.now() + SESSION_CACHE_MS, userId: p.sub, tenantId: p.tid, slug: tenant?.slug, domain: tenant?.domain, pendingPassword };
     sessionCache.set(p.sid, entry);
     return entry;
   }
@@ -149,6 +158,9 @@ export class AuthGuard implements CanActivate {
       ip: req.ip,
     };
     req.actor = actor;
+    if (session.pendingPassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, handlers)) {
+      throw new ForbiddenException('Choisissez d’abord un nouveau mot de passe dans « Mon compte »');
+    }
 
     const perms = this.reflector.getAllAndOverride<Permission[]>(REQUIRED_PERMISSIONS, handlers);
     if (perms?.length && !perms.some((p) => can(actor.role, p))) {

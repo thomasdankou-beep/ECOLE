@@ -1,5 +1,6 @@
 /**
  * Crée un compte Super Admin de la plateforme, ou lui remet un mot de passe provisoire.
+ * Pour un compte existant, la double authentification est aussi retirée (téléphone perdu) : à réactiver ensuite.
  * Usage : npm run platform:admin -- <e-mail> "<Nom complet>"
  * Le mot de passe provisoire est affiché une seule fois ; il doit être changé à la première connexion.
  */
@@ -24,11 +25,11 @@ async function main() {
     process.exit(1);
   }
   const admin = existing
-    ? await db.platformAdmin.update({ where: { id: existing.id }, data: { passwordHash, active: true, failedLogins: 0, lockedUntil: null, mustChangePassword: true, passwordChangedAt: new Date(), ...(name ? { name } : {}) } })
+    ? await db.platformAdmin.update({ where: { id: existing.id }, data: { passwordHash, active: true, failedLogins: 0, lockedUntil: null, mustChangePassword: true, passwordChangedAt: new Date(), totpEnabled: false, totpSecret: null, totpLastStep: null, sessionsRevokedAt: new Date(), ...(name ? { name } : {}) } })
     : await db.platformAdmin.create({ data: { email: key, name, passwordHash } });
   await db.platformAuditLog.create({ data: { adminId: admin.id, action: existing ? 'platform.admin.reset_cli' : 'platform.admin.created_cli' } });
   await db.$disconnect();
-  console.log(`${existing ? 'Mot de passe remis' : 'Compte créé'} pour ${admin.name} <${admin.email}>`);
+  console.log(`${existing ? 'Mot de passe remis (double authentification retirée)' : 'Compte créé'} pour ${admin.name} <${admin.email}>`);
   console.log(`Mot de passe provisoire (affiché une seule fois) : ${password}`);
   console.log('Connexion : /plateforme/connexion');
 }

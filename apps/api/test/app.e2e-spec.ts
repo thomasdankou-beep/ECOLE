@@ -146,8 +146,11 @@ describe('Authentification', () => {
       await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: PHONES.secretariat, password: 'mauvais1' });
     }
     const r = await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: PHONES.secretariat, password: PASSWORD });
-    expect(r.status).toBe(403);
-    expect(r.body.message).toMatch(/bloqué/);
+    // SEC-024 : même réponse qu'un compte inconnu, le bon mot de passe ne passe pas pendant le blocage.
+    expect(r.status).toBe(401);
+    const unknown = await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: '+2290199999999', password: PASSWORD });
+    expect(unknown.status).toBe(401);
+    expect(r.body.message).toBe(unknown.body.message);
   });
 
   it('réinitialise le mot de passe par code SMS', async () => {
@@ -494,6 +497,12 @@ describe('Plateforme : plusieurs écoles sur un même serveur', () => {
     const r = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: director.identifier, password: director.temporaryPassword });
     expect(r.status).toBe(200);
     expect(r.body.mustChangePassword).toBe(true);
+    // SEC-023 : tant que le mot de passe provisoire n'est pas changé, seules les routes du compte répondent.
+    expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${r.body.accessToken}`)).status).toBe(403);
+    expect((await http.get('/api/v1/auth/me').set('Authorization', `Bearer ${r.body.accessToken}`)).status).toBe(200);
+    await http.post('/api/v1/auth/change-password').set('Authorization', `Bearer ${r.body.accessToken}`)
+      .send({ current: director.temporaryPassword, next: 'Nouveau2026x' }).expect(200);
+    director.temporaryPassword = 'Nouveau2026x';
     const t = r.body.accessToken;
     const students = await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`);
     expect(students.status === 404 || (students.status === 200 && (students.body.items ?? students.body).length === 0)).toBe(true);
@@ -563,6 +572,8 @@ describe('Plateforme : plusieurs écoles sur un même serveur', () => {
     await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ status: 'SUSPENDED', platformNotes: 'Note interne fictive' }).expect(200);
     await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ status: 'ACTIVE' }).expect(200);
     const r = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: reset.body.identifier, password: reset.body.temporaryPassword });
+    await http.post('/api/v1/auth/change-password').set('Authorization', `Bearer ${r.body.accessToken}`)
+      .send({ current: reset.body.temporaryPassword, next: 'Nouveau2027x' }).expect(200);
     const log = await http.get('/api/v1/audit?action=platform').set('Authorization', `Bearer ${r.body.accessToken}`);
     expect(log.status).toBe(200);
     const actions = log.body.map((e: any) => e.action);
@@ -796,7 +807,7 @@ describe('Étanchéité entre écoles : références, blocages et sessions (SEC-
       await tx.enrollment.create({ data: { tenantId: tidB, studentId: student.id, classId: klass.id, academicYearId: year.id } });
       await tx.user.create({
         data: {
-          tenantId: tidB, firstName: 'Direction', lastName: 'B', phone: phoneB, passwordHash: await argon2.hash(PASSWORD),
+          tenantId: tidB, firstName: 'Direction', lastName: 'B', phone: phoneB, passwordHash: await argon2.hash(PASSWORD), mustChangePassword: false,
           roles: { create: ['DIRECTION', 'VIE_SCOLAIRE', 'COMPTABLE', 'SECRETARIAT'].map((role) => ({ tenantId: tidB, role: role as any })) },
         },
       });
@@ -1158,5 +1169,133 @@ describe('Rôles et périmètre (SEC-013 à SEC-018)', () => {
     expect(mine.body.every((x: any) => x.proposedById === me.body.user.id)).toBe(true);
     const all = await as('vieScolaire').get('/sanctions');
     expect(all.body.some((x: any) => x.proposedById !== me.body.user.id)).toBe(true);
+  });
+});
+
+describe('Authentification renforcée (SEC-019 à SEC-025)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { authenticator } = require('otplib');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const argon2 = require('argon2');
+  const phone = '+2290190009019';
+  let tid: string;
+  let userId: string;
+  let secret: string;
+
+  const signIn = () => http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: phone, password: PASSWORD });
+  const inTenant = (fn: (tx: any) => Promise<any>): Promise<any> => admin.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tid}, true)`;
+    return fn(tx);
+  });
+
+  beforeAll(async () => {
+    tid = (await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } })).id;
+    userId = await inTenant(async (tx) => {
+      await tx.user.deleteMany({ where: { phone } });
+      const u = await tx.user.create({
+        data: { tenantId: tid, firstName: 'Fictif', lastName: 'Deuxfacteurs', phone, passwordHash: await argon2.hash(PASSWORD), mustChangePassword: false, roles: { create: [{ tenantId: tid, role: 'COMPTABLE' }] } },
+      });
+      return u.id;
+    });
+  });
+
+  it("SEC-019 : configurer la 2FA ne change rien au compte tant qu'un code n'a pas été validé, et la reconfigurer exige le code actuel", async () => {
+    const t = (await signIn()).body.accessToken;
+    const auth = (r: any) => r.set('Authorization', `Bearer ${t}`);
+    const setup = await auth(http.post('/api/v1/auth/2fa/setup')).send({});
+    expect(setup.status).toBe(200);
+    expect(setup.body.setupToken).toBeTruthy();
+    expect((await inTenant((tx) => tx.user.findUniqueOrThrow({ where: { id: userId } }))).totpSecret).toBeNull();
+    // Sans le jeton de configuration, ou avec un faux code, rien n'est activé.
+    expect((await auth(http.post('/api/v1/auth/2fa/enable')).send({ code: authenticator.generate(setup.body.secret) })).status).toBe(400);
+    expect((await auth(http.post('/api/v1/auth/2fa/enable')).send({ code: '000000', setupToken: setup.body.setupToken })).status).toBe(400);
+    expect((await auth(http.post('/api/v1/auth/2fa/enable')).send({ code: authenticator.generate(setup.body.secret), setupToken: setup.body.setupToken })).status).toBe(200);
+    secret = setup.body.secret;
+    // Déjà active : sans code ou avec un faux code, refus, et la connexion demande toujours le code.
+    expect((await auth(http.post('/api/v1/auth/2fa/setup')).send({})).status).toBe(403);
+    expect((await auth(http.post('/api/v1/auth/2fa/setup')).send({ code: '000000' })).status).toBe(403);
+    const again = await signIn();
+    expect(again.body.twoFactorRequired).toBe(true);
+    expect(again.body.accessToken).toBeUndefined();
+    await inTenant((tx) => tx.user.update({ where: { id: userId }, data: { failedLogins: 0 } }));
+  });
+
+  it('SEC-022 : un code déjà utilisé est refusé, et 5 codes faux bloquent le compte', async () => {
+    // Le code de l'activation vient de servir : le rejouer est refusé.
+    const c1 = (await signIn()).body.challenge;
+    expect((await http.post('/api/v1/auth/2fa/verify').send({ challenge: c1, code: authenticator.generate(secret) })).status).toBe(401);
+    // Comme si 30 secondes étaient passées : un nouveau code est accepté, une seule fois.
+    await inTenant((tx) => tx.user.update({ where: { id: userId }, data: { totpLastStep: null, failedLogins: 0 } }));
+    const ok = await http.post('/api/v1/auth/2fa/verify').send({ challenge: c1, code: authenticator.generate(secret) });
+    expect(ok.status).toBe(200);
+    expect(ok.body.accessToken).toBeTruthy();
+    const c2 = (await signIn()).body.challenge;
+    expect((await http.post('/api/v1/auth/2fa/verify').send({ challenge: c2, code: authenticator.generate(secret) })).status).toBe(401);
+    // 5 codes faux : compte bloqué, même le bon code et le bon mot de passe ne passent plus.
+    await inTenant((tx) => tx.user.update({ where: { id: userId }, data: { totpLastStep: null, failedLogins: 0 } }));
+    for (let i = 0; i < 4; i++) await http.post('/api/v1/auth/2fa/verify').send({ challenge: c2, code: '000000' });
+    expect((await http.post('/api/v1/auth/2fa/verify').send({ challenge: c2, code: '000001' })).status).toBe(401);
+    const u = await inTenant((tx) => tx.user.findUniqueOrThrow({ where: { id: userId } }));
+    expect(u.lockedUntil && u.lockedUntil > new Date()).toBe(true);
+    expect((await http.post('/api/v1/auth/2fa/verify').send({ challenge: c2, code: authenticator.generate(secret) })).status).toBe(401);
+    expect((await signIn()).status).toBe(401);
+    await inTenant((tx) => tx.user.update({ where: { id: userId }, data: { lockedUntil: null, failedLogins: 0, totpEnabled: false, totpSecret: null, totpLastStep: null } }));
+  });
+
+  it('SEC-023 : les mots de passe provisoires sont longs et aléatoires', async () => {
+    const { temporaryPassword } = await import('../src/modules/settings/settings.service');
+    const all = new Set(Array.from({ length: 200 }, () => temporaryPassword()));
+    expect(all.size).toBe(200);
+    for (const pw of all) expect(pw).toMatch(/^(?=.*[a-zA-Z])(?=.*\d)[A-HJ-NP-Za-km-z2-9]{10}$/);
+  });
+
+  it('SEC-025 : la déconnexion ne coupe pas une session avec un faux jeton', async () => {
+    const l = await signIn();
+    const cookie = (l.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('erp_rt='))!.split(';')[0];
+    const [tenantPart, sessionPart] = cookie.slice('erp_rt='.length).split('.');
+    await http.post('/api/v1/auth/logout').set('Cookie', `erp_rt=${tenantPart}.${sessionPart}.faux`).expect(204);
+    expect((await http.get('/api/v1/auth/me').set('Authorization', `Bearer ${l.body.accessToken}`)).status).toBe(200);
+    await http.post('/api/v1/auth/logout').set('Cookie', cookie).expect(204);
+    expect((await http.get('/api/v1/auth/me').set('Authorization', `Bearer ${l.body.accessToken}`)).status).toBe(401);
+  });
+
+  it('SEC-021 : Super Admin, la déconnexion coupe la session et la double authentification est demandée une fois activée', async () => {
+    const email = 'sec021@exemple.test';
+    const pw = 'MotDePasseFictif2026';
+    await admin.platformAdmin.deleteMany({ where: { email } });
+    await admin.platformAdmin.create({ data: { email, name: 'Super Admin fictif', passwordHash: await argon2.hash(pw), mustChangePassword: false } });
+    const pcookie = (r: any) => (r.headers['set-cookie'] as unknown as string[]).find((c: string) => c.startsWith('erp_pt='))!.split(';')[0];
+    const l = await http.post('/api/v1/platform/auth/login').send({ email, password: pw });
+    expect(l.status).toBe(201);
+    const c = pcookie(l);
+    await http.post('/api/v1/platform/auth/logout').set('Cookie', c).expect(201);
+    expect((await http.get('/api/v1/platform/me').set('Cookie', c)).status).toBe(401);
+    // Activation de la 2FA, puis connexion en deux temps.
+    const c2 = pcookie(await http.post('/api/v1/platform/auth/login').send({ email, password: pw }));
+    const setup = await http.post('/api/v1/platform/auth/2fa/setup').set('Cookie', c2).send({});
+    expect(setup.status).toBe(201);
+    await http.post('/api/v1/platform/auth/2fa/enable').set('Cookie', c2).send({ code: authenticator.generate(setup.body.secret), setupToken: setup.body.setupToken }).expect(201);
+    expect((await http.post('/api/v1/platform/auth/2fa/setup').set('Cookie', c2).send({})).status).toBe(403);
+    const step1 = await http.post('/api/v1/platform/auth/login').send({ email, password: pw });
+    expect(step1.body.twoFactorRequired).toBe(true);
+    expect((step1.headers['set-cookie'] as unknown as string[] | undefined)?.some((x) => x.startsWith('erp_pt=') && !x.startsWith('erp_pt=;'))).toBeFalsy();
+    // Code de l'activation rejoué : refusé ; nouveau code : accepté.
+    expect((await http.post('/api/v1/platform/auth/2fa/verify').send({ challenge: step1.body.challenge, code: authenticator.generate(setup.body.secret) })).status).toBe(401);
+    await admin.platformAdmin.update({ where: { email }, data: { totpLastStep: null, failedLogins: 0 } });
+    const step2 = await http.post('/api/v1/platform/auth/2fa/verify').send({ challenge: step1.body.challenge, code: authenticator.generate(setup.body.secret) });
+    expect(step2.status).toBe(201);
+    expect((await http.get('/api/v1/platform/me').set('Cookie', pcookie(step2))).body.totpEnabled).toBe(true);
+    await admin.platformAdmin.deleteMany({ where: { email } });
+  });
+
+  it('SEC-023 : Super Admin avec mot de passe provisoire, seules les routes du compte répondent', async () => {
+    const email = 'sec023@exemple.test';
+    await admin.platformAdmin.deleteMany({ where: { email } });
+    await admin.platformAdmin.create({ data: { email, name: 'Provisoire fictif', passwordHash: await argon2.hash('Provisoire2026x') } });
+    const l = await http.post('/api/v1/platform/auth/login').send({ email, password: 'Provisoire2026x' });
+    const c = (l.headers['set-cookie'] as unknown as string[]).find((x) => x.startsWith('erp_pt='))!.split(';')[0];
+    expect((await http.get('/api/v1/platform/tenants').set('Cookie', c)).status).toBe(403);
+    expect((await http.get('/api/v1/platform/me').set('Cookie', c)).status).toBe(200);
+    await admin.platformAdmin.deleteMany({ where: { email } });
   });
 });
