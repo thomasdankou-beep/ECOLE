@@ -137,6 +137,9 @@ export class SettingsController {
   @Patch('staff/:id') @Can('users.manage')
   updateStaff(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: StaffUpdateDto) { return this.s.updateStaff(a, id, dto); }
 
+  @Post('users/:id/reset-2fa') @Can('users.manage')
+  resetTwoFactor(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.resetTwoFactor(a, id); }
+
   @Post('users/:id/reset-password') @Can('users.manage')
   resetPassword(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.resetPassword(a, id); }
 }

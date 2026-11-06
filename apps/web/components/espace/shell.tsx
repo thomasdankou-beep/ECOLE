@@ -23,6 +23,8 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
   // Mot de passe provisoire : rien d'autre n'est accessible tant qu'il n'a pas été changé.
   useEffect(() => {
     if (auth.me?.user.mustChangePassword && !path.startsWith('/espace/compte')) router.replace('/espace/compte?premiere=1');
+    // Double authentification obligatoire pour ce rôle (SEC-020) : seul « Mon compte » répond tant qu'elle n'est pas activée.
+    else if (auth.me?.user.mustSetupTwoFactor && !path.startsWith('/espace/compte')) router.replace('/espace/compte?securite=1');
   }, [auth.me, path, router]);
   useEffect(() => {
     if (!auth.me) return;
