@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, ReportRunStatus } from '@prisma/client';
+import { ReportRunStatus } from '@prisma/client';
 import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';

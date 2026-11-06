@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Injectable, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { DocumentKind, Prisma } from '@prisma/client';
 import { IsEnum, IsUUID } from 'class-validator';

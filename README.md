@@ -118,6 +118,14 @@ npm test            # 115 tests (calcul des moyennes, sécurité, isolation des 
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).
 
+Contrôle automatique (SEC-039, SEC-043) : à chaque envoi sur GitHub, le workflow `.github/workflows/tests.yml` crée une base PostgreSQL neuve, applique toutes les migrations, lance ESLint, les tests de l’API, construit l’API et le site, puis lance les tests de navigateur (bureau et téléphone). Le résultat s’affiche sur GitHub (onglet « Actions »). Ne mettez en ligne qu’une version au résultat vert. En local :
+
+```bash
+cd tools/qualite && npm ci
+npm run lint        # contrôle du code
+npm run e2e         # tests de navigateur : API (4000) et site (3000) lancés sur la base erp_test
+```
+
 ## Architecture
 
 Monolithe modulaire, un dépôt, deux applications :

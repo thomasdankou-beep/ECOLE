@@ -1,0 +1,128 @@
+# Contrôle automatique (SEC-039, SEC-043) : à chaque envoi, sur une base PostgreSQL neuve et des données
+# fictives. Rien n'est envoyé vers le serveur de production.
+name: Tests
+
+on:
+  push:
+    branches: ['claude/**', main, develop, 'feature/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEXT_TELEMETRY_DISABLED: '1'
+  # Base de test seulement (voir apps/api/test/setup-env.ts).
+  DB_OWNER: postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test
+  DB_APP: postgresql://erp_app:erp_app_dev@localhost:5432/erp_test
+  DB_PLATFORM: postgresql://erp_platform:erp_platform_dev@localhost:5432/erp_test
+
+jobs:
+  tests:
+    name: API, site et navigateur
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            tools/qualite/package-lock.json
+
+      - name: Dépendances
+        run: |
+          npm ci
+          npm ci --prefix tools/qualite
+
+      - name: Base de test (rôles comme en production, migrations depuis zéro)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE erp_owner LOGIN PASSWORD 'erp_owner_dev';
+          CREATE ROLE erp_app LOGIN PASSWORD 'erp_app_dev' NOSUPERUSER NOBYPASSRLS;
+          CREATE ROLE erp_platform LOGIN PASSWORD 'erp_platform_dev' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          CREATE DATABASE erp_test OWNER erp_owner;
+          SQL
+          cd apps/api
+          npx prisma generate
+          DATABASE_URL=$DB_OWNER DATABASE_ADMIN_URL=$DB_OWNER npx prisma migrate deploy
+
+      - name: Contrôle du code (ESLint)
+        run: npm run lint --prefix tools/qualite
+
+      - name: Tests de l'API (unitaires et de bout en bout)
+        run: npm test -w apps/api
+
+      - name: Construction de l'API et du site
+        env:
+          API_URL: http://localhost:4000
+          NEXT_PUBLIC_TENANT: saint-kisito
+          NEXT_PUBLIC_DEMO: 'true'
+        run: |
+          (cd apps/api && npx nest build)
+          (cd apps/web && npx next build)
+
+      - name: Démarrage de l'API et du site sur la base de test
+        env:
+          NODE_ENV: production
+          COOKIE_SECURE: 'false'
+          PORT: '4000'
+          WEB_ORIGIN: http://localhost:3000
+          TENANT_SLUG: saint-kisito
+          PAYMENT_PROVIDER: sandbox
+          SMS_PROVIDER: console
+          CLAMAV_HOST: ''
+          ENFORCE_2FA: 'false'
+        run: |
+          # Jeu de démonstration remis à neuf après les tests de l'API (base de test seulement).
+          (cd apps/api && DATABASE_ADMIN_URL=$DB_OWNER NODE_ENV=development npx ts-node --transpile-only prisma/seed.ts)
+          export JWT_ACCESS_SECRET=$(openssl rand -hex 32) JWT_REFRESH_SECRET=$(openssl rand -hex 32) APP_ENCRYPTION_KEY=$(openssl rand -base64 32)
+          export STORAGE_DIR=$RUNNER_TEMP/stockage
+          (cd apps/api && DATABASE_URL=$DB_APP DATABASE_PLATFORM_URL=$DB_PLATFORM nohup node dist/main.js > $RUNNER_TEMP/api.log 2>&1 &)
+          (cd apps/web && API_URL=http://localhost:4000 nohup npx next start -p 3000 > $RUNNER_TEMP/web.log 2>&1 &)
+          for i in $(seq 1 60); do
+            curl -fs http://localhost:4000/api/v1/public/saint-kisito > /dev/null && curl -fs http://localhost:3000/connexion > /dev/null && exit 0
+            sleep 2
+          done
+          cat $RUNNER_TEMP/api.log $RUNNER_TEMP/web.log
+          exit 1
+
+      - name: Tests de navigateur (bureau et téléphone)
+        env:
+          DATABASE_ADMIN_URL: ${{ env.DB_OWNER }}
+        run: |
+          cd tools/qualite
+          npx playwright install --with-deps chromium
+          npm run e2e
+
+      - name: Journaux et rapport en cas d'échec
+        if: failure()
+        run: |
+          tail -n 100 $RUNNER_TEMP/api.log || true
+          tail -n 50 $RUNNER_TEMP/web.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: rapport-navigateur
+          path: tools/qualite/rapport-e2e
+          retention-days: 7
