@@ -6,6 +6,7 @@ import { Actor, Can, CurrentActor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { toDate } from '../../common/util';
 
 export class InternshipPeriodDto {
@@ -60,6 +61,7 @@ export class InternshipsService {
     this.checkDates(dto.startDate, dto.endDate);
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const academicYearId = await this.scope.currentYearId(tx);
+      await assertOwned(tx, { level: dto.levelId, track: dto.trackId });
       const p = await tx.internshipPeriod.create({
         data: {
           tenantId: actor.tenantId, academicYearId, label: dto.label, levelId: dto.levelId ?? null, trackId: dto.trackId ?? null,
@@ -74,6 +76,7 @@ export class InternshipsService {
   updatePeriod(actor: Actor, id: string, dto: InternshipPeriodDto) {
     this.checkDates(dto.startDate, dto.endDate);
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { level: dto.levelId, track: dto.trackId });
       const p = await tx.internshipPeriod.update({
         where: { id },
         data: { label: dto.label, levelId: dto.levelId ?? null, trackId: dto.trackId ?? null, startDate: toDate(dto.startDate), endDate: toDate(dto.endDate), notes: dto.notes ?? null },
@@ -123,6 +126,7 @@ export class InternshipsService {
 
   upsertPlacement(actor: Actor, periodId: string, dto: PlacementDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { internshipPeriod: periodId });
       await this.scope.assertStudent(tx, actor, dto.studentId);
       const data = {
         company: dto.company, companyAddress: dto.companyAddress ?? null, companyPhone: dto.companyPhone ?? null,

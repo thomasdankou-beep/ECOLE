@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Actor } from './auth';
+import { assertOwned } from './ownership';
 import { Tx } from './prisma.service';
 
 /**
@@ -59,12 +60,15 @@ export class ScopeService {
 
   async assertStudent(tx: Tx, actor: Actor, studentId: string) {
     const ids = await this.studentIds(tx, actor);
-    if (ids !== null && !ids.includes(studentId)) throw new ForbiddenException('Élève hors de votre périmètre');
+    // Périmètre « tout l'établissement » : l'élève doit quand même exister dans cet établissement (SEC-001).
+    if (ids === null) return assertOwned(tx, { student: studentId });
+    if (!ids.includes(studentId)) throw new ForbiddenException('Élève hors de votre périmètre');
   }
 
   async assertClass(tx: Tx, actor: Actor, classId: string) {
     const ids = await this.classIds(tx, actor);
-    if (ids !== null && !ids.includes(classId)) throw new ForbiddenException('Classe hors de votre périmètre');
+    if (ids === null) return assertOwned(tx, { class: classId });
+    if (!ids.includes(classId)) throw new ForbiddenException('Classe hors de votre périmètre');
   }
 
   /** Un enseignant ne peut agir que sur les matières qui lui sont affectées. */

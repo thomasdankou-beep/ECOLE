@@ -4,6 +4,7 @@ import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { fcfa, isoDay, nextNumber, pad, toDate, verifyCode } from '../../common/util';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BatchInvoiceDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
@@ -46,6 +47,7 @@ export class FinanceService {
   createFeeType(actor: Actor, dto: FeeTypeDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const academicYearId = await this.scope.currentYearId(tx);
+      await assertOwned(tx, { level: dto.levelId, track: dto.trackId });
       const f = await tx.feeType.create({ data: { ...dto, dueDate: dto.dueDate ? toDate(dto.dueDate) : null, tenantId: actor.tenantId, academicYearId } });
       await this.audit.log(tx, actor, 'fee_type.created', 'FeeType', f.id, dto);
       return f;
@@ -57,6 +59,7 @@ export class FinanceService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const academicYearId = await this.scope.currentYearId(tx);
       const dueDate = dto.dueDate ? toDate(dto.dueDate) : undefined;
+      await assertOwned(tx, { level: dto.rows.map((r) => r.levelId), track: dto.rows.map((r) => r.trackId) });
       let saved = 0;
       for (const r of dto.rows) {
         const trackId = r.trackId ?? null;
@@ -77,6 +80,7 @@ export class FinanceService {
 
   updateFeeType(actor: Actor, id: string, dto: Partial<FeeTypeDto>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { level: dto.levelId, track: dto.trackId });
       const f = await tx.feeType.update({ where: { id }, data: { ...dto, dueDate: dto.dueDate ? toDate(dto.dueDate) : undefined } });
       await this.audit.log(tx, actor, 'fee_type.updated', 'FeeType', id, dto);
       return f;
@@ -141,6 +145,7 @@ export class FinanceService {
 
   createInvoice(actor: Actor, dto: InvoiceDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { student: dto.studentId, feeType: dto.items.map((i) => i.feeTypeId) });
       const inv = await this.newInvoice(tx, actor, dto.studentId, dto.label, toDate(dto.dueDate), dto.items);
       await this.audit.log(tx, actor, 'invoice.created', 'Invoice', inv.id, { number: inv.number, total: inv.total });
       return inv;

@@ -4,6 +4,7 @@ import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { isoDay, toDate } from '../../common/util';
 import { NotificationsService } from '../notifications/notifications.service';
 
@@ -120,6 +121,7 @@ export class TimetableService {
 
   createSlot(actor: Actor, input: SlotInput) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { classSubject: input.classSubjectId, room: input.roomId });
       await this.conflicts(tx, input);
       const slot = await tx.timetableSlot.create({ data: { ...input, roomId: input.roomId ?? null, tenantId: actor.tenantId } });
       await this.audit.log(tx, actor, 'timetable.slot_created', 'TimetableSlot', slot.id, input);
@@ -130,6 +132,7 @@ export class TimetableService {
   updateSlot(actor: Actor, id: string, input: Partial<SlotInput>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const cur = await tx.timetableSlot.findUniqueOrThrow({ where: { id } });
+      await assertOwned(tx, { classSubject: input.classSubjectId, room: input.roomId });
       const next: SlotInput = {
         classSubjectId: input.classSubjectId ?? cur.classSubjectId, roomId: input.roomId === undefined ? cur.roomId : input.roomId,
         dayOfWeek: input.dayOfWeek ?? cur.dayOfWeek, startMinute: input.startMinute ?? cur.startMinute, endMinute: input.endMinute ?? cur.endMinute,
@@ -156,6 +159,7 @@ export class TimetableService {
         where: { id: slotId },
         include: { classSubject: { include: { subject: true, class: true, assignments: true } } },
       });
+      await assertOwned(tx, { room: input.newRoomId });
       const date = toDate(input.date);
       const dow = date.getUTCDay() || 7;
       if (dow !== slot.dayOfWeek) throw new BadRequestException(`Ce cours a lieu le ${DAYS[slot.dayOfWeek]}, pas le ${DAYS[dow] ?? 'dimanche'}`);

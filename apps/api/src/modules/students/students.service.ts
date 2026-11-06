@@ -5,6 +5,7 @@ import { AuditService } from '../../common/audit.service';
 import { can } from '../../common/permissions';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { nextNumber, normalizePhone, pad, toDate } from '../../common/util';
 import { hashPassword } from '../auth/auth.service';
 import { FilesService } from '../files/files.service';
@@ -239,6 +240,7 @@ export class StudentsService {
 
   addGuardian(actor: Actor, id: string, dto: GuardianInput) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { student: id });
       const r = await this.linkGuardian(tx, actor, id, dto, false);
       await this.audit.log(tx, actor, 'student.guardian_added', 'Student', id, { phone: r.phone });
       return r;
@@ -248,6 +250,9 @@ export class StudentsService {
   changeClass(actor: Actor, id: string, dto: ChangeClassDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
+      await assertOwned(tx, { student: id, class: dto.classId });
+      const target = await tx.class.findUniqueOrThrow({ where: { id: dto.classId }, select: { academicYearId: true } });
+      if (target.academicYearId !== yearId) throw new BadRequestException("Cette classe n'existe pas pour l'année en cours");
       const e = await tx.enrollment.update({ where: { studentId_academicYearId: { studentId: id, academicYearId: yearId } }, data: { classId: dto.classId } });
       await this.audit.log(tx, actor, 'student.class_changed', 'Student', id, dto);
       return e;

@@ -7,7 +7,7 @@ import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
 import { logoUrl, tenantSettings } from '../settings/settings.service';
 import { config } from '../../config';
-import { AccessTokenPayload, Actor } from '../../common/auth';
+import { AccessTokenPayload, Actor, forgetSessions } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
@@ -181,6 +181,7 @@ export class AuthService {
       if (tenant?.status !== 'ACTIVE') throw new ForbiddenException('Cet établissement est suspendu. Contactez l’éditeur de la plateforme.');
       if (s.refreshTokenHash !== sha256(token)) {
         await tx.session.update({ where: { id: s.id }, data: { revokedAt: new Date() } });
+        forgetSessions({ sessionId: s.id });
         await this.audit.log(tx, null, 'auth.refresh_reuse', 'Session', s.id, { tenantId, ip: meta.ip });
         return new Deferred(new UnauthorizedException('Session expirée'));
       }
@@ -194,12 +195,14 @@ export class AuthService {
     const [tenantId, sessionId] = (cookie ?? '').split('.');
     if (!tenantId || !sessionId) return;
     await this.db.forTenant(tenantId, (tx) => tx.session.updateMany({ where: { id: sessionId, revokedAt: null }, data: { revokedAt: new Date() } }));
+    forgetSessions({ sessionId });
   }
 
   /** Déconnexion à distance de tous les appareils (CDC §6.1). */
   logoutAll(actor: Actor) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const r = await tx.session.updateMany({ where: { userId: actor.userId, revokedAt: null }, data: { revokedAt: new Date() } });
+      forgetSessions({ userId: actor.userId });
       await this.audit.log(tx, actor, 'auth.logout_all', 'User', actor.userId);
       return { revoked: r.count };
     });
@@ -218,7 +221,10 @@ export class AuthService {
   revokeSession(actor: Actor, id: string) {
     return this.db.forTenant(actor.tenantId, (tx) =>
       tx.session.updateMany({ where: { id, userId: actor.userId }, data: { revokedAt: new Date() } }),
-    );
+    ).then((r) => {
+      forgetSessions({ sessionId: id });
+      return r;
+    });
   }
 
   me(actor: Actor) {
@@ -261,6 +267,7 @@ export class AuthService {
       if (current === next) throw new BadRequestException("Choisissez un mot de passe différent de l'actuel");
       await tx.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(next), mustChangePassword: false } });
       await tx.session.updateMany({ where: { userId: user.id, revokedAt: null, id: { not: actor.sessionId } }, data: { revokedAt: new Date() } });
+      forgetSessions({ userId: user.id });
       await this.audit.log(tx, actor, 'auth.password_changed', 'User', user.id);
       return { ok: true };
     });
@@ -301,6 +308,7 @@ export class AuthService {
       await tx.otpCode.update({ where: { id: otp.id }, data: { consumedAt: new Date() } });
       await tx.user.update({ where: { id: user.id }, data: { passwordHash: await hashPassword(password), mustChangePassword: false, failedLogins: 0, lockedUntil: null } });
       await tx.session.updateMany({ where: { userId: user.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      forgetSessions({ userId: user.id });
       await this.audit.log(tx, null, 'auth.password_reset', 'User', user.id, { tenantId: tenant.id });
       return { ok: true };
     }));

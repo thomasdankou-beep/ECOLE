@@ -4,6 +4,7 @@ import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { verifyCode } from '../../common/util';
 import { distinction, proposedOutcome } from '../evaluation/grading';
 import { EvaluationService } from '../evaluation/evaluation.service';
@@ -135,6 +136,7 @@ export class ReportCardsService {
     return this.db.forTenant(
       actor.tenantId,
       async (tx) => {
+        await assertOwned(tx, { class: classId, term: termId });
         const run = await tx.reportCardRun.upsert({
           where: { classId_termId: { classId, termId } },
           create: { tenantId: actor.tenantId, classId, termId },

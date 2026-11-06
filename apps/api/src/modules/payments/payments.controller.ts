@@ -47,17 +47,18 @@ export class PaymentsController {
     return this.s.webhook(provider, req.headers as any, body);
   }
 
-  @Public()
-  @Get('sandbox/:transactionId')
-  sandboxInfo(@Param('transactionId') t: string) {
-    return this.s.sandboxInfo(t);
+  /** Bac à sable : réservé au compte connecté qui a lancé le paiement, dans son établissement (SEC-005). */
+  @ApiBearerAuth()
+  @Get('sandbox/:transactionId') @Can('finance.pay')
+  sandboxInfo(@CurrentActor() a: Actor, @Param('transactionId') t: string) {
+    return this.s.sandboxInfo(a, t);
   }
 
-  @Public()
+  @ApiBearerAuth()
   @Throttle({ default: { limit: 20, ttl: 60000 } })
-  @Post('sandbox/:transactionId/decision')
+  @Post('sandbox/:transactionId/decision') @Can('finance.pay')
   @HttpCode(200)
-  sandboxDecide(@Param('transactionId') t: string, @Body() dto: SandboxDecisionDto) {
-    return this.s.sandboxDecide(t, dto.success);
+  sandboxDecide(@CurrentActor() a: Actor, @Param('transactionId') t: string, @Body() dto: SandboxDecisionDto) {
+    return this.s.sandboxDecide(a, t, dto.success);
   }
 }

@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { Smartphone } from 'lucide-react';
 import { AuthShell } from '@/components/site/auth-shell';
 import { Button, ErrorNote, Skeleton } from '@/components/ui';
-import { publicGet, publicPost } from '@/lib/api';
+import { api } from '@/lib/api';
 import { fcfa } from '@/lib/format';
 
 type Info = { amount: number; operator: string; phone: string | null; label: string; status: string; paymentId: string };
@@ -22,13 +22,13 @@ export default function Simulation() {
   const [busy, setBusy] = useState<'ok' | 'ko' | null>(null);
 
   useEffect(() => {
-    publicGet<Info>(`/payments/sandbox/${encodeURIComponent(transactionId)}`).then(setInfo).catch(setError);
+    api.get<Info>(`/payments/sandbox/${encodeURIComponent(transactionId)}`).then(setInfo).catch(setError);
   }, [transactionId]);
 
   async function decide(success: boolean) {
     setBusy(success ? 'ok' : 'ko');
     try {
-      await publicPost(`/payments/sandbox/${encodeURIComponent(transactionId)}/decision`, { success });
+      await api.post(`/payments/sandbox/${encodeURIComponent(transactionId)}/decision`, { success });
       router.replace(`/espace/frais?paiement=${info?.paymentId ?? ''}`);
     } catch (e) {
       setError(e);

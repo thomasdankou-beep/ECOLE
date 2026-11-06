@@ -130,7 +130,7 @@ infra      Caddy (point d’entrée HTTPS), script des rôles PostgreSQL
 
 - **Une école = un établissement (tenant)** avec ses sites. Chaque table métier porte `tenant_id` ; l’application se connecte avec un rôle sans privilège (`erp_app`) soumis à la Row Level Security, la variable `app.tenant_id` étant fixée à chaque transaction. Les migrations utilisent le rôle propriétaire `erp_owner`.
 - **Le navigateur ne parle qu’à une seule origine** : Caddy envoie `/api/*` à l’API et le reste au site. En développement, Next.js relaie `/api/v1` vers l’API.
-- **Paiement** : couche d’abstraction des prestataires (`apps/api/src/modules/payments/providers.ts`) avec un bac à sable signé HMAC, un adaptateur CinetPay à valider et un emplacement PayDunya. Le rapprochement est idempotent.
+- **Paiement** : couche d’abstraction des prestataires (`apps/api/src/modules/payments/providers.ts`) avec un bac à sable signé HMAC, un adaptateur CinetPay à valider et un emplacement PayDunya. Le rapprochement est idempotent. En production, le bac à sable est fermé (paiement en ligne indisponible, encaissement au guichet seulement) sauf si `ALLOW_SANDBOX_PAYMENTS=true` ; la page de simulation est réservée au parent connecté.
 - **Notifications** : dans l’application d’abord ; SMS si non lu après 10 minutes (ou immédiatement pour une alerte urgente).
 - **Bulletins** : saisie → contrôle → conseil de classe → validation (notes verrouillées) → publication (familles prévenues, QR code actif).
 

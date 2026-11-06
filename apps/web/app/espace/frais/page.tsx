@@ -77,6 +77,12 @@ function PayDialog({ invoice, phone, onClose }: { invoice: any; phone: string; o
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent title="Payer par Mobile Money" description={invoice.label}>
+        {ops.data?.provider === 'disabled' ? (
+          <div className="grid gap-3">
+            <p className="rounded-lg bg-sunk p-3 text-sm">Le paiement en ligne n’est pas encore ouvert dans votre établissement. Vous pouvez régler au guichet de l’école ; le reçu sera ensuite visible ici.</p>
+            <Button size="lg" onClick={onClose}>Fermer</Button>
+          </div>
+        ) : (
         <form className="grid gap-3" onSubmit={async (e) => {
           e.preventDefault();
           const r = await run(() => api.post<{ checkoutUrl?: string; paymentId: string }>('/payments/mobile-money', { invoiceId: invoice.id, amount: Number(f.amount), operator: f.operator, phone: f.phone }), toast);
@@ -90,6 +96,7 @@ function PayDialog({ invoice, phone, onClose }: { invoice: any; phone: string; o
           <Button type="submit" size="lg" variant="accent" loading={busy}>Continuer</Button>
           <p className="text-xs text-muted">Vous validerez le paiement sur votre téléphone. Le reçu est émis dès la confirmation de l’opérateur.</p>
         </form>
+        )}
       </DialogContent>
     </Dialog>
   );

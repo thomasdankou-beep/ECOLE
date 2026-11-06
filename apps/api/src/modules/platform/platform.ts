@@ -9,7 +9,7 @@ import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
 import { IsEmail, IsEnum, IsOptional, IsString, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
-import { Public } from '../../common/auth';
+import { forgetSessions, Public } from '../../common/auth';
 import { normalizePhone } from '../../common/util';
 import { config, tenantOrigin } from '../../config';
 import { hashPassword } from '../auth/auth.service';
@@ -211,6 +211,7 @@ export class PlatformService {
         ...(dto.platformNotes !== undefined ? { platformNotes: dto.platformNotes || null } : {}),
       },
     });
+    if (dto.status) forgetSessions({ tenantId: id });
     await this.log(actor, dto.status && dto.status !== t.status ? `platform.tenant.${dto.status === 'SUSPENDED' ? 'suspended' : 'reactivated'}` : 'platform.tenant.updated', id, dto);
     return updated;
   }
@@ -225,6 +226,7 @@ export class PlatformService {
       if (!u) throw new NotFoundException("Cette école n'a aucun compte Direction actif");
       await tx.user.update({ where: { id: u.id }, data: { passwordHash: await hashPassword(password), mustChangePassword: true, failedLogins: 0, lockedUntil: null } });
       await tx.session.updateMany({ where: { userId: u.id, revokedAt: null }, data: { revokedAt: new Date() } });
+      forgetSessions({ userId: u.id });
       return u;
     });
     await this.log(actor, 'platform.tenant.director_reset', id, { userId: user.id });

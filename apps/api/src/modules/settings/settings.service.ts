@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomInt } from 'crypto';
-import { Actor } from '../../common/auth';
+import { Actor, forgetSessions } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { normalizePhone, toDate } from '../../common/util';
 import { hashPassword } from '../auth/auth.service';
 import { createSmsProvider } from '../notifications/sms.provider';
@@ -329,6 +330,7 @@ export class SettingsService {
 
   private simpleUpdate(actor: Actor, model: 'level' | 'track' | 'room' | 'subject', id: string, dto: object, conflict: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { site: (dto as { siteId?: string }).siteId });
       const row = await (tx[model] as any).update({ where: { id }, data: dto }).catch((e: unknown) => uniqueViolation(e, conflict));
       await this.audit.log(tx, actor, `${model}.updated`, model, id, dto);
       return row;
@@ -337,6 +339,7 @@ export class SettingsService {
 
   private simpleCreate(actor: Actor, model: 'level' | 'track' | 'room' | 'subject', dto: object, conflict: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { site: (dto as { siteId?: string }).siteId });
       const row = await (tx[model] as any).create({ data: { ...dto, tenantId: actor.tenantId } }).catch((e: unknown) => uniqueViolation(e, conflict));
       await this.audit.log(tx, actor, `${model}.created`, model, row.id, dto);
       return row;
@@ -373,6 +376,7 @@ export class SettingsService {
   createClass(actor: Actor, dto: ClassDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const academicYearId = await this.scope.currentYearId(tx);
+      await assertOwned(tx, { site: dto.siteId, level: dto.levelId, track: dto.trackId, user: dto.headTeacherId });
       const c = await tx.class
         .create({ data: { ...dto, tenantId: actor.tenantId, academicYearId } })
         .catch((e) => uniqueViolation(e, 'Une classe porte déjà ce nom cette année'));
@@ -383,6 +387,7 @@ export class SettingsService {
 
   updateClass(actor: Actor, id: string, dto: Partial<ClassDto>) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { site: dto.siteId, level: dto.levelId, track: dto.trackId, user: dto.headTeacherId });
       const c = await tx.class.update({ where: { id }, data: dto });
       await this.audit.log(tx, actor, 'class.updated', 'Class', id, dto);
       return c;
@@ -392,6 +397,7 @@ export class SettingsService {
   /** Ajoute une matière à une classe ou modifie son coefficient. */
   upsertClassSubject(actor: Actor, classId: string, dto: ClassSubjectDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { class: classId, subject: dto.subjectId });
       const cs = await tx.classSubject.upsert({
         where: { classId_subjectId: { classId, subjectId: dto.subjectId } },
         create: { tenantId: actor.tenantId, classId, subjectId: dto.subjectId, coefficient: dto.coefficient },
@@ -405,6 +411,7 @@ export class SettingsService {
   /** Même coefficient pour une matière dans toutes les classes d'un niveau (et d'une filière) de l'année en cours. */
   bulkCoefficient(actor: Actor, dto: BulkCoefficientDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { level: dto.levelId, track: dto.trackId, subject: dto.subjectId });
       const academicYearId = await this.scope.currentYearId(tx);
       const classes = await tx.class.findMany({
         where: { academicYearId, levelId: dto.levelId, ...(dto.trackId !== undefined ? { trackId: dto.trackId } : {}) },
@@ -446,6 +453,7 @@ export class SettingsService {
   // ------------------------------------------------------------ Affectations
   assign(actor: Actor, dto: AssignmentDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { classSubject: dto.classSubjectId });
       const teacher = await tx.userRole.findFirst({ where: { userId: dto.teacherId, role: 'ENSEIGNANT' } });
       if (!teacher) throw new BadRequestException("Cette personne n'a pas le rôle Enseignant");
       const a = await tx.teacherAssignment
@@ -485,6 +493,7 @@ export class SettingsService {
 
   createStaff(actor: Actor, dto: StaffDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { site: dto.roles.map((r) => r.siteId), subject: dto.subjectIds });
       const password = temporaryPassword();
       const phone = normalizePhone(dto.phone);
       const user = await tx.user
@@ -505,6 +514,7 @@ export class SettingsService {
 
   updateStaff(actor: Actor, id: string, dto: StaffUpdateDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      await assertOwned(tx, { user: id, site: dto.roles?.map((r) => r.siteId), subject: dto.subjectIds });
       const data: Prisma.UserUpdateInput = {
         firstName: dto.firstName, lastName: dto.lastName, email: dto.email?.toLowerCase(),
         phone: dto.phone ? normalizePhone(dto.phone) : undefined,
@@ -521,6 +531,7 @@ export class SettingsService {
       if (dto.subjectIds) await this.setTeacherSubjects(tx, actor, id, dto.subjectIds);
       if (dto.active === false || dto.roles) {
         await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+        forgetSessions({ userId: id });
       }
       await this.audit.log(tx, actor, dto.roles ? 'user.roles_changed' : 'user.updated', 'User', id, dto);
       return { ok: true };
@@ -544,6 +555,7 @@ export class SettingsService {
       const password = temporaryPassword();
       const user = await tx.user.update({ where: { id }, data: { passwordHash: await hashPassword(password), mustChangePassword: true, failedLogins: 0, lockedUntil: null } });
       await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+      forgetSessions({ userId: id });
       await this.audit.log(tx, actor, 'user.password_reset_by_admin', 'User', id);
       if (user.phone) await this.sendCredentials(tx, actor, user.phone, password);
       return { temporaryPassword: password };

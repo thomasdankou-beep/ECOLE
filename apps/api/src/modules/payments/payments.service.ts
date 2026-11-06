@@ -22,6 +22,7 @@ export class PaymentsService {
 
   /** Le parent lance un paiement Mobile Money ; la facture n'est réglée qu'à la confirmation de l'opérateur. */
   async initiate(actor: Actor, dto: { invoiceId: string; amount: number; operator: string; phone: string }) {
+    if (this.provider.name === 'disabled') throw new BadRequestException("Le paiement en ligne n'est pas encore ouvert. Réglez au guichet de l'école.");
     const transactionId = `SK${Date.now().toString(36).toUpperCase()}${randomBytes(4).toString('hex').toUpperCase()}`;
     const payment = await this.db.forTenant(actor.tenantId, async (tx) => {
       const inv = await tx.invoice.findUnique({ where: { id: dto.invoiceId }, include: { student: true } });
@@ -113,20 +114,26 @@ export class PaymentsService {
   }
 
   /** Bac à sable : simule la validation du parent sur son téléphone, puis le webhook signé de l'agrégateur. */
-  async sandboxDecide(transactionId: string, success: boolean) {
+  /** Le paiement simulé doit appartenir à l'établissement de l'utilisateur et à un élève de son périmètre. */
+  private async sandboxPayment(actor: Actor, transactionId: string) {
     if (this.provider.name !== 'sandbox') throw new NotFoundException();
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const p = await tx.payment.findUnique({ where: { transactionId }, include: { invoice: { select: { label: true } } } });
+      if (!p) throw new NotFoundException('Transaction inconnue');
+      await this.scope.assertStudent(tx, actor, p.studentId);
+      return p;
+    });
+  }
+
+  async sandboxDecide(actor: Actor, transactionId: string, success: boolean) {
+    await this.sandboxPayment(actor, transactionId);
     if (!SandboxProvider.decide(transactionId, success)) throw new NotFoundException('Transaction inconnue');
     const body = { transactionId };
     return this.webhook('sandbox', { 'x-sandbox-signature': SandboxProvider.sign(JSON.stringify(body)) }, body);
   }
 
-  async sandboxInfo(transactionId: string) {
-    if (this.provider.name !== 'sandbox') throw new NotFoundException();
-    const route = await this.db.$queryRaw<{ tenant_id: string }[]>`SELECT tenant_id::text FROM payment_routes WHERE transaction_id = ${transactionId}`;
-    if (!route.length) throw new NotFoundException();
-    return this.db.forTenant(route[0].tenant_id, async (tx) => {
-      const p = await tx.payment.findUniqueOrThrow({ where: { transactionId }, include: { invoice: { select: { label: true } } } });
-      return { amount: p.amount, operator: p.operator, phone: p.payerPhone, label: p.invoice.label, status: p.status, paymentId: p.id };
-    });
+  async sandboxInfo(actor: Actor, transactionId: string) {
+    const p = await this.sandboxPayment(actor, transactionId);
+    return { amount: p.amount, operator: p.operator, phone: p.payerPhone, label: p.invoice.label, status: p.status, paymentId: p.id };
   }
 }

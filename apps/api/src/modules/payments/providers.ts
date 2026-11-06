@@ -40,6 +40,22 @@ export interface PaymentProvider {
   check(transactionId: string): Promise<ProviderEvent>;
 }
 
+// ---------------------------------------------------------------- Paiement en ligne fermé
+
+/** Aucun agrégateur configuré : le paiement en ligne est refusé, l'encaissement au guichet reste possible. */
+export class DisabledProvider implements PaymentProvider {
+  readonly name = 'disabled';
+  async initiate(): Promise<InitiateResult> {
+    throw new Error("le paiement en ligne n'est pas encore ouvert dans cet établissement. Réglez au guichet de l'école");
+  }
+  async parseWebhook(): Promise<{ transactionId: string }> {
+    throw new Error('paiement en ligne fermé');
+  }
+  async check(transactionId: string): Promise<ProviderEvent> {
+    return { transactionId, status: 'PENDING' };
+  }
+}
+
 // ---------------------------------------------------------------- Bac à sable
 
 /**
@@ -168,6 +184,7 @@ export class PayDunyaProvider implements PaymentProvider {
 
 export function createPaymentProvider(name: string): PaymentProvider {
   switch (name) {
+    case 'disabled': return new DisabledProvider();
     case 'sandbox': return new SandboxProvider();
     case 'cinetpay': return new CinetPayProvider();
     case 'paydunya': return new PayDunyaProvider();

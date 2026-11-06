@@ -215,9 +215,12 @@ describe('Paiement Mobile Money (CDC §4.4, recette 7.3)', () => {
     const before = await as('parent').get('/finance/invoices');
     expect(before.body.find((i: any) => i.id === open.id).paid).toBe(open.paid);
 
-    const ok = await http.post(`/api/v1/payments/sandbox/${init.body.transactionId}/decision`).send({ success: true });
+    // SEC-005 : la simulation est réservée au parent connecté ; sans connexion, rien n'est lu ni validé.
+    expect((await http.get(`/api/v1/payments/sandbox/${init.body.transactionId}`)).status).toBe(401);
+    expect((await http.post(`/api/v1/payments/sandbox/${init.body.transactionId}/decision`).send({ success: true })).status).toBe(401);
+    const ok = await as('parent').post(`/payments/sandbox/${init.body.transactionId}/decision`, { success: true });
     expect(ok.body.status).toBe('SUCCESS');
-    const replay = await http.post(`/api/v1/payments/sandbox/${init.body.transactionId}/decision`).send({ success: true });
+    const replay = await as('parent').post(`/payments/sandbox/${init.body.transactionId}/decision`, { success: true });
     expect(replay.body.alreadyProcessed).toBe(true);
 
     const p = await as('parent').get(`/payments/${init.body.paymentId}`);
@@ -681,5 +684,139 @@ describe("Photo et pièces du dossier de l'élève", () => {
     dossier = (await as('direction').get(`/students/${student.id}`)).body;
     expect(dossier.files).toEqual([]);
     expect(dossier.photoUrl).toBeNull();
+  });
+});
+
+/**
+ * Audit de sécurité v1.1, étape 1 (SEC-001 à SEC-005) : une école ne doit ni lire, ni référencer,
+ * ni bloquer les fiches d'une autre ; une suspension ou une déconnexion coupe l'accès tout de suite.
+ */
+describe('Étanchéité entre écoles : références, blocages et sessions (SEC-001 à SEC-005)', () => {
+  const slugB = `etanche-${Date.now().toString(36)}`;
+  const phoneB = '+2290166000001';
+  let tidB = '';
+  let tokenB = '';
+  let classB = '';
+  let studentB = '';
+  let A: { tenant: string; site: string; level: string; klass: string; term: string; student: string; subject: string };
+
+  const asB = (role?: string) => {
+    const h = (r: request.Test) => (role ? r.set('X-Active-Role', role) : r).set('Authorization', `Bearer ${tokenB}`);
+    return {
+      get: (url: string) => h(http.get(`/api/v1${url}`)),
+      post: (url: string, body?: object) => h(http.post(`/api/v1${url}`)).send(body ?? {}),
+      put: (url: string, body?: object) => h(http.put(`/api/v1${url}`)).send(body ?? {}),
+      patch: (url: string, body?: object) => h(http.patch(`/api/v1${url}`)).send(body ?? {}),
+    };
+  };
+  const inTenant = <T>(tid: string, fn: (tx: any) => Promise<T>) =>
+    admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tid}, true)`;
+      return fn(tx);
+    });
+
+  beforeAll(async () => {
+    const argon2 = await import('argon2');
+    const t = await admin.tenant.create({ data: { slug: slugB, name: 'École B (test)', settings: { matriculePrefix: 'ETB' } } });
+    tidB = t.id;
+    const ids = await inTenant(tidB, async (tx) => {
+      const site = await tx.site.create({ data: { tenantId: tidB, name: 'Site B' } });
+      const year = await tx.academicYear.create({ data: { tenantId: tidB, label: '2026-2027', startDate: new Date('2026-09-01'), endDate: new Date('2027-07-31'), isCurrent: true } });
+      await tx.term.create({ data: { tenantId: tidB, academicYearId: year.id, name: 'T1', position: 1, startDate: new Date('2026-09-01'), endDate: new Date('2026-12-20') } });
+      const level = await tx.level.create({ data: { tenantId: tidB, name: '6e', cycle: 'COLLEGE', position: 1 } });
+      const klass = await tx.class.create({ data: { tenantId: tidB, siteId: site.id, academicYearId: year.id, levelId: level.id, name: '6e B' } });
+      const student = await tx.student.create({ data: { tenantId: tidB, matricule: 'ETB-26-0001', firstName: 'Élève', lastName: 'BÉ' } });
+      await tx.enrollment.create({ data: { tenantId: tidB, studentId: student.id, classId: klass.id, academicYearId: year.id } });
+      await tx.user.create({
+        data: {
+          tenantId: tidB, firstName: 'Direction', lastName: 'B', phone: phoneB, passwordHash: await argon2.hash(PASSWORD),
+          roles: { create: ['DIRECTION', 'VIE_SCOLAIRE', 'COMPTABLE', 'SECRETARIAT'].map((role) => ({ tenantId: tidB, role: role as any })) },
+        },
+      });
+      return { klass: klass.id, student: student.id };
+    });
+    classB = ids.klass;
+    studentB = ids.student;
+    tokenB = await login(phoneB, slugB);
+
+    const ta = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    A = await inTenant(ta.id, async (tx) => {
+      const year = await tx.academicYear.findFirstOrThrow({ where: { isCurrent: true } });
+      const klass = await tx.class.findFirstOrThrow({ where: { academicYearId: year.id, enrollments: { some: {} } } });
+      const used = await tx.reportCardRun.findMany({ where: { classId: klass.id }, select: { termId: true } });
+      const term = await tx.term.findFirstOrThrow({ where: { academicYearId: year.id, id: { notIn: used.map((u: any) => u.termId) } } });
+      const enr = await tx.enrollment.findFirstOrThrow({ where: { classId: klass.id } });
+      const subject = await tx.subject.findFirstOrThrow({});
+      return { tenant: ta.id, site: klass.siteId, level: klass.levelId, klass: klass.id, term: term.id, student: enr.studentId, subject: subject.id };
+    });
+  });
+
+  it("refuse les fiches d'une autre école dans les créations et modifications, avec la même réponse qu'un identifiant inventé", async () => {
+    const unknown = '11111111-1111-4111-8111-111111111111';
+    const attempts: [string, () => request.Test][] = [
+      ['salle sur un site de A', () => asB().post('/rooms', { siteId: A.site, name: 'Salle B' })],
+      ['classe sur un site et un niveau de A', () => asB().post('/classes', { name: '6e X', siteId: A.site, levelId: A.level })],
+      ['matière de A dans une classe de B', () => asB().put(`/classes/${classB}/subjects`, { subjectId: A.subject, coefficient: 1 })],
+      ['élève de B dans une classe de A', () => asB().post(`/students/${studentB}/class`, { classId: A.klass })],
+      ['responsable ajouté à un élève de A', () => asB().post(`/students/${A.student}/guardians`, { firstName: 'P', lastName: 'X', phone: '0197555555', relation: 'Père' })],
+      ['sanction sur un élève de A', () => asB('VIE_SCOLAIRE').post('/sanctions', { studentId: A.student, kind: 'Avertissement', reason: 'test', date: '2026-11-06' })],
+      ['facture pour un élève de A', () => asB('COMPTABLE').post('/finance/invoices', { studentId: A.student, label: 'x', dueDate: '2026-12-01', items: [{ label: 'x', amount: 1 }] })],
+      ['frais sur un niveau de A', () => asB().post('/finance/fee-types', { name: 'x', amount: 1, levelId: A.level })],
+      ['annonce à une classe de A', () => asB().post('/announcements', { title: 'x', body: 'x', audience: 'CLASS', classId: A.klass })],
+      ['stage sur un niveau de A', () => asB().post('/internships/periods', { label: 'x', levelId: A.level, startDate: '2026-11-06', endDate: '2026-12-01' })],
+      ['bulletins d’une classe de A', () => asB().post(`/report-cards/runs/${A.klass}/${A.term}/advance`)],
+    ];
+    for (const [what, req] of attempts) {
+      const r = await req();
+      expect([what, r.status]).toEqual([what, 404]);
+    }
+    expect((await asB().post('/rooms', { siteId: unknown, name: 'Salle B' })).status).toBe(404);
+    // Rien n'a été écrit chez B qui pointe vers A.
+    const leaks = await inTenant(tidB, async (tx) => ({
+      rooms: await tx.room.count({ where: { siteId: A.site } }),
+      sanctions: await tx.sanction.count({ where: { studentId: A.student } }),
+      runs: await tx.reportCardRun.count({ where: { classId: A.klass } }),
+      invoices: await tx.invoice.count({ where: { studentId: A.student } }),
+    }));
+    expect(leaks).toEqual({ rooms: 0, sanctions: 0, runs: 0, invoices: 0 });
+  });
+
+  it("A garde la main sur ses propres salles et sur ses bulletins (pas de blocage par B)", async () => {
+    const room = await as('direction').post('/rooms', { siteId: A.site, name: `Salle B-${slugB}` });
+    expect(room.status).toBe(201);
+    const run = await as('direction').post(`/report-cards/runs/${A.klass}/${A.term}/advance`);
+    expect(run.status).toBe(201);
+  });
+
+  it('les opérations légitimes de B sur ses propres fiches restent possibles', async () => {
+    const site = (await asB().get('/settings')).body.sites[0].id;
+    expect((await asB().post('/rooms', { siteId: site, name: 'Salle 1' })).status).toBe(201);
+    expect((await asB('VIE_SCOLAIRE').post('/sanctions', { studentId: studentB, kind: 'Avertissement', reason: 'test', date: '2026-11-06' })).status).toBe(201);
+  });
+
+  it("« déconnecter tous les appareils » coupe aussitôt le jeton d'accès", async () => {
+    const t = await login(phoneB, slugB);
+    expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`)).status).toBe(200);
+    await http.post('/api/v1/auth/logout-all').set('Authorization', `Bearer ${t}`).expect(200);
+    expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`)).status).toBe(401);
+  });
+
+  it("une école suspendue perd l'accès même avec un jeton déjà délivré", async () => {
+    const t = await login(phoneB, slugB);
+    expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`)).status).toBe(200);
+    await admin.tenant.update({ where: { id: tidB }, data: { status: 'SUSPENDED' } });
+    // Suspension faite directement en base, sans passer par la plateforme : le cache de 30 s s'applique.
+    require('../src/common/auth').forgetSessions({ tenantId: tidB });
+    expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${t}`)).status).toBe(401);
+    await admin.tenant.update({ where: { id: tidB }, data: { status: 'ACTIVE' } });
+  });
+
+  it("en production, le bac à sable des paiements n'est jamais actif sans autorisation explicite", () => {
+    const { paymentProvider } = require('../src/config');
+    expect(paymentProvider({ NODE_ENV: 'production' })).toBe('disabled');
+    expect(paymentProvider({ NODE_ENV: 'production', PAYMENT_PROVIDER: 'sandbox' })).toBe('disabled');
+    expect(paymentProvider({ NODE_ENV: 'production', PAYMENT_PROVIDER: 'sandbox', ALLOW_SANDBOX_PAYMENTS: 'true' })).toBe('sandbox');
+    expect(paymentProvider({ NODE_ENV: 'production', PAYMENT_PROVIDER: 'cinetpay' })).toBe('cinetpay');
+    expect(paymentProvider({ NODE_ENV: 'development' })).toBe('sandbox');
   });
 });

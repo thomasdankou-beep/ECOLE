@@ -8,6 +8,12 @@ function required(name: string, devDefault: string): string {
   return devDefault;
 }
 
+export function paymentProvider(e: NodeJS.ProcessEnv = env): string {
+  const wanted = e.PAYMENT_PROVIDER ?? 'sandbox';
+  if (wanted === 'sandbox' && e.NODE_ENV === 'production' && e.ALLOW_SANDBOX_PAYMENTS !== 'true') return 'disabled';
+  return wanted;
+}
+
 export const config = {
   port: Number(env.PORT ?? 4000),
   webOrigin: env.WEB_ORIGIN ?? 'http://localhost:3000',
@@ -30,7 +36,10 @@ export const config = {
     enforceTwoFactor: env.ENFORCE_2FA === 'true',
   },
   payments: {
-    provider: env.PAYMENT_PROVIDER ?? 'sandbox',
+    /// SEC-005 : en production, le bac à sable (paiements simulés) n'est jamais actif par défaut ; il faut
+    /// ALLOW_SANDBOX_PAYMENTS=true pour une démonstration. Sinon le paiement en ligne est fermé (« disabled »)
+    /// tant qu'aucun agrégateur réel (CinetPay, PayDunya) n'est configuré.
+    provider: paymentProvider(),
     cinetpay: { apiKey: env.CINETPAY_API_KEY ?? '', siteId: env.CINETPAY_SITE_ID ?? '', secretKey: env.CINETPAY_SECRET_KEY ?? '' },
     paydunya: { masterKey: env.PAYDUNYA_MASTER_KEY ?? '', privateKey: env.PAYDUNYA_PRIVATE_KEY ?? '', token: env.PAYDUNYA_TOKEN ?? '' },
   },

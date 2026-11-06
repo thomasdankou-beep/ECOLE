@@ -7,6 +7,7 @@ import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
+import { assertOwned } from '../../common/ownership';
 import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { logoUrl, sitePhotoUrl, tenantSettings } from '../settings/settings.service';
@@ -51,6 +52,7 @@ export class CommunicationService {
   create(actor: Actor, dto: AnnouncementDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       if (dto.audience === 'CLASS' && !dto.classId) throw new NotFoundException('Choisissez la classe');
+      await assertOwned(tx, { class: dto.classId, site: dto.siteId });
       const a = await tx.announcement.create({ data: { tenantId: actor.tenantId, ...dto, urgent: !!dto.urgent, authorId: actor.userId } });
       // Destinataires construits à partir des inscriptions : aucune liste à tenir à la main (CDC §4.5).
       let userIds: string[] = [];
