@@ -31,11 +31,9 @@ export const config = {
     maxFailedLogins: 5,
     lockMinutes: 15,
     otpTtlMinutes: 10,
-    /// Rôles pour lesquels la double authentification est obligatoire (SEC-020, choix de la direction du projet le 6 novembre 2026).
-    /// Le Super Admin y est aussi soumis quand l'obligation est active.
-    twoFactorRoles: ['DIRECTION', 'COMPTABLE'] as string[],
-    /// Activée par l'installateur du serveur (ENFORCE_2FA=true). En développement et en démonstration,
-    /// la 2FA est proposée mais pas imposée.
+    /// Rôles pour lesquels la double authentification est obligatoire (CDC §6.1).
+    twoFactorRoles: ['DIRECTION', 'COMPTABLE', 'SECRETARIAT'],
+    /// En développement, la 2FA est proposée mais pas imposée pour ne pas bloquer la démonstration.
     enforceTwoFactor: env.ENFORCE_2FA === 'true',
   },
   payments: {

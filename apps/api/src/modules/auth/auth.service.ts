@@ -7,7 +7,7 @@ import { authenticator } from 'otplib';
 import * as QRCode from 'qrcode';
 import { logoUrl, tenantSettings } from '../settings/settings.service';
 import { config } from '../../config';
-import { AccessTokenPayload, Actor, forgetSessions, mustSetupTwoFactor, SCHOOL_AUDIENCE } from '../../common/auth';
+import { AccessTokenPayload, Actor, forgetSessions, SCHOOL_AUDIENCE } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
@@ -120,7 +120,7 @@ export class AuthService {
         const challenge = this.jwt.sign({ sub: user.id, tid: tenant.id, purpose: '2fa' }, { secret: config.jwt.accessSecret, audience: '2fa', expiresIn: 300 });
         return { twoFactorRequired: true as const, challenge };
       }
-      const needs2fa = mustSetupTwoFactor(user.roles, user.totpEnabled);
+      const needs2fa = config.security.enforceTwoFactor && user.roles.some((r) => config.security.twoFactorRoles.includes(r.role));
       const tokens = await this.openSession(tx, user, meta);
       return { twoFactorRequired: false as const, ...tokens, mustSetupTwoFactor: needs2fa, mustChangePassword: user.mustChangePassword };
     }));
@@ -280,7 +280,7 @@ export class AuthService {
         });
         if (st) self = { id: st.id, firstName: st.firstName, lastName: st.lastName, className: st.enrollments[0]?.class.name ?? null };
       }
-      return { user: { ...user, mustSetupTwoFactor: mustSetupTwoFactor(user.roles, user.totpEnabled) }, tenant, sites, year, children, self };
+      return { user, tenant, sites, year, children, self };
     });
   }
 
@@ -379,7 +379,6 @@ export class AuthService {
       const step = totpStep(secret, code, null);
       if (step === null) throw new BadRequestException('Code incorrect');
       await tx.user.update({ where: { id: user.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step } });
-      forgetSessions({ userId: user.id }); // une session limitée en attente de la 2FA (SEC-020) s'ouvre aussitôt
       await this.audit.log(tx, actor, user.totpEnabled ? 'auth.2fa_reset' : 'auth.2fa_enabled', 'User', user.id);
       return { ok: true };
     });

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomInt } from 'crypto';
 import { Actor, forgetSessions } from '../../common/auth';
@@ -565,24 +565,6 @@ export class SettingsService {
     }
     await tx.teacherSubject.deleteMany({ where: { teacherId: userId, subjectId: { notIn: ids } } });
     await tx.teacherSubject.createMany({ data: ids.map((subjectId) => ({ tenantId: actor.tenantId, teacherId: userId, subjectId })), skipDuplicates: true });
-  }
-
-  /**
-   * Téléphone perdu : la direction retire la double authentification d'un compte (SEC-020).
-   * Jamais pour son propre compte (une session volée ne doit pas pouvoir l'enlever, SEC-019) ;
-   * les sessions du compte sont coupées et il devra la réactiver à sa prochaine connexion si son rôle l'exige.
-   */
-  resetTwoFactor(actor: Actor, id: string) {
-    if (id === actor.userId) throw new ForbiddenException('Vous ne pouvez pas retirer votre propre double authentification : demandez-le à une autre personne de la direction ou au Super Admin');
-    return this.db.forTenant(actor.tenantId, async (tx) => {
-      const user = await tx.user.findUnique({ where: { id } });
-      if (!user) throw new NotFoundException();
-      await tx.user.update({ where: { id }, data: { totpEnabled: false, totpSecret: null, totpLastStep: null } });
-      await tx.session.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
-      forgetSessions({ userId: id });
-      await this.audit.log(tx, actor, 'user.2fa_reset_by_admin', 'User', id);
-      return { ok: true };
-    });
   }
 
   resetPassword(actor: Actor, id: string) {

@@ -57,7 +57,6 @@ if [ ! -f .env ]; then
   setkv SITE_ADDRESS :80
   setkv COOKIE_SECURE false
   setkv SHOW_DEMO_ACCOUNTS false
-  setkv ENFORCE_2FA true
   echo "Fichier .env de production créé pour http://$ip"
 fi
 for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
@@ -67,9 +66,6 @@ for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASS
   setkv "$k" "$v"
   echo "Secret $k généré."
 done
-# SEC-020 : double authentification obligatoire en production (Super Admin, Direction, Comptable).
-# Ajoutée une seule fois : une valeur déjà présente dans .env n'est jamais modifiée.
-if ! grep -q "^ENFORCE_2FA=" .env; then setkv ENFORCE_2FA true; echo "Double authentification obligatoire activée (ENFORCE_2FA=true)."; fi
 chmod 600 .env
 
 if [ -n "$domaine" ]; then

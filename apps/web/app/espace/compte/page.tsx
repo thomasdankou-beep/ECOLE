@@ -27,7 +27,7 @@ export default function Compte() {
     <>
       <PageHeader title="Mon compte" subtitle={me ? `${me.user.firstName} ${me.user.lastName} · ${me.user.roles.map((r) => ROLE_LABEL[r.role]).join(', ')}` : undefined} />
       {first && <p className="rounded-xl bg-warn-soft p-4 font-bold text-warn">Pour votre sécurité, choisissez un nouveau mot de passe avant de continuer.</p>}
-      {(p.get('securite') === '1' || (me?.user.mustSetupTwoFactor && !first)) && <p className="rounded-xl bg-warn-soft p-4 font-bold text-warn">Votre rôle demande la double authentification : activez-la ci-dessous.</p>}
+      {p.get('securite') === '1' && <p className="rounded-xl bg-warn-soft p-4 font-bold text-warn">Votre rôle demande la double authentification : activez-la ci-dessous.</p>}
       <div className="grid gap-4 lg:grid-cols-2">
         <Section title="Mot de passe">
           <form className="grid gap-3" onSubmit={async (e) => {
@@ -43,7 +43,7 @@ export default function Compte() {
         </Section>
         <Section title="Double authentification" action={me?.user.totpEnabled ? <Badge tone="good"><ShieldCheck className="size-3" /> Activée</Badge> : <Badge>Désactivée</Badge>}>
           {me?.user.totpEnabled ? <p className="text-muted">Un code de votre application d’authentification est demandé à chaque connexion.</p> : totp ? (
-            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post('/auth/2fa/enable', { code, setupToken: totp.setupToken }), toast, 'Double authentification activée')) { const wasRequired = me?.user.mustSetupTwoFactor; setTotp(null); await reload(); if (wasRequired) router.replace('/espace'); } }}>
+            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post('/auth/2fa/enable', { code, setupToken: totp.setupToken }), toast, 'Double authentification activée')) { setTotp(null); reload(); } }}>
               <p className="text-sm">Scannez ce QR code avec Google Authenticator ou une application équivalente, puis saisissez le code affiché.</p>
               <img src={totp.qr} alt="QR code de configuration" className="mx-auto size-44 rounded bg-white p-2" />
               <p className="break-all text-center font-mono text-xs text-muted">{totp.secret}</p>
