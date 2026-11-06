@@ -40,6 +40,11 @@ export function configureApp(app: INestApplication) {
   app.enableShutdownHooks();
 }
 
+/** SEC-045 : la documentation de l'API n'est servie qu'hors production, sauf API_DOCS=true. */
+export function serveApiDocs(env: Record<string, string | undefined> = process.env) {
+  return env.API_DOCS === 'true' || (env.NODE_ENV !== 'production' && env.API_DOCS !== 'false');
+}
+
 export function setupSwagger(app: INestApplication) {
   const doc = new DocumentBuilder()
     .setTitle('ERP scolaire — API')

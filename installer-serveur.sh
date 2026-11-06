@@ -58,6 +58,7 @@ if [ ! -f .env ]; then
   setkv COOKIE_SECURE false
   setkv SHOW_DEMO_ACCOUNTS false
   setkv ENFORCE_2FA true
+  setkv SMS_CONSOLE_SHOW_TEXT false
   echo "Fichier .env de production créé pour http://$ip"
 fi
 for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
