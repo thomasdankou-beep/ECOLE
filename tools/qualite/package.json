@@ -1,0 +1,16 @@
+{
+  "name": "erp-qualite",
+  "private": true,
+  "description": "Outils de contrôle (SEC-039, SEC-043) : ESLint et tests de navigateur. Hors des espaces de travail npm : n'entre ni dans les images Docker ni dans le serveur.",
+  "scripts": {
+    "lint": "cd ../.. && tools/qualite/node_modules/.bin/eslint -c tools/qualite/eslint.config.mjs apps/api/src apps/api/prisma apps/api/test apps/web/app apps/web/components apps/web/lib",
+    "e2e": "playwright test -c playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "eslint": "10.12.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.71.2"
+  }
+}

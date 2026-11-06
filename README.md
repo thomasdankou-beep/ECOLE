@@ -75,14 +75,14 @@ Lancement manuel, si vous préférez :
 ```bash
 cp .env.docker.example .env      # puis remplir les secrets (openssl rand -base64 48)
 docker compose up -d --build
-docker compose exec api npm run db:seed   # données de démonstration (facultatif)
+docker compose exec api npm run db:seed   # données de démonstration, poste de test uniquement (efface l'école de démonstration)
 ```
 
 Pour arrêter : `docker compose down` (les données sont conservées).
 
 Le site est sur http://localhost:8080. La documentation de l’API (OpenAPI) est sur http://localhost:8080/api/docs.
 
-Pour la production : renseignez `SITE_ADDRESS` avec le nom de domaine (HTTPS automatique par Caddy), `WEB_ORIGIN` avec l’adresse publique, `COOKIE_SECURE=true` et `SHOW_DEMO_ACCOUNTS=false`, et ne lancez pas le jeu de démonstration.
+Pour la production : renseignez `SITE_ADDRESS` avec le nom de domaine (HTTPS automatique par Caddy), `WEB_ORIGIN` avec l’adresse publique, `COOKIE_SECURE=true` `SHOW_DEMO_ACCOUNTS=false` et `PRODUCTION_SERVER=true` (posé par `installer-serveur.sh`). Ne lancez jamais le jeu de démonstration sur le serveur : il refuse d’effacer une école qui n’est pas marquée « démonstration », et refuse de tourner quand `PRODUCTION_SERVER=true` (SEC-038).
 
 ### Comptes de démonstration (données fictives)
 
@@ -113,10 +113,18 @@ npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 98 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme)
+npm test            # 119 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).
+
+Contrôle automatique (SEC-039, SEC-043) : à chaque envoi sur GitHub, le workflow `.github/workflows/tests.yml` crée une base PostgreSQL neuve, applique toutes les migrations, lance ESLint, les tests de l’API, construit l’API et le site, puis lance les tests de navigateur (bureau et téléphone). Le résultat s’affiche sur GitHub (onglet « Actions »). Ne mettez en ligne qu’une version au résultat vert. En local :
+
+```bash
+cd tools/qualite && npm ci
+npm run lint        # contrôle du code
+npm run e2e         # tests de navigateur : API (4000) et site (3000) lancés sur la base erp_test
+```
 
 ## Architecture
 

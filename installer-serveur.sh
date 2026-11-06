@@ -70,6 +70,8 @@ done
 # SEC-020 : double authentification obligatoire en production (Super Admin, Direction, Comptable).
 # Ajoutée une seule fois : une valeur déjà présente dans .env n'est jamais modifiée.
 if ! grep -q "^ENFORCE_2FA=" .env; then setkv ENFORCE_2FA true; echo "Double authentification obligatoire activée (ENFORCE_2FA=true)."; fi
+# SEC-038 : ce serveur héberge de vraies écoles ; le jeu de démonstration y est refusé. Ajoutée une seule fois.
+if ! grep -q "^PRODUCTION_SERVER=" .env; then setkv PRODUCTION_SERVER true; echo "Serveur marqué production : données de démonstration interdites (PRODUCTION_SERVER=true)."; fi
 chmod 600 .env
 
 if [ -n "$domaine" ]; then

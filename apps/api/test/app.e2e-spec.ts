@@ -5,8 +5,11 @@
  */
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { execSync } from 'child_process';
+import { rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
@@ -68,6 +71,9 @@ beforeAll(async () => {
 }, 120000);
 
 afterAll(async () => {
+  // SEC-042 : dossier de fichiers neuf à chaque lancement (voir setup-env.ts), effacé à la fin.
+  const dir = process.env.STORAGE_DIR ?? '';
+  if (dir.startsWith(join(tmpdir(), 'erp-test-storage-'))) rmSync(dir, { recursive: true, force: true });
   await app?.close();
   await admin.$disconnect();
   await app_.$disconnect();
@@ -682,8 +688,25 @@ describe("Élèves à l'honneur sur le site public", () => {
   // PNG 1×1 transparent.
   const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
 
+  /** SEC-042 : le groupe prépare lui-même un bulletin publié s'il n'y en a pas encore (lancé seul ou après les autres). */
+  async function ensurePublishedCards() {
+    if ((await as('direction').get('/honors')).body.suggestions.length) return;
+    const mine = (await as('teacher').get('/evaluation/class-subjects')).body;
+    const cls = mine.classSubjects.find((c: any) => c.subject.code === 'ELEC').class.id;
+    const term = mine.terms[0].id;
+    for (let i = 0; i < 5; i++) {
+      const run = (await as('direction').get(`/report-cards/runs/${cls}/${term}`)).body;
+      if (run.status === 'PUBLIE') return;
+      if (run.status === 'CONSEIL') {
+        await as('direction').put(`/report-cards/runs/${cls}/${term}/council`, { entries: run.students.map((s: any) => ({ studentId: s.id, appreciation: 'Bon trimestre', councilDecision: 'Passage' })) }).expect(200);
+      }
+      await as('direction').post(`/report-cards/runs/${cls}/${term}/advance`).expect(201);
+    }
+  }
+
   it("rien n'est public sans choix de la direction ; publié avec l'accord des parents, sans la moyenne si elle le décide", async () => {
     expect((await http.get('/api/v1/public/saint-kisito')).body.honors).toEqual([]);
+    await ensurePublishedCards();
     const o = (await as('direction').get('/honors')).body;
     const best = o.suggestions[0];
     expect(best).toBeTruthy();
@@ -1646,5 +1669,327 @@ describe('Double authentification obligatoire (SEC-020)', () => {
     await http.post('/api/v1/platform/auth/2fa/enable').set('Cookie', c).send({ code: authenticator.generate(setup.body.secret), setupToken: setup.body.setupToken }).expect(201);
     expect((await http.get('/api/v1/platform/tenants').set('Cookie', c)).status).toBe(200);
     await admin.platformAdmin.deleteMany({ where: { email } });
+  });
+});
+
+describe("Sécurité v1.1, étape 6 : le jeu de démonstration n'efface jamais une vraie école (SEC-038)", () => {
+  const seed = (env: Record<string, string> = {}) => {
+    try {
+      execSync('npx ts-node --transpile-only prisma/seed.ts', { env: { ...process.env, ...env }, stdio: 'pipe', cwd: `${__dirname}/..` });
+      return { code: 0, err: '' };
+    } catch (e: any) {
+      return { code: e.status as number, err: String(e.stderr ?? '') };
+    }
+  };
+  const snapshot = async (tenantId: string) =>
+    admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      const [students, audit, receipts, grades] = await Promise.all([tx.student.count(), tx.auditLog.count(), tx.receipt.count(), tx.grade.count()]);
+      return { students, audit, receipts, grades };
+    });
+
+  it("refuse d'effacer une école sans la marque « démonstration », même avec ALLOW_DEMO_RESET=1", async () => {
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const before = await snapshot(t.id);
+    expect(before.students).toBeGreaterThan(0);
+    await admin.tenant.update({ where: { id: t.id }, data: { settings: { ...(t.settings as object), demo: false } } });
+    try {
+      const r = seed({ ALLOW_DEMO_RESET: '1' });
+      expect(r.code).toBe(2);
+      expect(r.err).toContain("n'est pas une école de démonstration");
+      expect(await snapshot(t.id)).toEqual(before);
+      expect((await admin.tenant.findUniqueOrThrow({ where: { id: t.id } })).settings).toMatchObject({ demo: false });
+    } finally {
+      await admin.tenant.update({ where: { id: t.id }, data: { settings: t.settings as object } });
+    }
+  }, 120000);
+
+  it('refuse de tourner sur un serveur de production (PRODUCTION_SERVER=true) sans autorisation écrite', async () => {
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const before = await snapshot(t.id);
+    const r = seed({ PRODUCTION_SERVER: 'true' });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('Serveur de production');
+    expect(await snapshot(t.id)).toEqual(before);
+  }, 120000);
+});
+
+/** Requêtes du propriétaire dans l'espace d'une école (FORCE RLS : même le propriétaire doit choisir l'école). */
+async function inTenant<T>(slug: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  const t = await admin.tenant.findUniqueOrThrow({ where: { slug } });
+  return admin.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+    return fn(tx);
+  });
+}
+
+describe('Sécurité v1.1, étape 6 : parties exposées sans test (SEC-040)', () => {
+  const application = (over: object = {}) => ({
+    studentFirstName: 'Afi', studentLastName: 'Test', wantedLevel: '6e', guardianName: 'Parent Test', guardianPhone: '+2290196000099', ...over,
+  });
+
+  it("pré-inscription publique : école inconnue refusée, champs contrôlés, secrétariat prévenu, SMS envoyé au parent", async () => {
+    expect((await http.post('/api/v1/public/ecole-inexistante/applications').send(application())).status).toBe(404);
+    expect((await http.post('/api/v1/public/saint-kisito/applications').send(application({ guardianPhone: '12' }))).status).toBe(400);
+    expect((await http.post('/api/v1/public/saint-kisito/applications').send(application({ tenantId: '00000000-0000-0000-0000-000000000000' }))).status).toBe(400);
+    const r = await http.post('/api/v1/public/saint-kisito/applications').send(application({ studentFirstName: 'Pré', studentLastName: 'inscrite' }));
+    expect(r.status).toBe(201);
+    expect(Object.keys(r.body)).toEqual(['reference']);
+    expect(r.body.reference).toMatch(/^PRE-\d{4}-\d{4}$/);
+    const saved = await inTenant('saint-kisito', (tx) => tx.application.findFirst({ where: { reference: r.body.reference } }));
+    expect(saved).toMatchObject({ studentLastName: 'INSCRITE', status: 'RECU', guardianPhone: '+2290196000099' });
+    const notes = (await as('secretariat').get('/notifications')).body;
+    expect(JSON.stringify(notes)).toContain('Pré inscrite · 6e');
+    expect(consoleSms.sent.some((m) => m.to === '+2290196000099' && m.text.includes(r.body.reference))).toBe(true);
+    // Rien n'arrive dans l'autre école.
+    expect(await inTenant('autre-ecole', (tx) => tx.application.count({ where: { reference: r.body.reference } }))).toBe(0);
+    // Le formulaire public ne donne pas accès à la liste.
+    expect((await http.get('/api/v1/applications')).status).toBe(401);
+    expect((await as('teacher').get('/applications')).status).toBe(403);
+  });
+
+  it('pré-inscription publique : au plus 5 envois par adresse en 10 minutes', async () => {
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'e2e-limite'; // le limiteur est coupé en NODE_ENV=test : on le rallume le temps de ce test
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        const r = await http.post('/api/v1/public/saint-kisito/applications').set('X-Forwarded-For', '192.0.2.55').send(application({ studentFirstName: `Limite${i}` }));
+        codes.push(r.status);
+      }
+      expect(codes).toEqual([201, 201, 201, 201, 201, 429]);
+      // Une autre adresse n'est pas bloquée.
+      expect((await http.post('/api/v1/public/saint-kisito/applications').set('X-Forwarded-For', '192.0.2.56').send(application())).status).toBe(201);
+    } finally {
+      process.env.NODE_ENV = previous;
+    }
+  });
+
+  it('pré-inscription : le secrétariat filtre, convoque (SMS au parent) et chaque décision est tracée', async () => {
+    const r = await http.post('/api/v1/public/saint-kisito/applications').send(application({ studentFirstName: 'Suivi', birthDate: '2014-03-02', wantedTrack: 'F3', sex: 'F' }));
+    expect(r.status).toBe(201);
+    const recu = (await as('secretariat').get('/applications?status=RECU')).body;
+    const a = recu.items.find((x: any) => x.reference === r.body.reference);
+    expect(a).toMatchObject({ wantedTrack: 'F3', sex: 'F' });
+    expect(recu.items.every((x: any) => x.status === 'RECU')).toBe(true);
+    expect(recu.funnel.RECU).toBeGreaterThan(0);
+    const sent = consoleSms.sent.length;
+    expect((await as('secretariat').patch(`/applications/${a.id}`, { status: 'EN_TEST', testResult: 'Convoqué le 5 août' })).status).toBe(200);
+    expect(consoleSms.sent.slice(sent).some((m) => m.to === '+2290196000099' && /convoquée au test/.test(m.text))).toBe(true);
+    const sent2 = consoleSms.sent.length;
+    expect((await as('secretariat').patch(`/applications/${a.id}`, { status: 'INSCRIT' })).status).toBe(200);
+    expect(consoleSms.sent.length).toBe(sent2); // l'inscription elle-même envoie ses propres messages
+    expect((await as('secretariat').patch(`/applications/${a.id}`, { status: 'PERDU' })).status).toBe(400);
+    expect(await inTenant('saint-kisito', (tx) => tx.auditLog.count({ where: { action: 'application.reviewed', entityId: a.id } }))).toBe(2);
+  });
+
+  it("emploi du temps : conflits de classe, d'enseignant et de salle ; créneaux qui se suivent acceptés", async () => {
+    const classes = (await as('direction').get('/classes')).body;
+    const f3 = classes.find((c: any) => c.name === '1re année F3');
+    const c4 = classes.find((c: any) => c.name === '4e A');
+    const cs = (c: any, code: string) => c.subjects.find((s: any) => s.subject.code === code).id;
+    const rooms = (await as('direction').get('/settings')).body.rooms;
+    const room = rooms[0].id;
+    const slot = (classSubjectId: string, startMinute: number, endMinute: number, roomId?: string) =>
+      as('direction').post('/timetable/slots', { classSubjectId, dayOfWeek: 6, startMinute, endMinute, roomId });
+    const created: string[] = [];
+    try {
+      const a = await slot(cs(f3, 'MATH'), 480, 600, room); // samedi 8h-10h
+      expect(a.status).toBe(201);
+      created.push(a.body.id);
+      const sameClass = await slot(cs(f3, 'DT'), 540, 660);
+      expect(sameClass.status).toBe(409);
+      expect(sameClass.body.message).toMatch(/La classe a déjà/);
+      const sameTeacher = await slot(cs(c4, 'MATH'), 540, 660); // même enseignant de mathématiques, autre classe
+      expect(sameTeacher.status).toBe(409);
+      expect(sameTeacher.body.message).toMatch(/enseigne déjà/);
+      const sameRoom = await slot(cs(c4, 'FR'), 540, 660, room);
+      expect(sameRoom.status).toBe(409);
+      expect(sameRoom.body.message).toMatch(/La salle .* est prise/);
+      const next = await slot(cs(c4, 'FR'), 600, 720, room); // commence quand l'autre finit
+      expect(next.status).toBe(201);
+      created.push(next.body.id);
+      expect((await slot(cs(c4, 'ANG'), 700, 700)).status).toBe(400);
+      // Un créneau ne se gêne pas lui-même ; le rallonger sur le suivant est refusé.
+      expect((await as('direction').patch(`/timetable/slots/${a.body.id}`, { endMinute: 590 })).status).toBe(200);
+      const longer = await as('direction').patch(`/timetable/slots/${a.body.id}`, { endMinute: 630 });
+      expect(longer.status).toBe(409);
+      expect(longer.body.message).toMatch(/La salle .* est prise/);
+      // Changement ponctuel : le bon jour seulement, et sans conflit au nouvel horaire.
+      expect((await as('direction').post(`/timetable/slots/${a.body.id}/changes`, { date: '2026-11-13', kind: 'CANCELLED' })).status).toBe(400); // vendredi
+      const moved = await as('direction').post(`/timetable/slots/${a.body.id}/changes`, { date: '2026-11-14', kind: 'MOVED', newDate: '2026-11-21', newStartMinute: 600, newEndMinute: 720 });
+      expect(moved.status).toBe(409);
+      expect((await as('direction').post(`/timetable/slots/${a.body.id}/changes`, { date: '2026-11-14', kind: 'MOVED' })).status).toBe(400);
+      // Seule la direction gère l'emploi du temps.
+      expect((await as('teacher').post('/timetable/slots', { classSubjectId: cs(f3, 'MATH'), dayOfWeek: 6, startMinute: 900, endMinute: 960 })).status).toBe(403);
+    } finally {
+      for (const id of created) await as('direction').del(`/timetable/slots/${id}`);
+    }
+  });
+
+  it("emploi du temps : vues par enseignant et par salle, cours annulé, changé de salle ou déplacé, avec avis à l'enseignant", async () => {
+    const classes = (await as('direction').get('/classes')).body;
+    const f3 = classes.find((c: any) => c.name === '1re année F3');
+    const math = f3.subjects.find((s: any) => s.subject.code === 'MATH').id;
+    const rooms = (await as('direction').get('/settings')).body.rooms;
+    const a = await as('direction').post('/timetable/slots', { classSubjectId: math, dayOfWeek: 6, startMinute: 780, endMinute: 840, roomId: rooms[0].id });
+    expect(a.status).toBe(201);
+    try {
+      expect((await as('direction').get('/timetable')).status).toBe(400);
+      const mine = (await as('teacher').get('/timetable?week=2026-11-14')).body;
+      expect(mine.week).toBe('2026-11-09');
+      const teacherId = mine.slots[0].teachers[0].id;
+      expect(mine.slots.every((x: any) => x.teachers.some((t: any) => t.id === teacherId))).toBe(true);
+      expect(mine.slots.some((x: any) => x.id === a.body.id)).toBe(true);
+      expect((await as('parent').get(`/timetable?teacherId=${teacherId}`)).status).toBe(403);
+      const byRoom = (await as('direction').get(`/timetable?roomId=${rooms[0].id}`)).body;
+      expect(byRoom.slots.every((x: any) => x.room?.id === rooms[0].id)).toBe(true);
+
+      const change = (body: object) => as('direction').post(`/timetable/slots/${a.body.id}/changes`, { date: '2026-11-14', ...body });
+      const before = (await as('teacher').get('/notifications')).body;
+      const c1 = await change({ kind: 'CANCELLED', reason: 'Conseil des professeurs' });
+      expect(c1.status).toBe(201);
+      const notes = (await as('teacher').get('/notifications')).body;
+      expect(JSON.stringify(notes)).toContain('est annulé. Motif : Conseil des professeurs.');
+      expect(JSON.stringify(notes).length).toBeGreaterThan(JSON.stringify(before).length);
+      expect((await change({ kind: 'ROOM_CHANGED' })).status).toBe(400);
+      const c2 = await change({ kind: 'ROOM_CHANGED', newRoomId: rooms[1].id });
+      expect(c2.status).toBe(201);
+      expect(c2.body.id).toBe(c1.body.id); // une seule modification par cours et par date
+      const week = (await as('direction').get(`/timetable?classId=${f3.id}&week=2026-11-14`)).body;
+      expect(week.slots.find((x: any) => x.id === a.body.id).changes[0]).toMatchObject({ kind: 'ROOM_CHANGED', newRoomName: rooms[1].name });
+      const c3 = await change({ kind: 'MOVED', newDate: '2026-11-21', newStartMinute: 900, newEndMinute: 960 });
+      expect(c3.status).toBe(201);
+      expect(JSON.stringify((await as('teacher').get('/notifications')).body)).toContain('est déplacé au samedi 21 novembre');
+      expect((await as('teacher').del(`/timetable/changes/${c3.body.id}`)).status).toBe(403);
+      expect((await as('direction').del(`/timetable/changes/${c3.body.id}`)).status).toBe(200);
+      expect(await inTenant('saint-kisito', (tx) => tx.auditLog.count({ where: { action: 'timetable.change_removed', entityId: c3.body.id } }))).toBe(1);
+    } finally {
+      await as('direction').del(`/timetable/slots/${a.body.id}`);
+    }
+  });
+
+  it('documents officiels : numéro, QR public limité au résumé, lot par classe, cloisonnement du parent', async () => {
+    const parentUser = await inTenant('saint-kisito', (tx) => tx.user.findFirstOrThrow({ where: { phone: PHONES.parent } }));
+    const children = await inTenant('saint-kisito', (tx) => tx.studentGuardian.findMany({ where: { guardian: { userId: parentUser.id } }, select: { studentId: true } }));
+    const child = children[0].studentId;
+    const other = await inTenant('saint-kisito', (tx) =>
+      tx.student.findFirstOrThrow({ where: { id: { notIn: children.map((c: any) => c.studentId) }, enrollments: { some: { status: 'ACTIVE' } } } }));
+
+    const doc = await as('secretariat').post('/documents', { kind: 'ATTESTATION_PAIEMENT', studentId: child });
+    expect(doc.status).toBe(201);
+    expect(doc.body.number).toMatch(/^AP-\d{4}-\d+$/);
+    expect(doc.body.data.payments).toBeDefined();
+    const pub = (await http.get(`/api/v1/public/verify/${doc.body.verifyCode.toLowerCase()}`)).body;
+    expect(pub).toMatchObject({ valid: true, kind: 'Attestation de paiement' });
+    expect(Object.keys(pub).sort()).toEqual(['issuedAt', 'issuer', 'kind', 'revoked', 'summary', 'valid']);
+    expect(JSON.stringify(pub)).not.toMatch(/birthDate|matricule|photo/);
+    expect((await http.get('/api/v1/public/verify/CODE-INCONNU')).body).toEqual({ valid: false });
+
+    // Le parent lit le document de son enfant, pas celui d'un autre élève ; il ne peut pas en délivrer.
+    expect((await as('parent').get(`/documents/print?ids=${doc.body.id}`)).status).toBe(200);
+    const foreign = await as('secretariat').post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: other.id });
+    expect(foreign.status).toBe(201);
+    expect([403, 404]).toContain((await as('parent').get(`/documents/print?ids=${foreign.body.id}`)).status);
+    expect((await as('parent').get('/documents')).body.every((d: any) => children.some((c: any) => c.studentId === d.student.id))).toBe(true);
+    expect((await as('parent').post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: child })).status).toBe(403);
+    // Un élève d'une autre école est invisible.
+    expect([403, 404]).toContain((await as('secretariat').post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: otherTenantStudentId })).status);
+
+    // Lot : une carte par élève inscrit dans la classe.
+    const enr = await inTenant('saint-kisito', (tx) => tx.enrollment.findFirstOrThrow({ where: { studentId: child, status: 'ACTIVE' } }));
+    const active = await inTenant('saint-kisito', (tx) => tx.enrollment.count({ where: { classId: enr.classId, status: 'ACTIVE' } }));
+    const batch = await as('secretariat').post('/documents/batch', { kind: 'CARTE_SCOLAIRE', classId: enr.classId });
+    expect(batch.status).toBe(201);
+    expect(batch.body.count).toBe(active);
+
+    // Élève sans inscription cette année : aucun document ; impression sans document : refus.
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const loose = await inTenant('saint-kisito', (tx) => tx.student.create({ data: { tenantId: t.id, matricule: `SKG-TEST-${Date.now()}`, firstName: 'Sans', lastName: 'INSCRIPTION' } }));
+    const none = await as('secretariat').post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: loose.id });
+    expect(none.status).toBe(404);
+    expect(none.body.message).toContain("n'est pas inscrit");
+    expect((await as('secretariat').get('/documents/print?ids=')).status).toBe(404);
+    const list = (await as('parent').get(`/documents?studentId=${child}`)).body;
+    expect(list.length).toBeGreaterThan(0);
+    expect(list.every((d: any) => d.student.id === child)).toBe(true);
+  });
+
+  it("import de la fiche d'une école : deux fois de suite sans doublon ni perte de ce que l'école a saisi", async () => {
+    const run = (slug: string) => {
+      try {
+        return { code: 0, out: execSync(`npx ts-node --transpile-only prisma/school-import.ts ${slug} data/ecoles/saint-kisito-2026-2027.json`, { env: process.env, stdio: 'pipe', cwd: `${__dirname}/..` }).toString(), err: '' };
+      } catch (e: any) {
+        return { code: e.status as number, out: '', err: String(e.stderr ?? '') };
+      }
+    };
+    const count = () => inTenant('saint-kisito', async (tx) => ({
+      levels: await tx.level.count(), tracks: await tx.track.count(), sites: await tx.site.count(), fees: await tx.feeType.count(),
+      students: await tx.student.count(), invoices: await tx.invoice.count(), receipts: await tx.receipt.count(),
+    }));
+    // Ce que l'école a saisi elle-même, absent du fichier.
+    const year = await inTenant('saint-kisito', (tx) => tx.academicYear.findFirstOrThrow({ where: { isCurrent: true } }));
+    const own = await inTenant('saint-kisito', async (tx) => tx.feeType.create({ data: { tenantId: year.tenantId, academicYearId: year.id, name: 'Frais saisi par l’école', amount: 1234 } }));
+    const first = run('saint-kisito');
+    expect(first.code).toBe(0);
+    const after1 = await count();
+    const second = run('saint-kisito');
+    expect(second.code).toBe(0);
+    expect(second.out).toBe(first.out);
+    expect(await count()).toEqual(after1);
+    expect(await inTenant('saint-kisito', (tx) => tx.feeType.findUnique({ where: { id: own.id } }))).toMatchObject({ amount: expect.anything(), active: true });
+    expect(await inTenant('saint-kisito', (tx) => tx.auditLog.count({ where: { action: 'school_data.imported' } }))).toBeGreaterThanOrEqual(2);
+    // Une école sans l'année visée : refus clair, rien n'est créé.
+    const before = await inTenant('autre-ecole', (tx) => tx.level.count());
+    const refused = run('autre-ecole');
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("n'existe pas encore");
+    expect(await inTenant('autre-ecole', (tx) => tx.level.count())).toBe(before);
+    expect(run('ecole-inexistante').err).toContain('Aucune école');
+  }, 180000);
+});
+
+describe('Sécurité v1.1, étape 6 : garde-fous de structure de la base (SEC-041)', () => {
+  it('toute table qui porte une école a son cloisonnement activé, forcé, et une politique', async () => {
+    const rows = await admin.$queryRaw<{ table: string; rls: boolean; forced: boolean; policies: number }[]>`
+      SELECT c.relname AS table, c.relrowsecurity AS rls, c.relforcerowsecurity AS forced,
+             (SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = c.oid) AS policies
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind = 'r'
+        AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname IN ('tenant_id', 'tenantId') AND NOT a.attisdropped)
+      ORDER BY 1`;
+    expect(rows.length).toBeGreaterThanOrEqual(50);
+    // Tables du seul Super Admin : sans cloisonnement par école, mais totalement fermées à l'application.
+    const PLATFORM_ONLY = ['platform_audit_logs'];
+    const weak = rows.filter((r) => !PLATFORM_ONLY.includes(r.table) && (!r.rls || !r.forced || r.policies === 0)).map((r) => r.table);
+    expect(weak).toEqual([]);
+    const grants = await admin.$queryRaw<{ table: string }[]>`
+      SELECT table_name AS table FROM information_schema.role_table_grants WHERE grantee = 'erp_app' AND table_name = ANY(${PLATFORM_ONLY})`;
+    expect(grants).toEqual([]);
+  });
+
+  it("le rôle de l'application n'est ni propriétaire des tables ni exempté du cloisonnement", async () => {
+    const [role] = await admin.$queryRaw<{ super: boolean; bypass: boolean }[]>`SELECT rolsuper AS super, rolbypassrls AS bypass FROM pg_roles WHERE rolname = 'erp_app'`;
+    expect(role).toEqual({ super: false, bypass: false });
+    const owned = await admin.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'public' AND tableowner = 'erp_app'`;
+    expect(owned[0].n).toBe(0);
+  });
+
+  it("journal, reçus, paiements et notes : l'application ne peut pas les effacer (et le journal ne se modifie pas)", async () => {
+    const triggers = await admin.$queryRaw<{ table: string; name: string }[]>`
+      SELECT c.relname AS table, t.tgname AS name FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+      WHERE NOT t.tgisinternal AND t.tgenabled <> 'D' AND t.tgfoid = 'forbid_change'::regproc ORDER BY 1`;
+    expect(triggers.map((t) => t.table).sort()).toEqual(expect.arrayContaining(['audit_logs', 'grades', 'payments', 'platform_audit_logs', 'receipts']));
+    const t = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    const attempt = (sql: string) =>
+      app_.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+        await tx.$executeRawUnsafe(sql);
+      }).then(() => 'accepté', (e) => String(e.message ?? e));
+    const present = await inTenant('saint-kisito', async (tx) => [await tx.auditLog.count(), await tx.receipt.count(), await tx.payment.count(), await tx.grade.count()]);
+    expect(present.every((n) => n > 0)).toBe(true); // sinon un DELETE sans ligne ne prouverait rien
+    for (const sql of [
+      'DELETE FROM audit_logs', "UPDATE audit_logs SET action = 'x'", 'DELETE FROM receipts', 'DELETE FROM payments', 'DELETE FROM grades',
+    ]) expect(await attempt(sql)).not.toBe('accepté');
   });
 });
