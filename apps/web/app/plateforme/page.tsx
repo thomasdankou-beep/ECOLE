@@ -7,7 +7,7 @@ import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Fi
 import { ApiError } from '@/lib/api';
 import { pf } from '@/lib/platform';
 
-type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; platformDomain: string | null };
+type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; mustSetupTwoFactor?: boolean; platformDomain: string | null };
 type Tenant = {
   id: string; slug: string; name: string; shortName: string | null; country: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
   platformNotes: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
@@ -43,8 +43,9 @@ export default function Plateforme() {
       </header>
       {admin.mustChangePassword ? <ChangePassword done={() => setAdmin({ ...admin, mustChangePassword: false })} /> : (
         <>
-          {!admin.totpEnabled && <TwoFactor done={() => setAdmin({ ...admin, totpEnabled: true })} />}
-          <Schools admin={admin} />
+          {!admin.totpEnabled && <TwoFactor done={() => setAdmin({ ...admin, totpEnabled: true, mustSetupTwoFactor: false })} />}
+          {/* Double authentification obligatoire (SEC-020) : les écoles n'apparaissent qu'une fois activée. */}
+          {!admin.mustSetupTwoFactor && <Schools admin={admin} />}
         </>
       )}
     </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { KeyRound, Plus, Trash2 } from 'lucide-react';
+import { KeyRound, Plus, ShieldOff, Trash2 } from 'lucide-react';
 import { Loader, StatusBadge } from '@/components/espace/bits';
 import { Button, Card, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, Table, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
@@ -41,6 +41,7 @@ export default function Personnel() {
                   <td className="whitespace-nowrap text-right">
                     <Button size="sm" variant="ghost" onClick={() => setEdit({ ...s, email: s.email ?? '', phone: s.phone ?? '', subjectIds: s.teacherSubjects.map((t) => t.subject.id) })}>Modifier</Button>
                     <Button size="sm" variant="ghost" loading={busy} onClick={async () => { const r = await run(() => api.post<{ temporaryPassword: string }>(`/users/${s.id}/reset-password`), toast); if (r) setShown({ name: `${s.firstName} ${s.lastName}`, password: r.temporaryPassword }); }}><KeyRound className="size-4" /> Réinitialiser</Button>
+                    {s.totpEnabled && s.id !== me?.user.id && <Button size="sm" variant="ghost" loading={busy} title="Téléphone perdu : la personne devra réactiver la double authentification à sa prochaine connexion" onClick={async () => { if (await run(() => api.post(`/users/${s.id}/reset-2fa`), toast, `Double authentification retirée pour ${s.firstName} ${s.lastName}`)) q.reload(); }}><ShieldOff className="size-4" /> Retirer la 2FA</Button>}
                   </td>
                 </tr>
               ))}</tbody>

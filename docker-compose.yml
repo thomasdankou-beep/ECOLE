@@ -43,6 +43,8 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?à définir dans .env}
       APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:?à définir dans .env}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Double authentification obligatoire pour Super Admin, Direction et Comptable (SEC-020) ; true sur le serveur.
+      ENFORCE_2FA: ${ENFORCE_2FA:-false}
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-sandbox}
       ALLOW_SANDBOX_PAYMENTS: ${ALLOW_SANDBOX_PAYMENTS:-false}
       CINETPAY_API_KEY: ${CINETPAY_API_KEY:-}
