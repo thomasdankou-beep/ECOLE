@@ -156,21 +156,23 @@ export class AttendanceService {
   }
 
   /** Justification par le parent (motif + photo du certificat). */
-  justify(actor: Actor, recordId: string, reason: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+  async justify(actor: Actor, recordId: string, reason: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    // Un nouveau justificatif remplace l'ancien, qui est effacé du disque (SEC-028, SEC-029).
+    const newKey = file ? await this.files.save(actor.tenantId, 'justificatifs', file) : null;
+    return this.files.commit(newKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
       const r = await tx.attendanceRecord.findUnique({ where: { id: recordId }, include: { student: true } });
       if (!r) throw new NotFoundException('Absence introuvable');
       await this.scope.assertStudent(tx, actor, r.studentId);
       if (r.justification === 'ACCEPTED') throw new BadRequestException('Cette absence est déjà justifiée');
-      const key = file ? await this.files.save(actor.tenantId, 'justificatifs', file) : r.justificationFile;
+      const key = newKey ?? r.justificationFile;
       await tx.attendanceRecord.update({ where: { id: recordId }, data: { justification: 'PENDING', justificationReason: reason, justificationFile: key, justifiedById: actor.userId } });
       const staff = await tx.userRole.findMany({ where: { role: 'VIE_SCOLAIRE' }, select: { userId: true } });
       await this.notifications.notify(tx, actor.tenantId, staff.map((s) => s.userId), {
         kind: 'justification', title: 'Justificatif à valider', body: `${r.student.firstName} ${r.student.lastName} : ${reason}`, data: { recordId }, smsMode: 'none',
       });
       await this.audit.log(tx, actor, 'attendance.justified', 'AttendanceRecord', recordId, { reason, file: !!key });
-      return { ok: true };
-    });
+      return { result: { ok: true }, old: newKey ? [r.justificationFile] : [] };
+    }));
   }
 
   review(actor: Actor, recordId: string, accept: boolean, comment?: string) {

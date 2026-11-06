@@ -202,19 +202,20 @@ export class SettingsService {
   }
 
   /** Signature, cachet (imprimés sur les documents officiels) ou logo de l'école. */
-  setIdentityImage(actor: Actor, kind: 'signature' | 'stamp' | 'logo', file?: { buffer: Buffer; mimetype: string; size: number }) {
+  async setIdentityImage(actor: Actor, kind: 'signature' | 'stamp' | 'logo', file?: { buffer: Buffer; mimetype: string; size: number }) {
     if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une image (PNG, JPEG ou WebP)');
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+    const key = file ? await this.files.save(actor.tenantId, 'etablissement', file) : null;
+    return this.files.commit(key, () => this.db.forTenant(actor.tenantId, async (tx) => {
       const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
       const current = tenantSettings(t.settings);
-      const key = file ? await this.files.save(actor.tenantId, 'etablissement', file) : null;
+      const previous = kind === 'logo' ? current.branding.logoKey : kind === 'signature' ? current.identity.signatureKey : current.identity.stampKey;
       const next = kind === 'logo'
         ? { ...current, branding: { ...current.branding, logoKey: key } }
         : { ...current, identity: { ...current.identity, [kind === 'signature' ? 'signatureKey' : 'stampKey']: key } };
       await tx.tenant.update({ where: { id: t.id }, data: { settings: next as any } });
       await this.audit.log(tx, actor, file ? `identity.${kind}.set` : `identity.${kind}.removed`, 'Tenant', t.id);
-      return schoolIdentity({ name: t.name, slug: t.slug, settings: next }, this.files);
-    });
+      return { result: schoolIdentity({ name: t.name, slug: t.slug, settings: next }, this.files), old: [previous] };
+    }));
   }
 
   // ------------------------------------------------------------ Sites
@@ -234,14 +235,16 @@ export class SettingsService {
     });
   }
 
-  setSitePhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+  async setSitePhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
     if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une photo (JPEG, PNG ou WebP)');
-    return this.db.forTenant(actor.tenantId, async (tx) => {
-      const photoKey = file ? await this.files.save(actor.tenantId, 'sites', file) : null;
+    const photoKey = file ? await this.files.save(actor.tenantId, 'sites', file) : null;
+    return this.files.commit(photoKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
+      const prev = await tx.site.findUnique({ where: { id }, select: { photoKey: true } });
+      if (!prev) throw new NotFoundException('Site introuvable');
       const site = await tx.site.update({ where: { id }, data: { photoKey } });
       await this.audit.log(tx, actor, file ? 'site.photo_set' : 'site.photo_removed', 'Site', id);
-      return { id: site.id, hasPhoto: !!site.photoKey };
-    });
+      return { result: { id: site.id, hasPhoto: !!site.photoKey }, old: [prev.photoKey] };
+    }));
   }
 
   /** Photo d'un site pour la page d'accueil publique : seulement un site actif d'une école active. */

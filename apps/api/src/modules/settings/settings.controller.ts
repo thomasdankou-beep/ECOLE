@@ -1,8 +1,9 @@
+import { Throttle } from '@nestjs/throttler';
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
-import { MAX_UPLOAD_BYTES } from '../files/files.service';
+import { MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
 import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import {
   AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, RoomUpdateDto,
@@ -31,6 +32,7 @@ export class SettingsController {
 
   @Post('settings/identity/:kind') @Can('settings.manage')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   setIdentityImage(@CurrentActor() a: Actor, @Param('kind') kind: string, @UploadedFile() file?: Express.Multer.File) {
     return this.s.setIdentityImage(a, imageKind(kind), file);
@@ -49,6 +51,7 @@ export class SettingsController {
 
   @Post('sites/:id/photo') @Can('settings.manage')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   setSitePhoto(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) { return this.s.setSitePhoto(a, id, file); }
 

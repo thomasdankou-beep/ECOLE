@@ -1,7 +1,8 @@
+import { Throttle } from '@nestjs/throttler';
 import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
-import { MAX_UPLOAD_BYTES } from '../files/files.service';
+import { MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
 import { Actor, Can, CurrentActor } from '../../common/auth';
 import { ChangeClassDto, EnrollStudentDto, GuardianInput, UpdateStudentDto, WithdrawDto } from './students.dto';
 import { StudentsService } from './students.service';
@@ -34,6 +35,7 @@ export class StudentsController {
 
   @Post(':id/photo') @Can('students.write')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   setPhoto(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) {
     return this.s.setPhoto(a, id, file);
@@ -47,6 +49,7 @@ export class StudentsController {
   /** Pièces du dossier : champ « file » (photo ou PDF) et champ « label » (nom de la pièce). */
   @Post(':id/files') @Can('students.write')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   addFile(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body('label') label: string, @UploadedFile() file?: Express.Multer.File) {
     return this.s.addFile(a, id, label, file);
@@ -54,6 +57,7 @@ export class StudentsController {
 
   @Patch(':id/files/:fileId') @Can('students.write')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   updateFile(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Param('fileId', ParseUUIDPipe) fileId: string, @Body('label') label?: string, @UploadedFile() file?: Express.Multer.File) {
     return this.s.updateFile(a, id, fileId, label, file);

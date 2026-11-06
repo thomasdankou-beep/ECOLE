@@ -1,3 +1,4 @@
+import { Throttle } from '@nestjs/throttler';
 import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Res, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
@@ -7,7 +8,7 @@ import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
-import { FilesService, MAX_UPLOAD_BYTES } from '../files/files.service';
+import { FilesService, MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
 
 const photoUrl = (slug: string, id: string, key: string) => `/api/v1/public/${slug}/honors/${id}/photo?v=${key.split('/').pop()!.slice(0, 8)}`;
 
@@ -87,21 +88,23 @@ export class HonorsService {
   }
 
   remove(actor: Actor, id: string) {
-    return this.db.forTenant(actor.tenantId, async (tx) => {
-      await tx.publicHonor.delete({ where: { id } });
+    return this.files.commit(null, () => this.db.forTenant(actor.tenantId, async (tx) => {
+      const h = await tx.publicHonor.delete({ where: { id } });
       await this.audit.log(tx, actor, 'honor.removed', 'PublicHonor', id);
-      return { ok: true };
-    });
+      return { result: { ok: true }, old: [h.photoKey] };
+    }));
   }
 
-  setPhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+  async setPhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
     if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une photo (JPEG, PNG ou WebP)');
-    return this.db.forTenant(actor.tenantId, async (tx) => {
-      const photoKey = file ? await this.files.save(actor.tenantId, 'honneur', file) : null;
+    const photoKey = file ? await this.files.save(actor.tenantId, 'honneur', file) : null;
+    return this.files.commit(photoKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
+      const prev = await tx.publicHonor.findUnique({ where: { id }, select: { photoKey: true } });
+      if (!prev) throw new NotFoundException();
       const h = await tx.publicHonor.update({ where: { id }, data: { photoKey } });
       await this.audit.log(tx, actor, file ? 'honor.photo_set' : 'honor.photo_removed', 'PublicHonor', id);
-      return this.view(h, true, await this.slug(tx, actor.tenantId));
-    });
+      return { result: this.view(h, true, await this.slug(tx, actor.tenantId)), old: [prev.photoKey] };
+    }));
   }
 
   /** Pour le site public : seulement ce que la direction a choisi d'afficher. */
@@ -142,6 +145,7 @@ export class HonorsController {
   @ApiBearerAuth()
   @Post('honors/:id/photo') @Can('settings.manage')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   photo(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @UploadedFile() file?: Express.Multer.File) { return this.s.setPhoto(a, id, file); }
 

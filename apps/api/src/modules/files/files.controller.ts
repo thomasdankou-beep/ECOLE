@@ -15,6 +15,8 @@ export class FilesController {
   async get(@Query('key') key: string, @Query('exp') exp: string, @Query('sig') sig: string, @Res() res: Response) {
     const f = await this.files.read(key ?? '', exp ?? '', sig ?? '');
     res.setHeader('Content-Type', f.mime);
+    // Nom de fichier neutre (SEC-030) : jamais le nom d'origine choisi par l'expéditeur.
+    res.setHeader('Content-Disposition', `inline; filename="document.${f.ext}"`);
     res.setHeader('Cache-Control', 'private, max-age=900');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.send(f.buffer);

@@ -189,15 +189,17 @@ export class StudentsService {
   }
 
   /** Photo d'identité de l'élève (JPEG, PNG ou WebP), remplaçable à tout moment ; sans fichier, la photo est retirée. */
-  setPhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+  async setPhoto(actor: Actor, id: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
     if (file && !file.mimetype.startsWith('image/')) throw new BadRequestException('Envoyez une photo (JPEG, PNG ou WebP)');
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+    // Fichier traité (antivirus, ré-encodage) hors transaction ; l'ancienne photo est effacée après validation (SEC-028).
+    const photoKey = file ? await this.files.save(actor.tenantId, 'eleves/photos', file) : null;
+    return this.files.commit(photoKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
       await this.scope.assertStudent(tx, actor, id);
-      const photoKey = file ? await this.files.save(actor.tenantId, 'eleves/photos', file) : null;
+      const prev = await tx.student.findUniqueOrThrow({ where: { id }, select: { photoKey: true } });
       const s = await tx.student.update({ where: { id }, data: { photoKey } });
       await this.audit.log(tx, actor, file ? 'student.photo_set' : 'student.photo_removed', 'Student', id);
-      return { photoUrl: this.photoUrl(s) };
-    });
+      return { result: { photoUrl: this.photoUrl(s) }, old: [prev.photoKey] };
+    }));
   }
 
   private fileView(f: { id: string; label: string; fileKey: string; mime: string; size: number; createdAt: Date }) {
@@ -209,38 +211,40 @@ export class StudentsService {
     if (!file) throw new BadRequestException('Choisissez le fichier à envoyer');
     const name = (label ?? '').trim().slice(0, 120);
     if (!name) throw new BadRequestException('Indiquez de quelle pièce il s’agit');
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+    return this.files.save(actor.tenantId, 'eleves/pieces', file).then((fileKey) => this.files.commit(fileKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
       await this.scope.assertStudent(tx, actor, id);
-      const fileKey = await this.files.save(actor.tenantId, 'eleves/pieces', file);
       const f = await tx.studentFile.create({ data: { tenantId: actor.tenantId, studentId: id, label: name, fileKey, mime: file.mimetype, size: file.size, uploadedById: actor.userId } });
       await this.audit.log(tx, actor, 'student.file_added', 'Student', id, { fileId: f.id, label: name });
-      return this.fileView(f);
-    });
+      return { result: this.fileView(f) };
+    })));
   }
 
   /** Remplace le fichier d'une pièce (nouvelle version) en gardant son nom, ou renomme la pièce. */
-  updateFile(actor: Actor, id: string, fileId: string, label?: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+  async updateFile(actor: Actor, id: string, fileId: string, label?: string, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    const fileKey = file ? await this.files.save(actor.tenantId, 'eleves/pieces', file) : null;
+    return this.files.commit(fileKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
       await this.scope.assertStudent(tx, actor, id);
       const current = await tx.studentFile.findFirst({ where: { id: fileId, studentId: id } });
       if (!current) throw new NotFoundException('Pièce introuvable');
       const data: Prisma.StudentFileUpdateInput = {};
       if (label?.trim()) data.label = label.trim().slice(0, 120);
-      if (file) Object.assign(data, { fileKey: await this.files.save(actor.tenantId, 'eleves/pieces', file), mime: file.mimetype, size: file.size, uploadedById: actor.userId });
+      if (file && fileKey) Object.assign(data, { fileKey, mime: file.mimetype, size: file.size, uploadedById: actor.userId });
       const f = await tx.studentFile.update({ where: { id: fileId }, data });
       await this.audit.log(tx, actor, 'student.file_updated', 'Student', id, { fileId, label: f.label, replaced: !!file });
-      return this.fileView(f);
-    });
+      return { result: this.fileView(f), old: fileKey ? [current.fileKey] : [] };
+    }));
   }
 
+  /** Supprime la pièce et son fichier sur le disque (SEC-028). */
   removeFile(actor: Actor, id: string, fileId: string) {
-    return this.db.forTenant(actor.tenantId, async (tx) => {
+    return this.files.commit(null, () => this.db.forTenant(actor.tenantId, async (tx) => {
       await this.scope.assertStudent(tx, actor, id);
-      const { count } = await tx.studentFile.deleteMany({ where: { id: fileId, studentId: id } });
-      if (!count) throw new NotFoundException('Pièce introuvable');
+      const current = await tx.studentFile.findFirst({ where: { id: fileId, studentId: id } });
+      if (!current) throw new NotFoundException('Pièce introuvable');
+      await tx.studentFile.delete({ where: { id: current.id } });
       await this.audit.log(tx, actor, 'student.file_removed', 'Student', id, { fileId });
-      return { ok: true };
-    });
+      return { result: { ok: true }, old: [current.fileKey] };
+    }));
   }
 
   addGuardian(actor: Actor, id: string, dto: GuardianInput) {

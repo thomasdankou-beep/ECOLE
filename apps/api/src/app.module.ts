@@ -19,6 +19,7 @@ import { EvaluationController } from './modules/evaluation/evaluation.controller
 import { EvaluationService } from './modules/evaluation/evaluation.service';
 import { FilesController } from './modules/files/files.controller';
 import { FilesService } from './modules/files/files.service';
+import { AntivirusService } from './modules/files/antivirus.service';
 import { FinanceController } from './modules/finance/finance.controller';
 import { FinanceService } from './modules/finance/finance.service';
 import { InternshipsController, InternshipsService } from './modules/internships/internships';
@@ -41,7 +42,7 @@ import { TimetableService } from './modules/timetable/timetable.service';
 /** Socle partagé par tous les modules : base, périmètre, audit, notifications, fichiers. */
 @Global()
 @Module({
-  providers: [PrismaService, ScopeService, AuditService, NotificationsService, FilesService],
+  providers: [PrismaService, ScopeService, AuditService, NotificationsService, FilesService, AntivirusService],
   exports: [PrismaService, ScopeService, AuditService, NotificationsService, FilesService],
 })
 class CoreModule {}

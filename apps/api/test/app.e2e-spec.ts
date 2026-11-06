@@ -1299,3 +1299,125 @@ describe('Authentification renforcée (SEC-019 à SEC-025)', () => {
     await admin.platformAdmin.deleteMany({ where: { email } });
   });
 });
+
+describe('Fichiers : contenu, métadonnées, effacement, antivirus (SEC-026 à SEC-030)', () => {
+  // Photo fictive 64 x 64 portant une position GPS et le nom d'appareil « TelephoneFictif ».
+  const GPS_JPG = Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/4QCkRXhpZgAATU0AKgAAAAgAAgEPAAIAAAAQAAAAJoglAAQAAAABAAAANgAAAABUZWxlcGhvbmVGaWN0aWYAAAQAAQACAAAAAk4AAAAAAgAFAAAAAwAAAGwAAwACAAAAAkUAAAAABAAFAAAAAwAAAIQAAAAAAAAABgAAAAEAAAAVAAAAAQAAAB4AAAABAAAAAgAAAAEAAAATAAAAAQAAAA8AAAAB/9sAQwAIBgYHBgUIBwcHCQkICgwUDQwLCwwZEhMPFB0aHx4dGhwcICQuJyAiLCMcHCg3KSwwMTQ0NB8nOT04MjwuMzQy/9sAQwEJCQkMCwwYDQ0YMiEcITIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy/8AAEQgAQABAAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/aAAwDAQACEQMRAD8A5CiiivFP0wKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooA//2Q==', 'base64');
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+  const PLAIN_PDF = Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[]/Count 0>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fsx = require('fs') as typeof import('fs');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const pathx = require('path') as typeof import('path');
+  let tid: string;
+  const count = (folder: string): number => {
+    const dir = pathx.join(process.env.STORAGE_DIR!, tid, folder);
+    try { return fsx.readdirSync(dir).length; } catch { return 0; }
+  };
+  const bytes = (r: any) => r.buffer(true).parse((res: any, cb: any) => { const c: Buffer[] = []; res.on('data', (x: Buffer) => c.push(x)); res.on('end', () => cb(null, Buffer.concat(c))); });
+
+  beforeAll(async () => {
+    tid = (await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } })).id;
+  });
+
+  it('SEC-027 : une photo publique est servie sans sa position GPS ni le nom de l’appareil', async () => {
+    const site = (await http.get('/api/v1/public/saint-kisito')).body.sites[0];
+    await http.post(`/api/v1/sites/${site.id}/photo`).set('Authorization', `Bearer ${tokens.direction}`).attach('file', GPS_JPG, { filename: 's.jpg', contentType: 'image/jpeg' }).expect(201);
+    const pub = await bytes(http.get(`/api/v1/public/saint-kisito/sites/${site.id}/photo`));
+    expect(pub.status).toBe(200);
+    const body: Buffer = pub.body;
+    expect(body.subarray(0, 3).toString('hex')).toBe('ffd8ff');
+    expect(body.includes(Buffer.from('Exif'))).toBe(false);
+    expect(body.includes(Buffer.from('TelephoneFictif'))).toBe(false);
+  });
+
+  it('SEC-028 : une photo remplacée ou retirée et une pièce supprimée sont effacées du disque', async () => {
+    const site = (await http.get('/api/v1/public/saint-kisito')).body.sites[0];
+    // Le site a déjà une photo (test précédent) : chaque remplacement efface la précédente.
+    const s0 = count('sites');
+    for (let i = 0; i < 3; i++) await http.post(`/api/v1/sites/${site.id}/photo`).set('Authorization', `Bearer ${tokens.direction}`).attach('file', PNG, { filename: 's.png', contentType: 'image/png' }).expect(201);
+    expect(count('sites')).toBe(s0);
+    await as('direction').del(`/sites/${site.id}/photo`).expect(200);
+    expect(count('sites')).toBe(s0 - 1);
+    // Site inconnu : refus, et aucun fichier laissé.
+    expect((await http.post('/api/v1/sites/00000000-0000-4000-8000-000000000000/photo').set('Authorization', `Bearer ${tokens.direction}`).attach('file', PNG, { filename: 's.png', contentType: 'image/png' })).status).toBe(404);
+    expect(count('sites')).toBe(s0 - 1);
+    const st = (await as('direction').get('/students')).body[0];
+    const before = count('eleves/pieces');
+    const piece = await http.post(`/api/v1/students/${st.id}/files`).set('Authorization', `Bearer ${tokens.direction}`).field('label', 'Pièce fictive').attach('file', PLAIN_PDF, { filename: 'p.pdf', contentType: 'application/pdf' });
+    expect(piece.status).toBe(201);
+    expect(count('eleves/pieces')).toBe(before + 1);
+    const dl = await http.get(piece.body.url);
+    expect(dl.status).toBe(200);
+    expect(dl.headers['content-disposition']).toBe('inline; filename="document.pdf"');
+    await as('direction').del(`/students/${st.id}/files/${piece.body.id}`).expect(200);
+    expect(count('eleves/pieces')).toBe(before);
+    expect((await http.get(piece.body.url)).status).toBe(404);
+  });
+
+  it('SEC-029 : un justificatif renvoyé plusieurs fois ne laisse que le dernier fichier', async () => {
+    const all = (await as('direction').get('/students')).body;
+    const koffi = all.find((s: any) => s.firstName === 'Koffi');
+    const cls = koffi.class.id;
+    const sheet = await as('teacher').get(`/attendance/sheet?classId=${cls}&date=2026-10-21&startMinute=480`);
+    const cs = (await as('teacher').get('/evaluation/class-subjects')).body.classSubjects.find((c: any) => c.class.id === cls && c.subject.code === 'ELEC');
+    await as('teacher').post('/attendance', { classId: cls, classSubjectId: cs.id, date: '2026-10-21', startMinute: 480, records: sheet.body.students.map((s: any) => ({ studentId: s.id, status: s.id === koffi.id ? 'ABSENT' : 'PRESENT' })) }).expect(201);
+    const rec = (await as('parent').get(`/attendance/absences?studentId=${koffi.id}`)).body.find((a: any) => a.status === 'ABSENT' && a.justification !== 'ACCEPTED');
+    const before = count('justificatifs');
+    for (let i = 0; i < 5; i++) {
+      await http.post(`/api/v1/attendance/records/${rec.id}/justify`).set('Authorization', `Bearer ${tokens.parent}`).field('reason', 'Motif fictif').attach('file', PNG, { filename: 'c.png', contentType: 'image/png' }).expect(201);
+    }
+    expect(count('justificatifs')).toBe(before + 1);
+  });
+
+  it('SEC-026 et SEC-030 : faux JPEG, PDF avec JavaScript (même écrit en hexadécimal) refusés ; PDF ordinaire accepté', async () => {
+    const st = (await as('direction').get('/students')).body[0];
+    const add = (buf: Buffer, type: string) => http.post(`/api/v1/students/${st.id}/files`).set('Authorization', `Bearer ${tokens.direction}`).field('label', 'Test fictif').attach('file', buf, { filename: 'f', contentType: type });
+    const before = count('eleves/pieces');
+    expect((await add(Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from('<html><script>alert(1)</script></html>')]), 'image/jpeg')).status).toBe(400);
+    expect((await add(Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog/OpenAction<</S/JavaScript/JS(app.alert(1))>>>>endobj\n%%EOF'), 'application/pdf')).status).toBe(400);
+    expect((await add(Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog/OpenAction<</S/J#61vaScript/J#53(x)>>>>endobj\n%%EOF'), 'application/pdf')).status).toBe(400);
+    expect((await add(Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog/Names<</EmbeddedFiles 2 0 R>>>>endobj\n%%EOF'), 'application/pdf')).status).toBe(400);
+    expect(count('eleves/pieces')).toBe(before);
+    const ok = await add(PLAIN_PDF, 'application/pdf');
+    expect(ok.status).toBe(201);
+    await as('direction').del(`/students/${st.id}/files/${ok.body.id}`).expect(200);
+  });
+
+  it("SEC-026 : avec l'antivirus, un fichier infecté est refusé et un antivirus injoignable bloque l'envoi", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const net = require('net') as typeof import('net');
+    const { AntivirusService } = await import('../src/modules/files/antivirus.service');
+    const { FilesService } = await import('../src/modules/files/files.service');
+    // Faux service clamd : répond comme ClamAV selon le contenu reçu.
+    const server = net.createServer((sock) => {
+      const chunks: Buffer[] = [];
+      sock.on('data', (d) => {
+        chunks.push(d);
+        const all = Buffer.concat(chunks);
+        if (all.subarray(-4).equals(Buffer.alloc(4))) sock.end(all.includes(Buffer.from('EICAR')) ? 'stream: Eicar-Test-Signature FOUND\0' : 'stream: OK\0');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as import('net').AddressInfo).port;
+    const saved = { host: process.env.CLAMAV_HOST, port: process.env.CLAMAV_PORT };
+    try {
+      process.env.CLAMAV_HOST = '127.0.0.1';
+      process.env.CLAMAV_PORT = String(port);
+      const files = new FilesService(new AntivirusService());
+      const eicar = Buffer.from('%PDF-1.4\nX5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*\n%%EOF');
+      await expect(files.save(tid, 'test-antivirus', { buffer: eicar, mimetype: 'application/pdf', size: eicar.length })).rejects.toThrow(/antivirus/);
+      const key = await files.save(tid, 'test-antivirus', { buffer: PLAIN_PDF, mimetype: 'application/pdf', size: PLAIN_PDF.length });
+      expect(key).toMatch(/\.pdf$/);
+      await files.remove(key);
+      process.env.CLAMAV_PORT = '1';
+      const down = new FilesService(new AntivirusService());
+      await expect(down.save(tid, 'test-antivirus', { buffer: PLAIN_PDF, mimetype: 'application/pdf', size: PLAIN_PDF.length })).rejects.toThrow(/indisponible/);
+      expect(count('test-antivirus')).toBe(0);
+    } finally {
+      if (saved.host === undefined) delete process.env.CLAMAV_HOST; else process.env.CLAMAV_HOST = saved.host;
+      if (saved.port === undefined) delete process.env.CLAMAV_PORT; else process.env.CLAMAV_PORT = saved.port;
+      server.close();
+    }
+  });
+});

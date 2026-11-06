@@ -1,3 +1,4 @@
+import { Throttle } from '@nestjs/throttler';
 import { Body, Controller, Get, Param, ParseIntPipe, ParseUUIDPipe, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
@@ -5,7 +6,7 @@ import { AttendanceStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 import { IsArray, IsBoolean, IsDateString, IsEnum, IsInt, IsOptional, IsString, IsUUID, MaxLength, Min, ValidateNested } from 'class-validator';
 import { Actor, Can, CurrentActor } from '../../common/auth';
-import { MAX_UPLOAD_BYTES } from '../files/files.service';
+import { MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
 import { AttendanceService } from './attendance.service';
 
 class RecordInput {
@@ -67,6 +68,7 @@ export class AttendanceController {
 
   @Post('attendance/records/:id/justify') @Can('attendance.justify')
   @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
   justify(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: JustifyDto, @UploadedFile() file?: Express.Multer.File) {
     return this.s.justify(a, id, dto.reason, file);
