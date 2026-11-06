@@ -4,8 +4,10 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { Download } from 'lucide-react';
 import { Loader, StatusBadge } from '@/components/espace/bits';
-import { Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Table, Textarea, useToast } from '@/components/ui';
+import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Table, Textarea, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import { can } from '@/lib/perm';
 import { dateTime, fcfa, METHOD_LABEL } from '@/lib/format';
 import { qs, useAction, useApi } from '@/lib/use-api';
 
@@ -18,6 +20,14 @@ export default function Paiements() {
   const [reason, setReason] = useState('');
   const toast = useToast();
   const { busy, run } = useAction();
+  const { role } = useAuth();
+  // SEC-015 : le comptable demande l'annulation d'un reçu, la direction la valide ou la refuse.
+  const canRequest = can(role, 'finance.write');
+  const canDecide = can(role, 'finance.validate');
+  const decide = async (p: any, approve: boolean) => {
+    if (await run(() => api.post(`/finance/receipts/${p.receipt.id}/cancel/decision`, { approve }), toast, approve ? 'Reçu annulé' : 'Demande refusée')) q.reload();
+  };
+  const pending = q.data?.filter((p) => p.receipt?.cancelRequestedAt && !p.receipt.cancelledAt) ?? [];
   const total = q.data?.filter((p) => p.status === 'SUCCESS' && !p.receipt?.cancelledAt).reduce((s, p) => s + p.amount, 0) ?? 0;
 
   return (
@@ -28,6 +38,12 @@ export default function Paiements() {
         <Field label="Du"><Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
         <Field label="Au"><Input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></Field>
       </Card>
+      {canDecide && pending.length > 0 && (
+        <Card className="border-warn">
+          <p className="font-bold">{pending.length} demande(s) d’annulation de reçu à valider</p>
+          <p className="text-sm text-muted">Le reçu reste valide tant que vous n’avez pas validé. Valider l’annule et remet le montant à la charge de la famille.</p>
+        </Card>
+      )}
       <Card>
         <Loader {...q}>
           {(rows) => rows.length === 0 ? <Empty title="Aucun paiement" /> : (
@@ -42,7 +58,21 @@ export default function Paiements() {
                   <td className="text-right font-bold">{fcfa(p.amount)}</td>
                   <td><StatusBadge status={p.status} /></td>
                   <td>{p.receipt && <Link href={`/espace/recu/${p.receipt.id}`} className={`font-mono text-sm font-bold text-brand hover:underline ${p.receipt.cancelledAt ? 'line-through' : ''}`}>{p.receipt.number}</Link>}</td>
-                  <td className="text-right">{p.receipt && !p.receipt.cancelledAt && <Button size="sm" variant="ghost" className="text-bad" onClick={() => { setCancel(p); setReason(''); }}>Annuler</Button>}</td>
+                  <td className="text-right">
+                    {p.receipt && !p.receipt.cancelledAt && p.receipt.cancelRequestedAt && (
+                      <div className="grid justify-items-end gap-1">
+                        <Badge tone="warn" title={p.receipt.cancelRequestReason ?? undefined}>Annulation demandée</Badge>
+                        {p.receipt.cancelRequestReason && <span className="text-xs text-muted">{p.receipt.cancelRequestReason}</span>}
+                        {canDecide && (
+                          <span className="flex gap-1">
+                            <Button size="sm" variant="danger" loading={busy} onClick={() => decide(p, true)}>Valider</Button>
+                            <Button size="sm" variant="ghost" loading={busy} onClick={() => decide(p, false)}>Refuser</Button>
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {p.receipt && !p.receipt.cancelledAt && !p.receipt.cancelRequestedAt && canRequest && <Button size="sm" variant="ghost" className="text-bad" onClick={() => { setCancel(p); setReason(''); }}>Demander l’annulation</Button>}
+                  </td>
                 </tr>
               ))}</tbody>
             </Table>
@@ -51,10 +81,10 @@ export default function Paiements() {
       </Card>
       <Dialog open={!!cancel} onOpenChange={(o) => !o && setCancel(null)}>
         {cancel && (
-          <DialogContent title={`Annuler le reçu ${cancel.receipt.number}`} description="Un reçu n’est jamais supprimé : il est marqué annulé et le montant est remis à la charge de la famille. L’opération est tracée.">
-            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post(`/finance/receipts/${cancel.receipt.id}/cancel`, { reason }), toast, 'Reçu annulé')) { setCancel(null); q.reload(); } }}>
+          <DialogContent title={`Demander l’annulation du reçu ${cancel.receipt.number}`} description="La direction reçoit la demande et décide. Le reçu reste valide jusqu’à sa validation ; il n’est jamais supprimé et l’opération est tracée.">
+            <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post(`/finance/receipts/${cancel.receipt.id}/cancel`, { reason }), toast, 'Demande envoyée à la direction')) { setCancel(null); q.reload(); } }}>
               <Field label="Motif"><Textarea value={reason} onChange={(e) => setReason(e.target.value)} required /></Field>
-              <Button type="submit" variant="danger" loading={busy}>Annuler le reçu</Button>
+              <Button type="submit" variant="danger" loading={busy}>Envoyer la demande</Button>
             </form>
           </DialogContent>
         )}

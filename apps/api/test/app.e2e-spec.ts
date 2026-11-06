@@ -252,9 +252,46 @@ describe('Paiement Mobile Money (CDC §4.4, recette 7.3)', () => {
     expect(b.body.duplicate).toBe(true);
     expect(b.body.receipt.id).toBe(a.body.receipt.id);
     expect((await as('comptable').post('/finance/payments/desk', { ...body, idempotencyKey: undefined, amount: 10 ** 9 })).status).toBe(400);
+    // SEC-015 : le comptable demande, le reçu reste valide ; il n'est annulé qu'à la validation de la direction.
     await as('comptable').post(`/finance/receipts/${a.body.receipt.id}/cancel`, { reason: 'Erreur de saisie' }).expect(201);
+    expect((await http.get(`/api/v1/public/verify/${a.body.receipt.verifyCode}`)).body).toMatchObject({ valid: true });
+    await as('direction').post(`/finance/receipts/${a.body.receipt.id}/cancel/decision`, { approve: true }).expect(201);
     const verify = await http.get(`/api/v1/public/verify/${a.body.receipt.verifyCode}`);
     expect(verify.body).toMatchObject({ valid: false, revoked: true });
+  });
+
+  it("l'annulation d'un reçu attend la direction : le comptable ne peut ni la valider ni la forcer (SEC-015)", async () => {
+    const invoices = await as('comptable').get('/finance/invoices?status=OPEN');
+    const inv = invoices.body.find((i: any) => i.total - i.paid >= 2000);
+    const pay = await as('comptable').post('/finance/payments/desk', { invoiceId: inv.id, amount: 1000, method: 'CASH' });
+    expect(pay.status).toBe(201);
+    const rid = pay.body.receipt.id;
+    const paidBefore = (await as('comptable').get(`/finance/invoices?studentId=${inv.studentId}`)).body.find((i: any) => i.id === inv.id).paid;
+    expect((await as('comptable').post(`/finance/receipts/${rid}/cancel`, { reason: 'Doublon' })).status).toBe(201);
+    // Une seconde demande, ou la validation par le comptable lui-même, sont refusées.
+    expect((await as('comptable').post(`/finance/receipts/${rid}/cancel`, { reason: 'Doublon' })).status).toBe(409);
+    expect((await as('comptable').post(`/finance/receipts/${rid}/cancel/decision`, { approve: true })).status).toBe(403);
+    expect((await as('secretariat').post(`/finance/receipts/${rid}/cancel/decision`, { approve: true })).status).toBe(403);
+    // Le reçu et la facture ne changent pas tant que la direction n'a pas validé.
+    const r1 = await as('comptable').get(`/finance/receipts/${rid}`);
+    expect(r1.body.cancelledAt).toBeNull();
+    expect(r1.body.cancelRequestReason).toBe('Doublon');
+    expect((await as('comptable').get(`/finance/invoices?studentId=${inv.studentId}`)).body.find((i: any) => i.id === inv.id).paid).toBe(paidBefore);
+    // La direction est prévenue, puis refuse : la demande disparaît, le reçu reste valide.
+    const notes = await as('direction').get('/notifications');
+    expect(JSON.stringify(notes.body)).toContain(pay.body.receipt.number);
+    expect((await as('direction').post(`/finance/receipts/${rid}/cancel/decision`, { approve: false, comment: 'Paiement réel' })).status).toBe(201);
+    const r2 = await as('comptable').get(`/finance/receipts/${rid}`);
+    expect(r2.body.cancelledAt).toBeNull();
+    expect(r2.body.cancelRequestedAt).toBeNull();
+    // Nouvelle demande, validée cette fois : le reçu est annulé et le montant redevient dû.
+    await as('comptable').post(`/finance/receipts/${rid}/cancel`, { reason: 'Doublon confirmé' }).expect(201);
+    expect((await as('direction').post(`/finance/receipts/${rid}/cancel/decision`, { approve: true })).status).toBe(201);
+    const r3 = await as('comptable').get(`/finance/receipts/${rid}`);
+    expect(r3.body.cancelledAt).not.toBeNull();
+    expect(r3.body.cancelReason).toBe('Doublon confirmé');
+    expect((await as('comptable').get(`/finance/invoices?studentId=${inv.studentId}`)).body.find((i: any) => i.id === inv.id).paid).toBe(paidBefore - 1000);
+    expect((await as('direction').post(`/finance/receipts/${rid}/cancel/decision`, { approve: true })).status).toBe(409);
   });
 });
 

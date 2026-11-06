@@ -64,6 +64,11 @@ export class CancelReceiptDto {
   @IsString() @MaxLength(300) reason: string;
 }
 
+export class CancelDecisionDto {
+  @IsBoolean() approve: boolean;
+  @IsOptional() @IsString() @MaxLength(300) comment?: string;
+}
+
 export class CashClosingDto {
   @IsInt() @Min(0) counted: number;
   @IsOptional() @IsString() @MaxLength(300) comment?: string;

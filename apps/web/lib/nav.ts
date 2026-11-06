@@ -24,6 +24,7 @@ export const NAV: Record<Role, NavItem[]> = {
     { href: '/espace/assiduite', label: 'Assiduité', icon: ClipboardCheck },
     { href: '/espace/sanctions', label: 'Discipline', icon: Gavel },
     { href: '/espace/finances', label: 'Finances', icon: BarChart3 },
+    { href: '/espace/paiements', label: 'Paiements', icon: Receipt },
     { href: '/espace/tarifs', label: 'Frais et tarifs', icon: Tags },
     { href: '/espace/stages', label: 'Stages et ateliers', icon: Briefcase },
     { href: '/espace/documents', label: 'Documents', icon: FileBadge },

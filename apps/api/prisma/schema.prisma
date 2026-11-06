@@ -930,6 +930,10 @@ model Receipt {
   cancelledAt   DateTime?
   cancelReason  String?
   cancelledById String?   @db.Uuid
+  /// Demande d'annulation du comptable, en attente de la validation de la direction (SEC-015).
+  cancelRequestedAt   DateTime?
+  cancelRequestedById String?   @db.Uuid
+  cancelRequestReason String?
 
   @@unique([tenantId, number])
   @@map("receipts")

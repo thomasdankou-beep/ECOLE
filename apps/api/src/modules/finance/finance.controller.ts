@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Header, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Actor, Can, CurrentActor } from '../../common/auth';
-import { BatchInvoiceDto, CancelReceiptDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
+import { BatchInvoiceDto, CancelReceiptDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto, CancelDecisionDto } from './finance.dto';
 import { FinanceService } from './finance.service';
 
 @ApiTags('Finances')
@@ -56,8 +56,12 @@ export class FinanceController {
   @Get('receipts/:id') @Can('finance.read')
   receipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.receipt(a, id); }
 
+  /** SEC-015 : le comptable demande, la direction valide ou refuse. */
   @Post('receipts/:id/cancel') @Can('finance.write')
-  cancelReceipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelReceiptDto) { return this.s.cancelReceipt(a, id, dto.reason); }
+  cancelReceipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelReceiptDto) { return this.s.requestReceiptCancel(a, id, dto.reason); }
+
+  @Post('receipts/:id/cancel/decision') @Can('finance.validate')
+  decideCancel(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelDecisionDto) { return this.s.decideReceiptCancel(a, id, dto.approve, dto.comment); }
 
   @Get('unpaid') @Can('finance.write', 'dashboard.read')
   unpaid(@CurrentActor() a: Actor, @Query('classId') classId?: string) { return this.s.unpaid(a, classId); }

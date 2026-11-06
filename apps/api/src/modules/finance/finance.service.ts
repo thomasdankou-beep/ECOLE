@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Payment, Prisma } from '@prisma/client';
 import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
@@ -134,7 +134,7 @@ export class FinanceService {
         include: {
           items: true,
           student: { select: { id: true, matricule: true, firstName: true, lastName: true } },
-          payments: { where: { status: 'SUCCESS' }, select: { id: true, amount: true, method: true, operator: true, confirmedAt: true, receipt: { select: { id: true, number: true, cancelledAt: true } } }, orderBy: { confirmedAt: 'desc' } },
+          payments: { where: { status: 'SUCCESS' }, select: { id: true, amount: true, method: true, operator: true, confirmedAt: true, receipt: { select: { id: true, number: true, cancelledAt: true, cancelRequestedAt: true, cancelRequestReason: true } } }, orderBy: { confirmedAt: 'desc' } },
         },
         orderBy: [{ dueDate: 'asc' }, { createdAt: 'asc' }],
         take: 1000,
@@ -263,19 +263,54 @@ export class FinanceService {
   }
 
   /** Un reçu ne se supprime jamais : il est annulé par un avoir, la facture est réouverte (CDC §4.4). */
-  cancelReceipt(actor: Actor, id: string, reason: string) {
+  /**
+   * SEC-015 : le comptable demande l'annulation d'un reçu ; rien n'est annulé avant la validation
+   * de la direction (matrice RBAC : Comptable C, Direction V). La direction est prévenue.
+   */
+  requestReceiptCancel(actor: Actor, id: string, reason: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const r = await tx.receipt.findUniqueOrThrow({ where: { id }, include: { payment: true } });
       await this.scope.assertStudent(tx, actor, r.payment.studentId);
       if (r.cancelledAt) throw new ConflictException('Ce reçu est déjà annulé');
+      if (r.cancelRequestedAt) throw new ConflictException('Une demande d’annulation de ce reçu attend déjà la direction');
+      await tx.receipt.update({ where: { id }, data: { cancelRequestedAt: new Date(), cancelRequestedById: actor.userId, cancelRequestReason: reason } });
+      await this.audit.log(tx, actor, 'receipt.cancel_requested', 'Receipt', id, { number: r.number, amount: r.payment.amount, reason });
+      const direction = (await tx.userRole.findMany({ where: { role: 'DIRECTION' }, select: { userId: true } })).map((u) => u.userId);
+      await this.notifications.notify(tx, actor.tenantId, direction, {
+        kind: 'receipt_cancel_request', title: 'Annulation de reçu à valider',
+        body: `${actor.name} demande l’annulation du reçu n° ${r.number} (${fcfa(r.payment.amount)}) : ${reason}`,
+        data: { receiptId: id }, smsMode: 'none',
+      });
+      return { ok: true, status: 'REQUESTED' };
+    });
+  }
+
+  /** SEC-015 : la direction valide (le reçu est alors annulé par avoir) ou refuse la demande. */
+  decideReceiptCancel(actor: Actor, id: string, approve: boolean, comment?: string) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const r = await tx.receipt.findUniqueOrThrow({ where: { id }, include: { payment: true } });
+      await this.scope.assertStudent(tx, actor, r.payment.studentId);
+      if (r.cancelledAt) throw new ConflictException('Ce reçu est déjà annulé');
+      if (!r.cancelRequestedAt) throw new ConflictException('Aucune demande d’annulation n’attend pour ce reçu');
+      if (r.cancelRequestedById === actor.userId) throw new ForbiddenException('La personne qui demande l’annulation ne peut pas la valider');
+      const notifyRequester = (title: string, body: string) =>
+        r.cancelRequestedById ? this.notifications.notify(tx, actor.tenantId, [r.cancelRequestedById], { kind: 'receipt_cancel_decision', title, body, data: { receiptId: id }, smsMode: 'none' }) : Promise.resolve(0);
+      if (!approve) {
+        await tx.receipt.update({ where: { id }, data: { cancelRequestedAt: null, cancelRequestedById: null, cancelRequestReason: null } });
+        await this.audit.log(tx, actor, 'receipt.cancel_rejected', 'Receipt', id, { number: r.number, reason: r.cancelRequestReason, comment });
+        await notifyRequester('Annulation refusée', `La direction a refusé l’annulation du reçu n° ${r.number}${comment ? ` : ${comment}` : ''}.`);
+        return { ok: true, status: 'REJECTED' };
+      }
+      const reason = r.cancelRequestReason ?? '';
       await tx.receipt.update({ where: { id }, data: { cancelledAt: new Date(), cancelReason: reason, cancelledById: actor.userId } });
       await tx.payment.update({ where: { id: r.paymentId }, data: { status: 'CANCELLED' } });
       const inv = await tx.invoice.findUniqueOrThrow({ where: { id: r.payment.invoiceId } });
       const paid = inv.paid - r.payment.amount;
       await tx.invoice.update({ where: { id: inv.id }, data: { paid, status: paid <= 0 ? 'OPEN' : 'PARTIAL' } });
       await tx.verificationEntry.update({ where: { code: r.verifyCode }, data: { revokedAt: new Date() } });
-      await this.audit.log(tx, actor, 'receipt.cancelled', 'Receipt', id, { number: r.number, amount: r.payment.amount, reason });
-      return { ok: true };
+      await this.audit.log(tx, actor, 'receipt.cancelled', 'Receipt', id, { number: r.number, amount: r.payment.amount, reason, requestedById: r.cancelRequestedById, comment });
+      await notifyRequester('Annulation validée', `La direction a validé l’annulation du reçu n° ${r.number}.`);
+      return { ok: true, status: 'CANCELLED' };
     });
   }
 
@@ -309,7 +344,7 @@ export class FinanceService {
           ...(filters.method ? { method: filters.method as any } : {}),
           ...(filters.from || filters.to ? { createdAt: { gte: filters.from ? toDate(filters.from) : undefined, lt: filters.to ? new Date(toDate(filters.to).getTime() + 86400000) : undefined } } : {}),
         },
-        include: { student: { select: { matricule: true, firstName: true, lastName: true } }, receipt: { select: { id: true, number: true, cancelledAt: true } }, invoice: { select: { label: true, number: true } } },
+        include: { student: { select: { matricule: true, firstName: true, lastName: true } }, receipt: { select: { id: true, number: true, cancelledAt: true, cancelRequestedAt: true, cancelRequestReason: true } }, invoice: { select: { label: true, number: true } } },
         orderBy: { createdAt: 'desc' },
         take: 500,
       });
