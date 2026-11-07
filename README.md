@@ -54,6 +54,15 @@ cd ecole
 
 Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès que le DNS envoie le domaine et `*.domaine` vers le serveur : `./installer-serveur.sh --domaine exemple.com` passe en HTTPS, chaque école sur `<identifiant>.exemple.com`.
 
+## Sauvegarder le site (serveur et ordinateur)
+
+`./sauvegarder.sh` copie dans `~/sauvegardes` la base de données (`base-DATE.sql`), les fichiers envoyés (`fichiers-DATE.tar.gz`) et le `.env` (`env-DATE.txt`, indispensable pour relire les données chiffrées). Il ne fait que lire le site et garde les 14 copies les plus récentes (`GARDER=30 ./sauvegarder.sh` pour en garder plus).
+
+- `./sauvegarder.sh --auto` : sauvegarde chaque nuit à 2 h (heure du serveur), compte rendu dans `~/sauvegardes/journal.log` ; `--arreter-auto` l’arrête ; `--liste` montre les copies.
+- Copier sur un PC Windows (PowerShell) : `scp "root@IP_DU_SERVEUR:~/sauvegardes/*" $HOME\Documents\Sauvegardes-Cahiora\` (ou WinSCP).
+- Une copie restée sur le serveur ne protège pas d’une panne du serveur : téléchargez-la régulièrement et gardez-en une seconde ailleurs (clé USB, Drive). Le fichier `env-*.txt` contient les secrets : ne le partagez pas.
+- Restauration : elle remplace les données actuelles, à faire avec accompagnement. Ne lancez jamais `db:seed` sur le serveur (il efface l’école réelle).
+
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
 Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Une fois le codespace ouvert, tapez `./demarrer.sh` dans son terminal (plusieurs minutes la première fois) ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.
