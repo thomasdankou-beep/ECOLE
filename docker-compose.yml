@@ -58,6 +58,7 @@ services:
         API_URL: http://api:4000
         NEXT_PUBLIC_TENANT: ${TENANT_SLUG-saint-kisito}
         NEXT_PUBLIC_DEMO: ${SHOW_DEMO_ACCOUNTS:-true}
+        NEXT_PUBLIC_CAHIORA_SALES_PHONE: ${CAHIORA_SALES_PHONE:-2250503206666}
     restart: unless-stopped
     depends_on: [api]
 

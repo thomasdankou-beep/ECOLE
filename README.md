@@ -168,4 +168,13 @@ Rien de ce qui suit n’a été inventé. Ces points sont signalés dans le code
 
 ## Conventions
 
+### Présentation commerciale CAHIORA
+
+- `/cahiora` : page commerciale, estimation à **500 F CFA par élève et par année scolaire**, questions et demande de contact WhatsApp. Cette page est disponible même sur une adresse qui sert une école.
+- `/cahiora/demo` : démonstration illustrative indépendante de l’API, avec quatre points de vue (direction, comptabilité, enseignant, parent). Les essais restent en mémoire du navigateur et disparaissent au rechargement ; aucun paiement, SMS, compte ou abonnement réel n’est créé.
+- L’accueil de la plateforme sans école résolue utilise aussi cette présentation. Les vitrines des écoles et le message d’établissement suspendu conservent leur fonctionnement.
+- Contact commercial par défaut : DST TECHNOLOGIE, **+225 05 03 20 66 66**. Pour le changer, définir `NEXT_PUBLIC_CAHIORA_SALES_PHONE` au build web, ou `CAHIORA_SALES_PHONE` dans le `.env` de Docker Compose, puis reconstruire le web.
+- Le contact prépare un message ; le visiteur ouvre ensuite WhatsApp et décide de l’envoyer. Aucun prospect n’est enregistré sur le serveur.
+- L’offre affiche séparément les SMS, frais de paiement et conditions de mise en place à préciser. La facturation automatique des abonnements, les raccordements externes et les corrections de sécurité de l’audit ne sont pas réalisés par cette page.
+
 Branches : `main` (production), `develop` (intégration), `feature/*`, `fix/*`, une fonctionnalité par branche.
