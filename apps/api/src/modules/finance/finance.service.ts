@@ -6,6 +6,7 @@ import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { assertOwned } from '../../common/ownership';
 import { fcfa, isoDay, nextNumber, pad, toDate, verifyCode } from '../../common/util';
+import { money, tenantLocale, tenantToday } from '../../common/country';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BatchInvoiceDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
 import { FilesService } from '../files/files.service';
@@ -236,6 +237,8 @@ export class FinanceService {
    * et prévient les responsables. Appelé au guichet et à la confirmation de l'opérateur.
    */
   async applyPayment(tx: Tx, actor: Actor | null, payment: Payment) {
+    const { currency } = await tenantLocale(tx, payment.tenantId);
+    const fcfa = (n: number) => money(n, currency);
     const inv = await tx.invoice.findUniqueOrThrow({ where: { id: payment.invoiceId }, include: { student: true } });
     const paid = inv.paid + payment.amount;
     await tx.invoice.update({ where: { id: inv.id }, data: { paid, status: paid >= inv.total ? 'PAID' : 'PARTIAL' } });
@@ -272,6 +275,8 @@ export class FinanceService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const r = await tx.receipt.findUniqueOrThrow({ where: { id }, include: { payment: true } });
       await this.scope.assertStudent(tx, actor, r.payment.studentId);
+      const { currency } = await tenantLocale(tx, actor.tenantId);
+      const fcfa = (n: number) => money(n, currency);
       if (r.cancelledAt) throw new ConflictException('Ce reçu est déjà annulé');
       if (r.cancelRequestedAt) throw new ConflictException('Une demande d’annulation de ce reçu attend déjà la direction');
       await tx.receipt.update({ where: { id }, data: { cancelRequestedAt: new Date(), cancelRequestedById: actor.userId, cancelRequestReason: reason } });
@@ -356,7 +361,7 @@ export class FinanceService {
   unpaid(actor: Actor, classId?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
-      const today = toDate(isoDay(new Date()));
+      const today = toDate(await tenantToday(tx, actor.tenantId));
       const visible = await this.scope.studentIds(tx, actor);
       const rows = await tx.invoice.findMany({
         where: {
@@ -405,6 +410,8 @@ export class FinanceService {
   /** Relance groupée des familles débitrices : SMS immédiat + notification (CDC §4.4). */
   remind(actor: Actor, dto: RemindDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      const { currency } = await tenantLocale(tx, actor.tenantId);
+      const fcfa = (n: number) => money(n, currency);
       const yearId = await this.scope.currentYearId(tx);
       if (dto.classId) await this.scope.assertClass(tx, actor, dto.classId);
       const visible = await this.scope.studentIds(tx, actor);
@@ -434,7 +441,7 @@ export class FinanceService {
   // ------------------------------------------------------------ Pilotage
   dashboard(actor: Actor) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      const today = toDate(isoDay(new Date()));
+      const today = toDate(await tenantToday(tx, actor.tenantId));
       const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
       const visible = await this.scope.studentIds(tx, actor);
       const mine = visible ? { studentId: { in: visible } } : {};
@@ -463,7 +470,7 @@ export class FinanceService {
   /** Clôture de caisse journalière : espèces encaissées par le caissier contre montant compté. */
   closeCash(actor: Actor, dto: CashClosingDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      const day = toDate(isoDay(new Date()));
+      const day = toDate(await tenantToday(tx, actor.tenantId));
       const agg = await tx.payment.aggregate({ where: { status: 'SUCCESS', method: 'CASH', receivedById: actor.userId, confirmedAt: { gte: day } }, _sum: { amount: true } });
       const expected = agg._sum.amount ?? 0;
       const closing = await tx.cashClosing

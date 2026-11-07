@@ -7,7 +7,8 @@ import { AuditService, auditChanges } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { assertOwned } from '../../common/ownership';
-import { normalizePhone, toDate } from '../../common/util';
+import { toDate } from '../../common/util';
+import { country, schoolOperators, tenantPhone } from '../../common/country';
 import { hashPassword } from '../auth/auth.service';
 import { createSmsProvider } from '../notifications/sms.provider';
 import { FilesService } from '../files/files.service';
@@ -122,6 +123,8 @@ function publicTexts(raw: unknown, current: Record<string, unknown> = {}) {
   return {
     heroImage: current.heroImage, trackImages: current.trackImages,
     slogan: str(r.slogan, 120), tagline: str(r.tagline, 160), phone: str(r.phone, 40), motto: str(r.motto, 160),
+    /// Examen préparé au collège (BEPC ou autre selon le pays), affiché sur la page d'accueil ; vide = aucun nom d'examen.
+    collegeExam: str(r.collegeExam, 40),
     rentree: typeof r.rentree === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.rentree) ? r.rentree : undefined,
     highlights: list(r.highlights), reasons: list(r.reasons),
     entranceTest: typeof r.entranceTest === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.entranceTest) ? r.entranceTest : undefined,
@@ -162,7 +165,11 @@ export class SettingsService {
         Object.assign(identity, { signatureUrl: null, stampUrl: null });
       }
       return {
-        tenant: { id: tenant.id, name: tenant.name, shortName: tenant.shortName, settings, identity },
+        tenant: {
+          id: tenant.id, name: tenant.name, shortName: tenant.shortName, settings, identity,
+          country: tenant.country, countryName: country(tenant.country).name, currency: tenant.currency, timezone: tenant.timezone,
+          operators: schoolOperators(tenant), einvoice: country(tenant.country).einvoice,
+        },
         currentYear: year, sites, years, levels, tracks, rooms, subjects,
       };
     });
@@ -187,6 +194,13 @@ export class SettingsService {
         const b = incoming.branding as { primaryColor?: unknown };
         const color = typeof b.primaryColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(b.primaryColor) ? b.primaryColor : null;
         incoming.branding = { ...current.branding, primaryColor: color };
+      }
+      // Opérateurs Mobile Money proposés aux parents, saisis par la direction (les noms seulement).
+      if (incoming.payments) {
+        const ops = (incoming.payments as { operators?: unknown }).operators;
+        if (!Array.isArray(ops)) throw new BadRequestException('Liste des opérateurs invalide');
+        const operators = [...new Set(ops.map((x) => (typeof x === 'string' ? x.trim().slice(0, 40) : '')).filter(Boolean))].slice(0, 10);
+        incoming.payments = { operators };
       }
       if ('demo' in incoming) delete incoming.demo;
       if (incoming.public) incoming.public = publicTexts(incoming.public, (current as any).public);
@@ -528,7 +542,7 @@ export class SettingsService {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       await assertOwned(tx, { site: dto.roles.map((r) => r.siteId), subject: dto.subjectIds });
       const password = temporaryPassword();
-      const phone = normalizePhone(dto.phone);
+      const phone = await tenantPhone(tx, actor.tenantId, dto.phone);
       const user = await tx.user
         .create({
           data: {
@@ -551,7 +565,7 @@ export class SettingsService {
       const before = await tx.user.findUniqueOrThrow({ where: { id }, include: { roles: { where: { role: { notIn: ['PARENT', 'ELEVE'] } } } } });
       const data: Prisma.UserUpdateInput = {
         firstName: dto.firstName, lastName: dto.lastName, email: dto.email?.toLowerCase(),
-        phone: dto.phone ? normalizePhone(dto.phone) : undefined,
+        phone: dto.phone ? await tenantPhone(tx, actor.tenantId, dto.phone) : undefined,
         status: dto.active === undefined ? undefined : dto.active ? 'ACTIVE' : 'DISABLED',
       };
       await tx.user.update({ where: { id }, data }).catch((e) => uniqueViolation(e, 'Ce téléphone ou cet e-mail est déjà utilisé'));

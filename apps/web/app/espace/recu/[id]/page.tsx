@@ -7,6 +7,7 @@ import { LegalFooter, Letterhead, PrintBar, type SchoolIdentity } from '@/compon
 import { VerifyQr } from '@/components/qr';
 import { Button } from '@/components/ui';
 import { dateTime, fcfa } from '@/lib/format';
+import { useAuth } from '@/lib/auth';
 import { useApi } from '@/lib/use-api';
 
 type Receipt = {
@@ -17,6 +18,7 @@ type Receipt = {
 export default function Recu() {
   const { id } = useParams<{ id: string }>();
   const q = useApi<Receipt>(`/finance/receipts/${id}`);
+  const { me } = useAuth();
   return (
     <>
       <PrintBar><Button onClick={() => window.print()}><Printer className="size-4" /> Imprimer</Button></PrintBar>
@@ -49,7 +51,7 @@ export default function Recu() {
                 <div className="text-center text-sm"><p>Le caissier</p>{r.identity.stampUrl ? <img src={r.identity.stampUrl} alt="Cachet" className="mx-auto mt-1 max-h-16 opacity-80" /> : <p className="mt-10 text-xs text-black/60">Signature et cachet</p>}</div>
               </div>
               <LegalFooter identity={r.identity} />
-              <p className="text-center text-[11px] text-black/60">Reçu non fiscal. Facture normalisée e-MECeF : INFORMATION MANQUANTE (raccordement à prévoir).</p>
+              <p className="text-center text-[11px] text-black/60">Reçu non fiscal.{me?.tenant.einvoice ? ` Facture normalisée ${me.tenant.einvoice} : non raccordée.` : ''}</p>
             </article>
           );
         }}

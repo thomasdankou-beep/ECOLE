@@ -16,6 +16,8 @@ export type PublicSchool = {
   branding: Branding;
   public: {
     slogan?: string; tagline?: string; phone?: string; rentree?: string; highlights?: string[]; reasons?: string[]; motto?: string;
+    /** Examen préparé au collège, saisi par l'école (Paramètres › Logo et site public). */
+    collegeExam?: string;
     /// Photo du bandeau d'accueil et photos par code de filière, fournies avec l'installation de l'école.
     heroImage?: string; trackImages?: Record<string, string>;
     entranceTest?: string; requiredDocuments?: string[];
@@ -61,7 +63,7 @@ export function siteList(names: string[]) {
   return names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} et ${names[names.length - 1]}`;
 }
 
-const DIAL: Record<string, string> = { BJ: '229', CI: '225', SN: '221', TG: '228', BF: '226', ML: '223', NE: '227', GN: '224', CM: '237' };
+const DIAL: Record<string, string> = { BJ: '229', CI: '225', SN: '221', TG: '228', BF: '226', ML: '223', NE: '227', GN: '224', CM: '237', GA: '241', CG: '242', TD: '235' };
 
 /** Lien d'appel : indicatif du pays de l'école ajouté aux numéros locaux. */
 export function telHref(phone: string, country = 'BJ') {

@@ -11,12 +11,13 @@ import * as QRCode from 'qrcode';
 import { Prisma, PrismaClient, TenantStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
-import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsEmail, IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
 import { ALLOW_PENDING_PASSWORD, AllowPendingPassword, forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
 import { maskIdentifier } from '../../common/audit.service';
 import { decrypt, encrypt } from '../../common/util';
 import { normalizePhone } from '../../common/util';
+import { country, COUNTRIES, COUNTRY_CODES, CURRENCIES, validTimezone } from '../../common/country';
 import { config, tenantOrigin } from '../../config';
 import { hashPassword, totpStep, TOTP_SETUP_AUDIENCE } from '../auth/auth.service';
 import { createSmsProvider } from '../notifications/sms.provider';
@@ -41,7 +42,10 @@ export class CreateTenantDto {
   slug: string;
   @IsString() @MinLength(3) @MaxLength(160) name: string;
   @IsOptional() @IsString() @MaxLength(60) shortName?: string;
-  @IsOptional() @Matches(/^[A-Z]{2}$/) country?: string;
+  @IsOptional() @IsIn(COUNTRY_CODES, { message: 'Pays non pris en charge' }) country?: string;
+  /// Monnaie et fuseau : ceux du pays si absents.
+  @IsOptional() @IsIn(CURRENCIES, { message: 'Monnaie non prise en charge' }) currency?: string;
+  @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @Matches(/^[A-Z]{2,5}$/, { message: 'Préfixe des matricules : 2 à 5 lettres majuscules' }) matriculePrefix: string;
   @IsOptional() @Matches(/^[a-z0-9.-]+\.[a-z]{2,}$/, { message: 'Nom de domaine invalide' }) domain?: string;
   @IsString() @MaxLength(120) siteName: string;
@@ -53,6 +57,9 @@ export class UpdateTenantDto {
   @IsOptional() @IsString() @MaxLength(60) shortName?: string | null;
   @IsOptional() @Matches(/^[a-z0-9.-]+\.[a-z]{2,}$/, { message: 'Nom de domaine invalide' }) domain?: string | null;
   @IsOptional() @IsEnum(TenantStatus) status?: TenantStatus;
+  @IsOptional() @IsIn(COUNTRY_CODES, { message: 'Pays non pris en charge' }) country?: string;
+  @IsOptional() @IsIn(CURRENCIES, { message: 'Monnaie non prise en charge' }) currency?: string;
+  @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @IsOptional() @IsString() @MaxLength(4000) platformNotes?: string | null;
 }
 
@@ -284,7 +291,7 @@ export class PlatformService {
         return { students, staff, sites, lastActivityAt: lastSession?.createdAt ?? null };
       });
       return {
-        id: t.id, slug: t.slug, name: t.name, shortName: t.shortName, country: t.country, status: t.status, domain: t.domain,
+        id: t.id, slug: t.slug, name: t.name, shortName: t.shortName, country: t.country, currency: t.currency, timezone: t.timezone, status: t.status, domain: t.domain,
         platformNotes: t.platformNotes, createdAt: t.createdAt, demo: !!(t.settings as any)?.demo, ...stats,
       };
     }));
@@ -294,11 +301,14 @@ export class PlatformService {
     if (RESERVED.includes(dto.slug)) throw new BadRequestException('Cet identifiant est réservé à la plateforme');
     const exists = await this.db.tenant.findFirst({ where: { OR: [{ slug: dto.slug }, ...(dto.domain ? [{ domain: dto.domain }] : [])] } });
     if (exists) throw new ConflictException(exists.slug === dto.slug ? 'Cet identifiant est déjà utilisé' : 'Ce nom de domaine est déjà utilisé');
+    const c = country(dto.country ?? 'BJ');
+    const timezone = dto.timezone || c.timezone;
+    if (!validTimezone(timezone)) throw new BadRequestException('Fuseau horaire inconnu');
     const password = temporaryPassword();
-    const phone = normalizePhone(dto.director.phone);
+    const phone = normalizePhone(dto.director.phone, c.dial);
     const tenant = await this.db.tenant.create({
       data: {
-        slug: dto.slug, name: dto.name.trim(), shortName: dto.shortName?.trim() || null, country: dto.country ?? 'BJ', domain: dto.domain ?? null,
+        slug: dto.slug, name: dto.name.trim(), shortName: dto.shortName?.trim() || null, country: c.code, currency: dto.currency || c.currency, timezone, domain: dto.domain ?? null,
         settings: { matriculePrefix: dto.matriculePrefix },
       },
     });
@@ -326,6 +336,9 @@ export class PlatformService {
       const other = await this.db.tenant.findFirst({ where: { domain: dto.domain, NOT: { id } } });
       if (other) throw new ConflictException('Ce nom de domaine est déjà utilisé');
     }
+    if (dto.timezone && !validTimezone(dto.timezone)) throw new BadRequestException('Fuseau horaire inconnu');
+    // Changer de pays reprend la monnaie et le fuseau du nouveau pays, sauf s'ils sont donnés.
+    const c = dto.country && dto.country !== t.country ? country(dto.country) : null;
     const updated = await this.db.tenant.update({
       where: { id },
       data: {
@@ -333,11 +346,14 @@ export class PlatformService {
         ...(dto.shortName !== undefined ? { shortName: dto.shortName?.trim() || null } : {}),
         ...(dto.domain !== undefined ? { domain: dto.domain || null } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
+        ...(dto.country !== undefined ? { country: dto.country } : {}),
+        ...(dto.currency || c ? { currency: dto.currency || c!.currency } : {}),
+        ...(dto.timezone || c ? { timezone: dto.timezone || c!.timezone } : {}),
         ...(dto.platformNotes !== undefined ? { platformNotes: dto.platformNotes || null } : {}),
       },
     });
     if (dto.status) forgetSessions({ tenantId: id });
-    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
+    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status', 'country', 'currency', 'timezone'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
     if (Object.keys(visible).length) {
       const action = visible.status ? `platform.tenant.${visible.status === 'SUSPENDED' ? 'suspended' : 'reactivated'}` : 'platform.tenant.updated';
       await this.db.inTenant(id, (tx) => this.schoolLog(tx, actor, id, action, 'Tenant', id, visible));
@@ -464,6 +480,10 @@ export class PlatformController {
 
   @Get('platform/tenants') @UseGuards(PlatformGuard)
   tenants() { return this.s.tenants(); }
+
+  /** Pays pris en charge, avec leur indicatif, monnaie et fuseau par défaut. */
+  @Get('platform/countries') @UseGuards(PlatformGuard)
+  countries() { return COUNTRIES.map(({ code, name, dial, currency, timezone, einvoice }) => ({ code, name, dial, currency, timezone, einvoice })); }
 
   @Post('platform/tenants') @UseGuards(PlatformGuard)
   create(@Req() req: Request, @Body() dto: CreateTenantDto) { return this.s.createTenant((req as any).platformAdmin, dto); }

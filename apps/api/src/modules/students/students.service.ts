@@ -5,7 +5,8 @@ import { AuditService, auditChanges, maskIdentifier } from '../../common/audit.s
 import { can } from '../../common/permissions';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
-import { nextNumber, normalizePhone, pad, toDate } from '../../common/util';
+import { nextNumber, pad, toDate } from '../../common/util';
+import { tenantPhone } from '../../common/country';
 import { hashPassword } from '../auth/auth.service';
 import { FilesService } from '../files/files.service';
 import { FinanceService } from '../finance/finance.service';
@@ -143,7 +144,7 @@ export class StudentsService {
 
   /** Rattache un responsable ; réutilise la fiche et le compte existants (fratrie) d'après le téléphone. */
   async linkGuardian(tx: Tx, actor: Actor, studentId: string, g: GuardianInput, primary: boolean) {
-    const phone = normalizePhone(g.phone);
+    const phone = await tenantPhone(tx, actor.tenantId, g.phone);
     let guardian = await tx.guardian.findFirst({ where: { phone } });
     if (!guardian) {
       guardian = await tx.guardian.create({

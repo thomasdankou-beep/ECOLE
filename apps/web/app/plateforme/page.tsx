@@ -3,13 +3,13 @@
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { KeyRound, LogOut, Pencil, Plus, ShieldCheck } from 'lucide-react';
-import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, PageHeader, Table, Textarea, useToast } from '@/components/ui';
+import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, PageHeader, Select, Table, Textarea, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 import { pf } from '@/lib/platform';
 
 type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; platformDomain: string | null };
 type Tenant = {
-  id: string; slug: string; name: string; shortName: string | null; country: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
+  id: string; slug: string; name: string; shortName: string | null; country: string; currency: string; timezone: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
   platformNotes: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
 };
 type Audit = { id: string; action: string; tenantId: string | null; createdAt: string; data: unknown; adminName: string | null; ip: string | null };
@@ -24,6 +24,45 @@ const ACTIONS: Record<string, string> = {
   'platform.auth.2fa_enabled': 'Double authentification activée', 'platform.auth.2fa_reset': 'Double authentification reconfigurée',
   'platform.auth.refused': 'Connexion refusée (compte bloqué ou désactivé)', 'platform.auth.unknown_identifier': 'Connexion avec un e-mail inconnu',
 };
+type Country = { code: string; name: string; dial: string; currency: string; timezone: string; einvoice: string | null };
+type Locale = { country: string; currency: string; timezone: string };
+
+/** Pays pris en charge par la plateforme (indicatif, monnaie et fuseau par défaut). */
+function useCountries() {
+  const [list, setList] = useState<Country[]>([]);
+  useEffect(() => {
+    pf<Country[]>('GET', '/countries').then(setList).catch(() => setList([]));
+  }, []);
+  return list;
+}
+
+const currencyName = (c: string) => (c === 'XOF' ? 'Franc CFA (XOF)' : c === 'XAF' ? 'Franc CFA (XAF)' : c === 'GNF' ? 'Franc guinéen (GNF)' : c);
+
+/** Pays, monnaie et fuseau horaire : choisir le pays remplit les deux autres, qui restent modifiables. */
+function LocaleFields({ value, onChange, countries }: { value: Locale; onChange: (v: Locale) => void; countries: Country[] }) {
+  const current = countries.find((c) => c.code === value.country);
+  const currencies = [...new Set(countries.map((c) => c.currency))];
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      <Field label="Pays" hint={current ? `Indicatif +${current.dial}` : undefined}>
+        <Select value={value.country} onChange={(e) => {
+          const c = countries.find((x) => x.code === e.target.value);
+          onChange(c ? { country: c.code, currency: c.currency, timezone: c.timezone } : { ...value, country: e.target.value });
+        }} required>
+          {!countries.length && <option value={value.country}>{value.country}</option>}
+          {countries.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}
+        </Select>
+      </Field>
+      <Field label="Monnaie">
+        <Select value={value.currency} onChange={(e) => onChange({ ...value, currency: e.target.value })} required>
+          {(currencies.length ? currencies : [value.currency]).map((c) => <option key={c} value={c}>{currencyName(c)}</option>)}
+        </Select>
+      </Field>
+      <Field label="Fuseau horaire" hint="Pour la date du jour de l’appel et des relances."><Input value={value.timezone} onChange={(e) => onChange({ ...value, timezone: e.target.value })} required maxLength={60} /></Field>
+    </div>
+  );
+}
+
 const when = (d: string | null) => (d ? new Date(d).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '—');
 
 export default function Plateforme() {
@@ -164,12 +203,13 @@ function Schools({ admin }: { admin: Admin }) {
       {tab === 'ecoles' && tenants && (tenants.length === 0 ? <Empty title="Aucune école">Créez la première école cliente.</Empty> : (
         <Card className="overflow-x-auto p-0">
           <Table>
-            <thead><tr><th>École</th><th>Adresse</th><th>État</th><th className="text-right">Élèves</th><th className="text-right">Personnel</th><th className="text-right">Sites</th><th>Dernière connexion</th><th /></tr></thead>
+            <thead><tr><th>École</th><th>Adresse</th><th>Pays</th><th>État</th><th className="text-right">Élèves</th><th className="text-right">Personnel</th><th className="text-right">Sites</th><th>Dernière connexion</th><th /></tr></thead>
             <tbody>
               {tenants.map((t) => (
                 <tr key={t.id}>
                   <td className="font-bold">{t.name}{t.demo && <Badge tone="info" className="ml-2">Démo</Badge>}</td>
                   <td className="text-sm">{address(t)}</td>
+                  <td className="text-sm">{t.country}</td>
                   <td>{t.status === 'ACTIVE' ? <Badge tone="good">Active</Badge> : <Badge tone="bad">Suspendue</Badge>}</td>
                   <td className="text-right">{t.students}</td>
                   <td className="text-right">{t.staff}</td>
@@ -220,6 +260,8 @@ function SecretCard({ s, close }: { s: Secret; close: () => void }) {
 
 function CreateDialog({ platformDomain, done }: { platformDomain: string | null; done: (s: Secret) => void }) {
   const [f, setF] = useState({ name: '', shortName: '', slug: '', matriculePrefix: '', domain: '', siteName: '', firstName: '', lastName: '', phone: '', email: '' });
+  const countries = useCountries();
+  const [loc, setLoc] = useState<Locale>({ country: 'BJ', currency: 'XOF', timezone: 'Africa/Porto-Novo' });
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
@@ -231,7 +273,7 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
         setError(null);
         try {
           const r = await pf<{ tenant: { name: string }; director: { identifier: string; temporaryPassword: string } }>('POST', '/tenants', {
-            name: f.name, shortName: f.shortName || undefined, slug: f.slug, matriculePrefix: f.matriculePrefix, domain: f.domain || undefined, siteName: f.siteName,
+            name: f.name, shortName: f.shortName || undefined, slug: f.slug, matriculePrefix: f.matriculePrefix, domain: f.domain || undefined, siteName: f.siteName, ...loc,
             director: { firstName: f.firstName, lastName: f.lastName, phone: f.phone, email: f.email || undefined },
           });
           done({ title: 'École créée. Compte Direction', school: r.tenant.name, identifier: r.director.identifier, password: r.director.temporaryPassword });
@@ -242,6 +284,7 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
         }
       }}>
         <Field label="Nom complet"><Input value={f.name} onChange={set('name')} required minLength={3} maxLength={160} /></Field>
+        <LocaleFields value={loc} onChange={setLoc} countries={countries} />
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Nom court"><Input value={f.shortName} onChange={set('shortName')} maxLength={60} /></Field>
           <Field label="Préfixe des matricules" hint="2 à 5 lettres, ex. CSL"><Input value={f.matriculePrefix} onChange={(e) => setF({ ...f, matriculePrefix: e.target.value.toUpperCase() })} required pattern="[A-Z]{2,5}" maxLength={5} /></Field>
@@ -255,7 +298,7 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Prénom"><Input value={f.firstName} onChange={set('firstName')} required maxLength={80} /></Field>
           <Field label="Nom"><Input value={f.lastName} onChange={set('lastName')} required maxLength={80} /></Field>
-          <Field label="Téléphone" hint="Il recevra son mot de passe par SMS."><Input type="tel" value={f.phone} onChange={set('phone')} required maxLength={30} /></Field>
+          <Field label="Téléphone" hint={`Il recevra son mot de passe par SMS. Sans indicatif, +${countries.find((c) => c.code === loc.country)?.dial ?? '229'} est ajouté.`}><Input type="tel" value={f.phone} onChange={set('phone')} required maxLength={30} /></Field>
           <Field label="E-mail (facultatif)"><Input type="email" value={f.email} onChange={set('email')} maxLength={120} /></Field>
         </div>
         <ErrorNote error={error} />
@@ -267,6 +310,8 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
 
 function EditDialog({ t, done }: { t: Tenant; done: () => void }) {
   const [f, setF] = useState({ name: t.name, shortName: t.shortName ?? '', domain: t.domain ?? '', platformNotes: t.platformNotes ?? '' });
+  const countries = useCountries();
+  const [loc, setLoc] = useState<Locale>({ country: t.country, currency: t.currency, timezone: t.timezone });
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   return (
@@ -276,7 +321,7 @@ function EditDialog({ t, done }: { t: Tenant; done: () => void }) {
         setBusy(true);
         setError(null);
         try {
-          await pf('PATCH', `/tenants/${t.id}`, { name: f.name, shortName: f.shortName || null, domain: f.domain || null, platformNotes: f.platformNotes || null });
+          await pf('PATCH', `/tenants/${t.id}`, { name: f.name, shortName: f.shortName || null, domain: f.domain || null, platformNotes: f.platformNotes || null, ...loc });
           done();
         } catch (err) {
           setError(err);
@@ -286,6 +331,7 @@ function EditDialog({ t, done }: { t: Tenant; done: () => void }) {
       }}>
         <Field label="Nom complet"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} required minLength={3} maxLength={160} /></Field>
         <Field label="Nom court"><Input value={f.shortName} onChange={(e) => setF({ ...f, shortName: e.target.value })} maxLength={60} /></Field>
+        <LocaleFields value={loc} onChange={setLoc} countries={countries} />
         <Field label="Nom de domaine propre"><Input value={f.domain} onChange={(e) => setF({ ...f, domain: e.target.value })} maxLength={120} /></Field>
         <Field label="Notes internes" hint="Visibles seulement ici : contact, contrat, remarques."><Textarea value={f.platformNotes} onChange={(e) => setF({ ...f, platformNotes: e.target.value })} rows={3} maxLength={4000} /></Field>
         <ErrorNote error={error} />

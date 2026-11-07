@@ -69,6 +69,8 @@ export default function Home() {
   const images = p.trackImages ?? {};
   const tracks = [...(s?.tracks ?? []).filter((t) => t.cycle === 'LYCEE_TECHNIQUE')].sort((a, b) => Number(!images[a.code]) - Number(!images[b.code]));
   const hasCollege = !!s?.levels.some((l) => l.cycle === 'COLLEGE');
+  // Écoles béninoises déjà en ligne : le BEPC reste affiché tant que l'école n'a rien saisi d'autre.
+  const collegeExam = p.collegeExam ?? (s?.country === 'BJ' ? 'BEPC' : undefined);
   const where = sites.length > 1 ? ` sur ${COUNT[sites.length] ?? sites.length} sites, ${siteList(sites.map((x) => x.name))}` : sites.length === 1 ? ` à ${sites[0].name}` : '';
   const description = s ? offer(s.levels) : '';
   const honors = s?.honors ?? [];
@@ -221,7 +223,7 @@ export default function Home() {
               <div className="relative">
                 <span className="grid size-12 place-items-center rounded-2xl bg-white/15"><GraduationCap className="size-7" /></span>
                 <h3 className="mt-4 text-2xl font-bold">Collège général</h3>
-                <p className="mt-1 opacity-85">De la 6e à la 3e, préparation au BEPC.</p>
+                <p className="mt-1 opacity-85">De la 6e à la 3e{collegeExam ? `, préparation au ${collegeExam}` : ''}.</p>
               </div>
               <Link href="/preinscription" className="relative mt-6 inline-flex items-center gap-1 font-bold text-yellow">Demander une place <ArrowRight className="size-4" /></Link>
             </article>}

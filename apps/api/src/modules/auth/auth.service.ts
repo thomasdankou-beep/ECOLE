@@ -11,6 +11,7 @@ import { AccessTokenPayload, Actor, forgetSessions, SCHOOL_AUDIENCE } from '../.
 import { AuditService, auditSubject, maskIdentifier } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
+import { country } from '../../common/country';
 import { createSmsProvider } from '../notifications/sms.provider';
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -84,26 +85,26 @@ export class AuthService {
     return t;
   }
 
-  private identifierWhere(identifier: string) {
+  private identifierWhere(identifier: string, dial: string) {
     const id = identifier.trim();
-    return id.includes('@') ? { email: id.toLowerCase() } : { phone: normalizePhone(id) };
+    return id.includes('@') ? { email: id.toLowerCase() } : { phone: normalizePhone(id, dial) };
   }
 
   /** Téléphone, e-mail, ou matricule pour les comptes élèves. */
-  private async findByIdentifier(tx: Tx, identifier: string) {
+  private async findByIdentifier(tx: Tx, identifier: string, dial: string) {
     const id = identifier.trim();
     if (!id.includes('@') && /[a-z]/i.test(id)) {
       const student = await tx.student.findFirst({ where: { matricule: id.toUpperCase() }, select: { userId: true } });
       if (!student?.userId) return null;
       return tx.user.findUnique({ where: { id: student.userId }, include: { roles: true } });
     }
-    return tx.user.findFirst({ where: this.identifierWhere(id), include: { roles: true } });
+    return tx.user.findFirst({ where: this.identifierWhere(id, dial), include: { roles: true } });
   }
 
   async login(tenantSlug: string, identifier: string, password: string, meta: SessionMeta) {
     const tenant = await this.tenantBySlug(tenantSlug);
     return settle(this.db.forTenant(tenant.id, async (tx) => {
-      const user = await this.findByIdentifier(tx, identifier);
+      const user = await this.findByIdentifier(tx, identifier, country(tenant.country).dial);
       const fail = new UnauthorizedException(LOGIN_FAILED);
       // Compte inconnu, désactivé ou bloqué : même calcul et même réponse (SEC-024).
       if (!user || user.status !== 'ACTIVE' || (user.lockedUntil && user.lockedUntil > new Date())) {
@@ -269,7 +270,8 @@ export class AuthService {
       });
       const t = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { id: true, slug: true, name: true, shortName: true, country: true, currency: true, settings: true } });
       const { settings, ...rest } = t;
-      const tenant = { ...rest, logoUrl: logoUrl(t), primaryColor: tenantSettings(settings).branding.primaryColor };
+      const c = country(t.country);
+      const tenant = { ...rest, dial: c.dial, einvoice: c.einvoice, logoUrl: logoUrl(t), primaryColor: tenantSettings(settings).branding.primaryColor };
       const sites = await tx.site.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
       const year = await tx.academicYear.findFirst({ where: { isCurrent: true }, select: { id: true, label: true } });
       let children: { id: string; firstName: string; lastName: string; className: string | null }[] = [];
@@ -311,7 +313,7 @@ export class AuthService {
   async forgot(tenantSlug: string, identifier: string) {
     const tenant = await this.tenantBySlug(tenantSlug);
     await this.db.forTenant(tenant.id, async (tx) => {
-      const user = await this.findByIdentifier(tx, identifier);
+      const user = await this.findByIdentifier(tx, identifier, country(tenant.country).dial);
       if (!user?.phone || user.status !== 'ACTIVE') return;
       const code = String(randomInt(100000, 1000000));
       await tx.otpCode.updateMany({ where: { userId: user.id, purpose: 'PASSWORD_RESET', consumedAt: null }, data: { consumedAt: new Date() } });
@@ -328,7 +330,7 @@ export class AuthService {
     const tenant = await this.tenantBySlug(tenantSlug);
     return settle(this.db.forTenant(tenant.id, async (tx) => {
       const invalid = new BadRequestException('Code invalide ou expiré');
-      const user = await this.findByIdentifier(tx, identifier);
+      const user = await this.findByIdentifier(tx, identifier, country(tenant.country).dial);
       if (!user) throw invalid;
       const otp = await tx.otpCode.findFirst({
         where: { userId: user.id, purpose: 'PASSWORD_RESET', consumedAt: null, expiresAt: { gt: new Date() } },

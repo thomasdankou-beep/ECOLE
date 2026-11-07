@@ -21,7 +21,7 @@ export function ImageEcole({ name, shortName, logoUrl, primaryColor, texts, relo
   const { busy, run } = useAction();
   const [n, setN] = useState({ name, shortName: shortName ?? '', color: primaryColor ?? '' });
   const [t, setT] = useState({
-    slogan: texts.slogan ?? '', tagline: texts.tagline ?? '', phone: texts.phone ?? '', rentree: texts.rentree ?? '', motto: texts.motto ?? '',
+    slogan: texts.slogan ?? '', tagline: texts.tagline ?? '', phone: texts.phone ?? '', rentree: texts.rentree ?? '', motto: texts.motto ?? '', collegeExam: typeof texts.collegeExam === 'string' ? texts.collegeExam : '',
     highlights: (texts.highlights ?? []).join('\n'), reasons: (texts.reasons ?? []).join('\n'),
     entranceTest: texts.entranceTest ?? '', requiredDocuments: (texts.requiredDocuments ?? []).join('\n'),
   });
@@ -66,7 +66,7 @@ export function ImageEcole({ name, shortName, logoUrl, primaryColor, texts, relo
       <Section title="Textes du site public">
         <form className="grid gap-3" onSubmit={async (e) => {
           e.preventDefault();
-          const pub = { ...texts, slogan: t.slogan, tagline: t.tagline, phone: t.phone, rentree: t.rentree || undefined, motto: t.motto, highlights: lines(t.highlights), reasons: lines(t.reasons), entranceTest: t.entranceTest || undefined, requiredDocuments: lines(t.requiredDocuments) };
+          const pub = { ...texts, slogan: t.slogan, tagline: t.tagline, phone: t.phone, rentree: t.rentree || undefined, motto: t.motto, collegeExam: t.collegeExam, highlights: lines(t.highlights), reasons: lines(t.reasons), entranceTest: t.entranceTest || undefined, requiredDocuments: lines(t.requiredDocuments) };
           if (await run(() => api.patch('/settings', { settings: { public: pub } }), toast, 'Site public mis à jour')) reload();
         }}>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -81,6 +81,7 @@ export function ImageEcole({ name, shortName, logoUrl, primaryColor, texts, relo
           <Field label="Points forts du bandeau" hint="Un par ligne."><Textarea value={t.highlights} onChange={setText('highlights')} rows={3} maxLength={600} /></Field>
           <Field label="Pourquoi nous choisir" hint="Une raison par ligne. Laissez vide pour masquer la rubrique."><Textarea value={t.reasons} onChange={setText('reasons')} rows={4} maxLength={1000} /></Field>
           <Field label="Pièces à fournir pour l’inscription" hint="Une par ligne. Affichées sur la page de pré-inscription."><Textarea value={t.requiredDocuments} onChange={setText('requiredDocuments')} rows={4} maxLength={2000} /></Field>
+          <Field label="Examen préparé au collège" hint="Ex. BEPC. Affiché sur la carte « Collège ». Laissez vide pour ne nommer aucun examen (au Bénin, BEPC par défaut)."><Input value={t.collegeExam} onChange={setText('collegeExam')} maxLength={40} /></Field>
           <Field label="Phrase de conclusion"><Input value={t.motto} onChange={setText('motto')} maxLength={160} /></Field>
           <Button type="submit" loading={busy}>Enregistrer</Button>
         </form>

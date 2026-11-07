@@ -6,12 +6,11 @@ import { Actor } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
-import { normalizePhone } from '../../common/util';
+import { schoolOperators, tenantPhone } from '../../common/country';
 import { FinanceService } from '../finance/finance.service';
 import { createPaymentProvider, PaymentProvider, ProviderEvent, SandboxProvider } from './providers';
 
 /// Opérateurs Mobile Money proposés au parent (liste à confirmer avec l'agrégateur retenu).
-export const OPERATORS = ['MTN MoMo', 'Moov Money'];
 
 @Injectable()
 export class PaymentsService {
@@ -21,10 +20,20 @@ export class PaymentsService {
   constructor(private db: PrismaService, private scope: ScopeService, private finance: FinanceService, private audit: AuditService) {}
 
   /** Le parent lance un paiement Mobile Money ; la facture n'est réglée qu'à la confirmation de l'opérateur. */
+  /** Opérateurs proposés aux parents de l'école de l'utilisateur. */
+  operators(actor: Actor) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { country: true, settings: true } });
+      return { provider: this.provider.name, operators: schoolOperators(t) };
+    });
+  }
+
   async initiate(actor: Actor, dto: { invoiceId: string; amount: number; operator: string; phone: string }) {
     if (this.provider.name === 'disabled') throw new BadRequestException("Le paiement en ligne n'est pas encore ouvert. Réglez au guichet de l'école.");
     const transactionId = `SK${Date.now().toString(36).toUpperCase()}${randomBytes(4).toString('hex').toUpperCase()}`;
     const payment = await this.db.forTenant(actor.tenantId, async (tx) => {
+      const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { country: true, currency: true, settings: true } });
+      if (!schoolOperators(t).includes(dto.operator)) throw new BadRequestException("Cet opérateur n'est pas proposé par l'école");
       const inv = await tx.invoice.findUnique({ where: { id: dto.invoiceId }, include: { student: true } });
       if (!inv) throw new NotFoundException('Facture introuvable');
       await this.scope.assertStudent(tx, actor, inv.studentId);
@@ -32,17 +41,17 @@ export class PaymentsService {
       const p = await tx.payment.create({
         data: {
           tenantId: actor.tenantId, invoiceId: inv.id, studentId: inv.studentId, amount: dto.amount, method: 'ONLINE',
-          provider: this.provider.name, operator: dto.operator, transactionId, payerPhone: normalizePhone(dto.phone), status: 'INITIATED',
+          provider: this.provider.name, operator: dto.operator, transactionId, payerPhone: await tenantPhone(tx, actor.tenantId, dto.phone), status: 'INITIATED',
         },
       });
       await tx.$executeRaw`INSERT INTO payment_routes (transaction_id, tenant_id) VALUES (${transactionId}, ${actor.tenantId}::uuid)`;
       await this.audit.log(tx, actor, 'payment.initiated', 'Payment', p.id, { amount: dto.amount, operator: dto.operator });
-      return { ...p, studentName: `${inv.student.firstName} ${inv.student.lastName}`, label: inv.label };
+      return { ...p, studentName: `${inv.student.firstName} ${inv.student.lastName}`, label: inv.label, currency: t.currency };
     });
 
     try {
       const r = await this.provider.initiate({
-        transactionId, amount: dto.amount, currency: 'XOF', description: `${payment.label} ${payment.studentName}`,
+        transactionId, amount: dto.amount, currency: payment.currency, description: `${payment.label} ${payment.studentName}`,
         payerPhone: payment.payerPhone ?? undefined, operator: dto.operator, customerName: actor.name,
         notifyUrl: `${config.publicApiUrl}/api/v1/payments/webhook/${this.provider.name}`,
         returnUrl: `${tenantOrigin(await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } }))}/espace/frais?paiement=${payment.id}`,

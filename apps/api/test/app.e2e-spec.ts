@@ -1916,3 +1916,86 @@ describe('Sécurité v1.1, étape 6 : garde-fous de structure de la base (SEC-04
     ]) expect(await attempt(sql)).not.toBe('accepté');
   });
 });
+
+describe('Écoles de plusieurs pays (lot « Pays de l’école »)', () => {
+  const email = 'pays-plateforme@test.local';
+  const slug = `ci-${Date.now().toString(36)}`;
+  let cookie: string;
+  let tenantId: string;
+  let token: string;
+
+  beforeAll(async () => {
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Admin Pays"`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'ignore' });
+    const argon2 = await import('argon2');
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Pays-2026'), mustChangePassword: false } });
+    const r = await http.post('/api/v1/platform/auth/login').send({ email, password: 'Plateforme-Pays-2026' }).expect(201);
+    cookie = (r.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('erp_pt='))!.split(';')[0];
+  });
+
+  it('liste les pays avec leur indicatif, leur monnaie et leur fuseau', async () => {
+    const r = await http.get('/api/v1/platform/countries').set('Cookie', cookie).expect(200);
+    expect(r.body.find((c: any) => c.code === 'CI')).toMatchObject({ dial: '225', currency: 'XOF', timezone: 'Africa/Abidjan', einvoice: 'FNE' });
+    expect(r.body.find((c: any) => c.code === 'BJ')).toMatchObject({ dial: '229', einvoice: 'e-MECeF' });
+    expect((await http.get('/api/v1/platform/countries')).status).toBe(401);
+  });
+
+  it("une école ivoirienne prend +225, la monnaie et l'heure d'Abidjan", async () => {
+    const bad = await http.post('/api/v1/platform/tenants').set('Cookie', cookie)
+      .send({ slug: `${slug}-x`, name: 'École Pays Inconnu', country: 'ZZ', matriculePrefix: 'EPI', siteName: 'Centre', director: { firstName: 'A', lastName: 'B', phone: '0707000001' } });
+    expect(bad.status).toBe(400);
+    const c = await http.post('/api/v1/platform/tenants').set('Cookie', cookie)
+      .send({ slug, name: 'Groupe scolaire Test Abidjan', country: 'CI', matriculePrefix: 'GTA', siteName: 'Cocody', director: { firstName: 'Awa', lastName: 'Koné', phone: '07 07 00 00 01' } });
+    expect(c.status).toBe(201);
+    expect(c.body.director.identifier).toBe('+2250707000001');
+    tenantId = c.body.tenant.id;
+    const t = await admin.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    expect(t).toMatchObject({ country: 'CI', currency: 'XOF', timezone: 'Africa/Abidjan' });
+
+    // Le directeur se connecte en tapant son numéro sans indicatif : +225 est ajouté, pas +229.
+    const l = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: '0707000001', password: c.body.director.temporaryPassword });
+    expect(l.status).toBe(200);
+    await http.post('/api/v1/auth/change-password').set('Authorization', `Bearer ${l.body.accessToken}`)
+      .send({ current: c.body.director.temporaryPassword, next: 'Abidjan2026xy' }).expect(200);
+    token = (await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: '0707000001', password: 'Abidjan2026xy' }).expect(200)).body.accessToken;
+    const me = await http.get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(me.body.tenant).toMatchObject({ country: 'CI', currency: 'XOF', dial: '225', einvoice: 'FNE' });
+  });
+
+  it('le personnel enregistré sans indicatif reçoit celui de son école', async () => {
+    const s = await http.post('/api/v1/staff').set('Authorization', `Bearer ${token}`)
+      .send({ firstName: 'Yao', lastName: 'Comptable', phone: '05 05 00 00 02', roles: [{ role: 'COMPTABLE' }] });
+    expect(s.status).toBe(201);
+    const u = await inTenant(slug, (tx) => tx.user.findUniqueOrThrow({ where: { id: s.body.id } }));
+    expect(u.phone).toBe('+2250505000002');
+  });
+
+  it("aucun opérateur Mobile Money n'est inventé hors du Bénin ; la direction saisit les siens", async () => {
+    const before = await http.get('/api/v1/settings').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(before.body.tenant).toMatchObject({ country: 'CI', countryName: "Côte d'Ivoire", operators: [], einvoice: 'FNE' });
+    await http.patch('/api/v1/settings').set('Authorization', `Bearer ${token}`)
+      .send({ settings: { payments: { operators: [' Orange Money ', 'Wave', 'Wave', ''] } } }).expect(200);
+    const after = await http.get('/api/v1/settings').set('Authorization', `Bearer ${token}`);
+    expect(after.body.tenant.operators).toEqual(['Orange Money', 'Wave']);
+    expect((await http.patch('/api/v1/settings').set('Authorization', `Bearer ${token}`).send({ settings: { payments: { operators: 'Wave' } } })).status).toBe(400);
+    // Saint Kisito (Bénin) garde MTN MoMo et Moov Money tant que sa direction n'a rien saisi.
+    expect((await as('parent').get('/payments/operators')).body.operators).toEqual(['MTN MoMo', 'Moov Money']);
+  });
+
+  it("le parent ne peut pas payer avec un opérateur que l'école ne propose pas", async () => {
+    const invoices = await as('parent').get('/finance/invoices');
+    const open = invoices.body.find((i: any) => i.remaining > 0);
+    if (!open) return;
+    const r = await as('parent').post('/payments/mobile-money', { invoiceId: open.id, amount: open.remaining, operator: 'Wave', phone: '0197000001' });
+    expect(r.status).toBe(400);
+  });
+
+  it("le Super Admin change le pays : la monnaie et le fuseau suivent ; le texte d'examen se règle", async () => {
+    const r = await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ country: 'GN' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ country: 'GN', currency: 'GNF', timezone: 'Africa/Conakry' });
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ timezone: 'Pas/UnFuseau' })).status).toBe(400);
+    await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ country: 'CI' }).expect(200);
+    await http.patch('/api/v1/settings').set('Authorization', `Bearer ${token}`).send({ settings: { public: { collegeExam: 'BEPC' } } }).expect(200);
+    expect((await http.get(`/api/v1/public/${slug}`)).body).toMatchObject({ country: 'CI', public: { collegeExam: 'BEPC' } });
+  });
+});

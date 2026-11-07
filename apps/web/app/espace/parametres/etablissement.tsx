@@ -10,8 +10,10 @@ import { useAction } from '@/lib/use-api';
 
 export type IdentitySettings = { authorization: string; legalMentions: string; headName: string; headTitle: string; phone: string; email: string; address: string };
 
+export type SchoolLocale = { countryName: string; currency: string; timezone: string; operators: string[] };
+
 /** Identité officielle imprimée sur les bulletins, reçus et attestations : saisie par la direction, rien n'est pré-rempli. */
-export function Etablissement({ settings, identity, reload }: { settings: IdentitySettings; identity: SchoolIdentity; reload: () => void }) {
+export function Etablissement({ settings, identity, locale, reload }: { settings: IdentitySettings; identity: SchoolIdentity; locale: SchoolLocale; reload: () => void }) {
   const toast = useToast();
   const { busy, run } = useAction();
   const [f, setF] = useState<IdentitySettings>(settings);
@@ -53,6 +55,7 @@ export function Etablissement({ settings, identity, reload }: { settings: Identi
             <ImageSlot kind="stamp" label="Cachet" url={identity.stampUrl} onChange={reload} />
           </div>
         </Section>
+        <PaysPaiements locale={locale} reload={reload} />
         <Section title="Aperçu sur un document">
           <div className="grid gap-4 rounded-lg bg-white p-4 text-black">
             <Letterhead identity={preview} />
@@ -61,6 +64,31 @@ export function Etablissement({ settings, identity, reload }: { settings: Identi
         </Section>
       </div>
     </div>
+  );
+}
+
+/** Pays de l'école (choisi par l'éditeur de la plateforme) et opérateurs Mobile Money proposés aux parents. */
+function PaysPaiements({ locale, reload }: { locale: SchoolLocale; reload: () => void }) {
+  const toast = useToast();
+  const { busy, run } = useAction();
+  const [ops, setOps] = useState(locale.operators.join('\n'));
+  return (
+    <Section title="Pays et Mobile Money">
+      <p className="mb-3 text-sm text-muted">
+        Pays : <b className="text-ink">{locale.countryName}</b> · monnaie : <b className="text-ink">{locale.currency === 'XOF' || locale.currency === 'XAF' ? 'franc CFA' : locale.currency}</b> · heure : <b className="text-ink">{locale.timezone}</b>.
+        {' '}Les numéros saisis sans indicatif prennent celui de ce pays. Pour changer de pays, contactez l’éditeur de la plateforme.
+      </p>
+      <form className="grid gap-3" onSubmit={async (e) => {
+        e.preventDefault();
+        const operators = ops.split('\n').map((x) => x.trim()).filter(Boolean);
+        if (await run(() => api.patch('/settings', { settings: { payments: { operators } } }), toast, 'Opérateurs enregistrés')) reload();
+      }}>
+        <Field label="Opérateurs Mobile Money proposés aux parents" hint="Un par ligne, tels que vos parents les connaissent. Laissez vide pour ne proposer que le paiement au guichet.">
+          <Textarea value={ops} onChange={(e) => setOps(e.target.value)} rows={3} maxLength={400} />
+        </Field>
+        <Button type="submit" loading={busy}>Enregistrer</Button>
+      </form>
+    </Section>
   );
 }
 

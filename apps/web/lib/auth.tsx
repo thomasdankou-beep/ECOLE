@@ -2,13 +2,14 @@
 
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
+import { setCurrency } from './format';
 import { api, onSessionLost, refreshSession, setActiveRole, setSession } from './api';
 
 export type Role = 'DIRECTION' | 'SECRETARIAT' | 'ENSEIGNANT' | 'VIE_SCOLAIRE' | 'COMPTABLE' | 'PARENT' | 'ELEVE';
 export type Child = { id: string; firstName: string; lastName: string; className: string | null };
 export type Me = {
   user: { id: string; firstName: string; lastName: string; phone: string; email: string | null; totpEnabled: boolean; mustChangePassword: boolean; roles: { role: Role; siteId: string | null }[] };
-  tenant: { id: string; slug: string; name: string; shortName: string | null; country: string; currency: string; logoUrl: string | null; primaryColor: string | null };
+  tenant: { id: string; slug: string; name: string; shortName: string | null; country: string; currency: string; dial: string; einvoice: string | null; logoUrl: string | null; primaryColor: string | null };
   sites: { id: string; name: string }[];
   year: { id: string; label: string } | null;
   children: Child[];
@@ -65,6 +66,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const r = saved && roles.includes(saved) ? saved : roles[0];
       setActiveRole(r);
       setRole(r);
+      setCurrency(m.tenant.currency);
       setMe(m);
       const kids = m.self ? [m.self] : m.children;
       const savedChild = store.get(CHILD_KEY);

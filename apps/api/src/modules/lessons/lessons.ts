@@ -5,7 +5,8 @@ import { Actor, Can, CurrentActor } from '../../common/auth';
 import { AuditService, auditChanges } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
-import { isoDay, toDate } from '../../common/util';
+import { toDate } from '../../common/util';
+import { tenantToday } from '../../common/country';
 import { NotificationsService } from '../notifications/notifications.service';
 
 class LessonDto {
@@ -57,7 +58,7 @@ export class LessonsService {
       const enr = await tx.enrollment.findUnique({ where: { studentId_academicYearId: { studentId, academicYearId: yearId } } });
       if (!enr) return [];
       return tx.lesson.findMany({
-        where: { classSubject: { classId: enr.classId }, homework: { not: null }, homeworkDue: { gte: toDate(isoDay(new Date())) } },
+        where: { classSubject: { classId: enr.classId }, homework: { not: null }, homeworkDue: { gte: toDate(await tenantToday(tx, actor.tenantId)) } },
         include: { classSubject: { select: { subject: { select: { name: true } } } } },
         orderBy: { homeworkDue: 'asc' },
       });
