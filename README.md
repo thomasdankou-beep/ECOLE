@@ -106,6 +106,16 @@ Une direction couvre toujours tout l’établissement. Un ancien compte Directio
   `docker compose exec api npm run directions:sites -- --ecole <identifiant> --compte <id> --tous-les-sites --operateur "Prénom Nom" --motif "Décision de l’école du 12/11"`
   (ou `--retirer-direction` pour retirer seulement ce rôle). Les sessions du compte sont coupées et le changement est inscrit au journal de l’école avec l’opérateur et le motif.
 
+## Sauvegarder le site (serveur et ordinateur)
+
+`./sauvegarder.sh` copie dans `~/sauvegardes` la base de données (`base-DATE.sql`), les fichiers envoyés (`fichiers-DATE.tar.gz`) et le `.env` (`env-DATE.txt`, indispensable pour relire les données chiffrées). Il ne fait que lire le site et garde les 14 copies les plus récentes (`GARDER=30 ./sauvegarder.sh` pour en garder plus).
+
+- `./sauvegarder.sh --auto` : sauvegarde chaque nuit à 2 h (heure du serveur), compte rendu dans `~/sauvegardes/journal.log` ; `--arreter-auto` l’arrête ; `--liste` montre les copies.
+- Copier sur un PC Windows (PowerShell) : `scp "root@IP_DU_SERVEUR:~/sauvegardes/*" $HOME\Documents\Sauvegardes-Cahiora\` (ou WinSCP).
+- Une copie restée sur le serveur ne protège pas d’une panne du serveur : téléchargez-la régulièrement et gardez-en une seconde ailleurs (clé USB, Drive). Le fichier `env-*.txt` contient les secrets : ne le partagez pas.
+- Restauration : elle remplace les données actuelles, à faire avec accompagnement. Ne lancez jamais `db:seed` sur le serveur (il efface l’école réelle).
+- Avant une mise à jour : `./sauvegarder-avant-maj.sh <nom>` copie la base, puis vérifie la copie en la restaurant dans une base temporaire (« Copie VÉRIFIÉE »). En cas de retour arrière, et seulement après accord : `./restaurer-copie.sh <copie>`, qui indique ensuite la version du code à remettre.
+
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
 Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Une fois le codespace ouvert, tapez `./demarrer.sh` dans son terminal (plusieurs minutes la première fois) ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.
