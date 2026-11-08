@@ -48,26 +48,43 @@ enum TenantStatus {
 
 /// Compte Super Admin de la plateforme : crée et suit les écoles clientes, sans accès à leurs données métier.
 model PlatformAdmin {
-  id           String    @id @default(uuid()) @db.Uuid
-  email        String    @unique
-  name         String
-  passwordHash String
-  active       Boolean   @default(true)
-  failedLogins Int       @default(0)
-  lockedUntil  DateTime?
-  lastLoginAt  DateTime?
+  id                 String    @id @default(uuid()) @db.Uuid
+  email              String    @unique
+  name               String
+  passwordHash       String
+  active             Boolean   @default(true)
+  failedLogins       Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
   /// Mot de passe remis par la ligne de commande : à changer à la première connexion.
-  mustChangePassword Boolean @default(true)
+  mustChangePassword Boolean   @default(true)
   passwordChangedAt  DateTime?
   /// Double authentification du Super Admin (SEC-021).
-  totpSecret   String?
-  totpEnabled  Boolean   @default(false)
-  totpLastStep Int?
+  totpSecret         String?
+  totpEnabled        Boolean   @default(false)
+  totpLastStep       Int?
   /// Déconnexion : tout jeton émis avant cette date est refusé (SEC-021).
-  sessionsRevokedAt DateTime?
-  createdAt    DateTime  @default(now())
+  sessionsRevokedAt  DateTime?
+  /// Récupération exceptionnelle : une nouvelle double authentification est exigée avant tout autre écran.
+  mustSetupTwoFactor Boolean   @default(false)
+  createdAt          DateTime  @default(now())
+
+  recoveryCodes PlatformRecoveryCode[]
 
   @@map("platform_admins")
+}
+
+/// Code de récupération du Super Admin : seule son empreinte est gardée, il ne sert qu'une fois.
+model PlatformRecoveryCode {
+  id        String        @id @default(uuid()) @db.Uuid
+  adminId   String        @db.Uuid
+  admin     PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  @@unique([adminId, codeHash])
+  @@map("platform_recovery_codes")
 }
 
 /// Journal des actions de la plateforme (création, suspension d'école…), en ajout seul.
@@ -261,20 +278,24 @@ model User {
   totpEnabled        Boolean    @default(false)
   /// Pas de temps (30 s) du dernier code accepté : un code ne sert qu'une fois (SEC-022).
   totpLastStep       Int?
+  /// Récupération validée : le compte doit configurer une nouvelle double authentification avant tout autre écran.
+  twoFactorReenroll  Boolean    @default(false)
   lastLoginAt        DateTime?
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
 
-  roles         UserRole[]
-  sessions      Session[]
-  otps          OtpCode[]
-  assignments   TeacherAssignment[]
+  roles            UserRole[]
+  recoveryCodes    RecoveryCode[]
+  recoveryRequests TwoFactorRecoveryRequest[]
+  sessions         Session[]
+  otps             OtpCode[]
+  assignments      TeacherAssignment[]
   /// Matières que ce professeur enseigne (une ou plusieurs), saisies par la direction.
-  teacherSubjects TeacherSubject[]
-  headOf        Class[]             @relation("HeadTeacher")
-  notifications Notification[]
-  guardian      Guardian?
-  student       Student?
+  teacherSubjects  TeacherSubject[]
+  headOf           Class[]                    @relation("HeadTeacher")
+  notifications    Notification[]
+  guardian         Guardian?
+  student          Student?
 
   @@unique([tenantId, phone])
   @@unique([tenantId, email])
@@ -309,6 +330,61 @@ model Session {
 
   @@index([userId])
   @@map("sessions")
+}
+
+/// Code de récupération de la double authentification : seule son empreinte est gardée, il ne sert qu'une fois.
+model RecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String    @map("tenant_id") @db.Uuid
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@unique([userId, codeHash])
+  @@map("recovery_codes")
+}
+
+enum RecoveryRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  COMPLETED
+  CANCELLED
+}
+
+/// Demande de récupération de la double authentification (téléphone et codes perdus) : vérification
+/// d'identité notée, validée par une autre personne que le demandeur, code de réactivation remis en main propre.
+model TwoFactorRecoveryRequest {
+  id                  String                @id @default(uuid()) @db.Uuid
+  tenantId            String                @map("tenant_id") @db.Uuid
+  userId              String                @db.Uuid
+  user                User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  requestedById       String?               @db.Uuid
+  requestedByName     String
+  requestedByPlatform Boolean               @default(false)
+  reason              String
+  identityCheck       String
+  identityNote        String?
+  /// Compte Direction, ou école sans seconde personne habilitée : seul le Super Admin valide.
+  requiresPlatform    Boolean               @default(false)
+  status              RecoveryRequestStatus @default(PENDING)
+  decidedById         String?               @db.Uuid
+  decidedByName       String?
+  decidedByPlatform   Boolean               @default(false)
+  decisionNote        String?
+  decidedAt           DateTime?
+  expiresAt           DateTime
+  activationHash      String?
+  activationExpiresAt DateTime?
+  activationAttempts  Int                   @default(0)
+  completedAt         DateTime?
+  createdAt           DateTime              @default(now())
+
+  @@index([tenantId, status])
+  @@index([userId])
+  @@map("two_factor_recovery_requests")
 }
 
 enum OtpPurpose {
@@ -365,16 +441,16 @@ model Student {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
-  guardians   StudentGuardian[]
-  enrollments Enrollment[]
-  attendance  AttendanceRecord[]
-  grades      Grade[]
-  reportCards ReportCard[]
-  invoices    Invoice[]
-  payments    Payment[]
-  documents   Document[]
-  sanctions   Sanction[]
-  internships InternshipPlacement[]
+  guardians       StudentGuardian[]
+  enrollments     Enrollment[]
+  attendance      AttendanceRecord[]
+  grades          Grade[]
+  reportCards     ReportCard[]
+  invoices        Invoice[]
+  payments        Payment[]
+  documents       Document[]
+  sanctions       Sanction[]
+  internships     InternshipPlacement[]
   annualDecisions AnnualDecision[]
   honors          PublicHonor[]
   files           StudentFile[]
@@ -814,20 +890,20 @@ model Appreciation {
 
 /// Tarif du catalogue (scolarité, inscription, tenue...). Les montants sont saisis par l'école.
 model FeeType {
-  id             String    @id @default(uuid()) @db.Uuid
-  tenantId       String    @map("tenant_id") @db.Uuid
-  academicYearId String    @db.Uuid
+  id             String      @id @default(uuid()) @db.Uuid
+  tenantId       String      @map("tenant_id") @db.Uuid
+  academicYearId String      @db.Uuid
   name           String
   amount         Int
-  levelId        String?   @db.Uuid
-  trackId        String?   @db.Uuid
-  dueDate        DateTime? @db.Date
-  active         Boolean   @default(true)
+  levelId        String?     @db.Uuid
+  trackId        String?     @db.Uuid
+  dueDate        DateTime?   @db.Date
+  active         Boolean     @default(true)
   /// À qui le frais s'applique : tous, nouveaux inscrits (inscription) ou anciens élèves (réinscription).
   audience       FeeAudience @default(ALL)
   /// Facultatif (activité extra-classe, paiement en une fois) : jamais facturé d'office, seulement à la demande.
-  optional       Boolean   @default(false)
-  createdAt      DateTime  @default(now())
+  optional       Boolean     @default(false)
+  createdAt      DateTime    @default(now())
 
   @@map("fee_types")
 }
@@ -930,16 +1006,16 @@ model Payment {
 
 /// Reçu numéroté. Jamais supprimé : il s'annule par un avoir (CDC §4.4).
 model Receipt {
-  id            String    @id @default(uuid()) @db.Uuid
-  tenantId      String    @map("tenant_id") @db.Uuid
-  number        String
-  paymentId     String    @unique @db.Uuid
-  payment       Payment   @relation(fields: [paymentId], references: [id])
-  verifyCode    String    @unique
-  issuedAt      DateTime  @default(now())
-  cancelledAt   DateTime?
-  cancelReason  String?
-  cancelledById String?   @db.Uuid
+  id                  String    @id @default(uuid()) @db.Uuid
+  tenantId            String    @map("tenant_id") @db.Uuid
+  number              String
+  paymentId           String    @unique @db.Uuid
+  payment             Payment   @relation(fields: [paymentId], references: [id])
+  verifyCode          String    @unique
+  issuedAt            DateTime  @default(now())
+  cancelledAt         DateTime?
+  cancelReason        String?
+  cancelledById       String?   @db.Uuid
   /// Demande d'annulation du comptable, en attente de la validation de la direction (SEC-015).
   cancelRequestedAt   DateTime?
   cancelRequestedById String?   @db.Uuid
@@ -1177,22 +1253,22 @@ model AnnualDecision {
 /// Élève mis à l'honneur sur le site public, choisi par la direction parmi les bulletins publiés, avec l'accord des parents.
 /// Le nom affiché, la classe, la période et la moyenne sont figés au moment de la publication.
 model PublicHonor {
-  id          String   @id @default(uuid()) @db.Uuid
-  tenantId    String   @map("tenant_id") @db.Uuid
-  studentId   String   @db.Uuid
-  student     Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  reportCardId String  @db.Uuid
-  displayName String
-  className   String
-  termLabel   String
-  average     Decimal? @db.Decimal(5, 2)
-  showAverage Boolean  @default(true)
-  distinction String?
-  photoKey    String?
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  studentId    String   @db.Uuid
+  student      Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  reportCardId String   @db.Uuid
+  displayName  String
+  className    String
+  termLabel    String
+  average      Decimal? @db.Decimal(5, 2)
+  showAverage  Boolean  @default(true)
+  distinction  String?
+  photoKey     String?
   /// La direction confirme avoir l'accord des parents pour publier le nom (et la photo) de l'élève.
-  consentAt   DateTime
-  createdById String   @db.Uuid
-  createdAt   DateTime @default(now())
+  consentAt    DateTime
+  createdById  String   @db.Uuid
+  createdAt    DateTime @default(now())
 
   @@unique([reportCardId])
   @@map("public_honors")

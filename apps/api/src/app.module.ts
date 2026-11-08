@@ -12,6 +12,7 @@ import { AttendanceController } from './modules/attendance/attendance.controller
 import { AttendanceService } from './modules/attendance/attendance.service';
 import { AuthController } from './modules/auth/auth.controller';
 import { AuthService } from './modules/auth/auth.service';
+import { RecoveryController, RecoveryService } from './modules/auth/recovery';
 import { CommunicationController, CommunicationService, PublicService } from './modules/communication/communication';
 import { DashboardController, DashboardService } from './modules/dashboard/dashboard';
 import { DocumentsController, DocumentsService } from './modules/documents/documents';
@@ -59,7 +60,7 @@ class CoreModule {}
     ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 300 }], skipIf: () => process.env.NODE_ENV === 'test' }),
   ],
   controllers: [
-    HealthController, AuthController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
+    HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
     InternshipsController, PlatformController, HonorsController,
@@ -67,7 +68,7 @@ class CoreModule {}
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
-    AuthService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
+    AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, HonorsService,
   ],

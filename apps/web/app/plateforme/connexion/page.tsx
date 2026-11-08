@@ -12,6 +12,7 @@ export default function PlateformeConnexion() {
   const [password, setPassword] = useState('');
   const [challenge, setChallenge] = useState<string | null>(null);
   const [code, setCode] = useState('');
+  const [useRecovery, setUseRecovery] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   return (
@@ -26,6 +27,11 @@ export default function PlateformeConnexion() {
           setBusy(true);
           setError(null);
           try {
+            if (challenge && useRecovery) {
+              const r = await pf<{ reconfigureToken: string; recoveryCodesRemaining: number }>('POST', '/auth/2fa/recovery', { challenge, code: code.trim() });
+              try { sessionStorage.setItem('erp.pf.reconfigure', r.reconfigureToken); } catch { /* il faudra un nouveau code */ }
+              return router.replace(`/plateforme?reconfigurer=1&restants=${r.recoveryCodesRemaining}`);
+            }
             if (challenge) {
               await pf('POST', '/auth/2fa/verify', { challenge, code: code.trim() });
               return router.replace('/plateforme');
@@ -46,11 +52,24 @@ export default function PlateformeConnexion() {
           <h1 className="text-3xl font-bold">Connexion Super Admin</h1>
           {challenge ? (
             <>
-              <p className="text-muted">Saisissez le code à 6 chiffres affiché par votre application d’authentification.</p>
-              <Field label="Code"><Input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} required autoFocus className="text-center font-mono text-xl tracking-[0.3em]" /></Field>
+              {useRecovery ? (
+                <>
+                  <p className="text-muted">Saisissez un de vos codes de récupération (par exemple K7MQ4-T9XWR). Chaque code ne sert qu’une fois.</p>
+                  <Field label="Code de récupération"><Input autoComplete="off" autoCapitalize="characters" spellCheck={false} maxLength={14} value={code} onChange={(e) => setCode(e.target.value)} required autoFocus placeholder="XXXXX-XXXXX" className="text-center font-mono text-xl uppercase tracking-[0.2em]" /></Field>
+                </>
+              ) : (
+                <>
+                  <p className="text-muted">Saisissez le code à 6 chiffres affiché par votre application d’authentification.</p>
+                  <Field label="Code"><Input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={(e) => setCode(e.target.value)} required autoFocus className="text-center font-mono text-xl tracking-[0.3em]" /></Field>
+                </>
+              )}
               <ErrorNote error={error} />
               <Button type="submit" loading={busy}>Valider</Button>
-              <Button type="button" variant="ghost" onClick={() => { setChallenge(null); setCode(''); setError(null); }}>Recommencer</Button>
+              <button type="button" className="cursor-pointer text-sm font-bold text-brand" onClick={() => { setUseRecovery(!useRecovery); setCode(''); setError(null); }}>
+                {useRecovery ? 'Utiliser plutôt le code de l’application' : 'Je n’ai plus accès à mon application d’authentification'}
+              </button>
+              {useRecovery && <p className="rounded-lg bg-sunk p-3 text-sm text-muted"><b>Téléphone et codes perdus ?</b> La récupération se fait sur le serveur, par la personne qui a l’accès à l’hébergement (procédure « Récupération exceptionnelle du Super Admin » du guide d’installation).</p>}
+              <Button type="button" variant="ghost" onClick={() => { setChallenge(null); setCode(''); setError(null); setUseRecovery(false); }}>Recommencer</Button>
             </>
           ) : (
             <>
