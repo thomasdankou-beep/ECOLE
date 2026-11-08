@@ -9,6 +9,8 @@ import { RoleCode } from '@prisma/client';
 export const PERMISSIONS = [
   'settings.manage',
   'users.manage',
+  /// Récupération de la double authentification d'un compte (téléphone et codes perdus).
+  'security.recovery',
   'students.read',
   'students.write',
   'admissions.manage',
@@ -46,7 +48,7 @@ export type Permission = (typeof PERMISSIONS)[number];
 
 export const ROLE_PERMISSIONS: Record<RoleCode, Permission[]> = {
   DIRECTION: [
-    'settings.manage', 'users.manage', 'students.read', 'students.write', 'admissions.manage',
+    'settings.manage', 'users.manage', 'security.recovery', 'students.read', 'students.write', 'admissions.manage',
     'documents.issue', 'documents.read', 'timetable.read', 'timetable.manage', 'lessons.read',
     'attendance.read', 'sanctions.read', 'sanctions.validate', 'grades.read', 'reportcards.read',
     'reportcards.control', 'reportcards.validate', 'finance.read', 'finance.validate', 'announcements.read',

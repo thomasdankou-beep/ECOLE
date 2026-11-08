@@ -6,6 +6,7 @@ import { auditLabel } from '../../common/audit-labels';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { isoDay, toDate } from '../../common/util';
+import { tenantToday } from '../../common/country';
 import { EvaluationService } from '../evaluation/evaluation.service';
 
 /** Tableau de bord de la direction (CDC §2.1) et journal d'audit. */
@@ -16,7 +17,7 @@ export class DashboardService {
   direction(actor: Actor, siteId?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const yearId = await this.scope.currentYearId(tx);
-      const today = toDate(isoDay(new Date()));
+      const today = toDate(await tenantToday(tx, actor.tenantId));
       const monthStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
       const classWhere = { academicYearId: yearId, ...(siteId ? { siteId } : {}) };
       const classes = await tx.class.findMany({

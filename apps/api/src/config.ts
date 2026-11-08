@@ -37,6 +37,12 @@ export const config = {
     /// Activée par l'installateur du serveur (ENFORCE_2FA=true). En développement et en démonstration,
     /// la 2FA est proposée mais pas imposée.
     enforceTwoFactor: env.ENFORCE_2FA === 'true',
+    /// Codes de récupération de la double authentification créés à la fois (10 par défaut, entre 5 et 20).
+    recoveryCodesCount: Math.min(20, Math.max(5, Number(env.RECOVERY_CODES_COUNT) || 10)),
+    /// Demande de récupération : à valider sous 72 heures ; code de réactivation : valable 24 heures, 5 essais.
+    recoveryRequestHours: 72,
+    activationHours: 24,
+    activationMaxAttempts: 5,
   },
   payments: {
     /// SEC-005 : en production, le bac à sable (paiements simulés) n'est jamais actif par défaut ; il faut

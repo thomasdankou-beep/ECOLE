@@ -6,7 +6,7 @@ import { Loader } from '@/components/espace/bits';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, Table, useToast } from '@/components/ui';
 import type { ClassRow } from '@/lib/types';
 import { api } from '@/lib/api';
-import { date, fcfa } from '@/lib/format';
+import { currency, date, fcfa } from '@/lib/format';
 import { useAction, useApi } from '@/lib/use-api';
 
 type Audience = 'ALL' | 'NEW' | 'RETURNING';
@@ -96,7 +96,7 @@ export default function Tarifs() {
             }}>
               <Field label="Intitulé"><Input value={edit.name ?? ''} onChange={(e) => setEdit({ ...edit, name: e.target.value })} required /></Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Montant (FCFA)"><Input type="number" min={0} value={edit.amount ?? 0} onChange={(e) => setEdit({ ...edit, amount: Number(e.target.value) })} required /></Field>
+                <Field label={`Montant (${currency()})`}><Input type="number" min={0} value={edit.amount ?? 0} onChange={(e) => setEdit({ ...edit, amount: Number(e.target.value) })} required /></Field>
                 <Field label="Échéance"><Input type="date" value={edit.dueDate?.slice(0, 10) ?? ''} onChange={(e) => setEdit({ ...edit, dueDate: e.target.value || null })} /></Field>
                 <Field label="Niveau"><Select value={edit.levelId ?? ''} onChange={(e) => setEdit({ ...edit, levelId: e.target.value || null })}><option value="">Tous</option>{settings.data?.levels.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
                 <Field label="Filière"><Select value={edit.trackId ?? ''} onChange={(e) => setEdit({ ...edit, trackId: e.target.value || null })}><option value="">Toutes</option>{settings.data?.tracks.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
@@ -155,7 +155,7 @@ function FeeGrid({ fees, levels, reload }: { fees: Fee[]; levels: Level[]; reloa
       <Loader {...classes}>
         {() => combos.length === 0 ? <Empty title="Aucun niveau">Créez d’abord les niveaux dans Paramètres › Sites, salles, matières.</Empty> : (
           <Table>
-            <thead><tr><th>{byTrack ? 'Niveau et filière' : 'Niveau'}</th><th>Classes</th><th className="w-44 text-right">Montant (FCFA)</th></tr></thead>
+            <thead><tr><th>{byTrack ? 'Niveau et filière' : 'Niveau'}</th><th>Classes</th><th className="w-44 text-right">Montant ({currency()})</th></tr></thead>
             <tbody>{combos.map((c) => (
               <tr key={c.key}>
                 <td className="font-bold">{c.label}</td>

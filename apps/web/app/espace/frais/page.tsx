@@ -8,7 +8,7 @@ import { Loader, StatusBadge } from '@/components/espace/bits';
 import { Button, Card, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { date, fcfa } from '@/lib/format';
+import { currency, date, fcfa } from '@/lib/format';
 import { useAction, useApi } from '@/lib/use-api';
 
 export default function Frais() {
@@ -60,14 +60,14 @@ export default function Frais() {
           </>
         )}
       </Loader>
-      {pay && <PayDialog invoice={pay} phone={me?.user.phone ?? ''} onClose={() => setPay(null)} />}
+      {pay && <PayDialog invoice={pay} phone={me?.user.phone ?? ''} dial={me?.tenant.dial ?? '229'} onClose={() => setPay(null)} />}
     </>
   );
 }
 
-function PayDialog({ invoice, phone, onClose }: { invoice: any; phone: string; onClose: () => void }) {
+function PayDialog({ invoice, phone, dial, onClose }: { invoice: any; phone: string; dial: string; onClose: () => void }) {
   const ops = useApi<{ provider: string; operators: string[] }>('/payments/operators');
-  const [f, setF] = useState({ amount: String(invoice.remaining), operator: '', phone: phone.replace(/^\+229/, '') });
+  const [f, setF] = useState({ amount: String(invoice.remaining), operator: '', phone: phone.startsWith(`+${dial}`) ? phone.slice(dial.length + 1) : phone });
   const toast = useToast();
   const { busy, run } = useAction();
   useEffect(() => {
@@ -89,9 +89,10 @@ function PayDialog({ invoice, phone, onClose }: { invoice: any; phone: string; o
           if (r?.checkoutUrl) window.location.href = r.checkoutUrl;
           else if (r) window.location.href = `/espace/frais?paiement=${r.paymentId}`;
         }}>
-          <Field label="Montant (FCFA)" hint={`Vous pouvez payer en plusieurs fois. Reste dû : ${fcfa(invoice.remaining)}`}><Input type="number" inputMode="numeric" min={100} max={invoice.remaining} value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} required className="text-2xl font-bold" /></Field>
+          <Field label={`Montant (${currency()})`} hint={`Vous pouvez payer en plusieurs fois. Reste dû : ${fcfa(invoice.remaining)}`}><Input type="number" inputMode="numeric" min={100} max={invoice.remaining} value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} required className="text-2xl font-bold" /></Field>
           <Field label="Opérateur"><Select value={f.operator} onChange={(e) => setF({ ...f, operator: e.target.value })} required>{ops.data?.operators.map((o) => <option key={o}>{o}</option>)}</Select></Field>
           <Field label="Numéro Mobile Money"><Input type="tel" inputMode="tel" value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} required /></Field>
+          {ops.data && !ops.data.operators.length && <p className="rounded-lg bg-warn-soft p-2 text-sm font-bold text-warn">L’école n’a pas encore indiqué ses opérateurs Mobile Money. Réglez au guichet en attendant.</p>}
           {ops.data?.provider === 'sandbox' && <p className="rounded-lg bg-warn-soft p-2 text-sm font-bold text-warn">Mode test : aucun argent réel ne sera débité.</p>}
           <Button type="submit" size="lg" variant="accent" loading={busy}>Continuer</Button>
           <p className="text-xs text-muted">Vous validerez le paiement sur votre téléphone. Le reçu est émis dès la confirmation de l’opérateur.</p>

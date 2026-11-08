@@ -11,7 +11,10 @@ import { AccessTokenPayload, Actor, forgetSessions, mustSetupTwoFactor, SCHOOL_A
 import { AuditService, auditSubject, maskIdentifier } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
+import { country } from '../../common/country';
 import { createSmsProvider } from '../notifications/sms.provider';
+import { NotificationsService } from '../notifications/notifications.service';
+import { generateRecoveryCodes, hashCode, looksLikeActivationCode, looksLikeRecoveryCode } from './recovery-codes';
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -66,6 +69,22 @@ export function totpStep(secret: string, code: string, lastStep: number | null |
 
 /** Jeton de configuration de la double authentification (SEC-019) : le nouveau secret n'est enregistré qu'avec un code valide. */
 export const TOTP_SETUP_AUDIENCE = '2fa-setup';
+/** Jeton remis après une connexion par code de récupération : configurer le nouveau téléphone sans l'ancien code (10 min). */
+export const RECOVERED_AUDIENCE = '2fa-recovered';
+/** Compte en « nouvelle configuration obligatoire » après une récupération validée par l'école ou le Super Admin. */
+const REENROLL_AUDIENCE = '2fa-reenroll';
+const REENROLL_SETUP_AUDIENCE = '2fa-reenroll-setup';
+
+/** Date lisible dans les alertes de sécurité. */
+const when = (d = new Date()) => d.toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short', timeZone: 'UTC' }) + ' (UTC)';
+
+/** Remplace tous les codes de récupération d'un compte d'école ; renvoie les codes en clair, une seule fois. */
+export async function replaceRecoveryCodes(tx: Tx, tenantId: string, userId: string) {
+  const { codes, hashes } = generateRecoveryCodes();
+  await tx.recoveryCode.deleteMany({ where: { userId } });
+  await tx.recoveryCode.createMany({ data: hashes.map((codeHash) => ({ tenantId, userId, codeHash })) });
+  return codes;
+}
 
 @Injectable()
 export class AuthService {
@@ -75,6 +94,7 @@ export class AuthService {
     private db: PrismaService,
     private jwt: JwtService,
     private audit: AuditService,
+    private notifications: NotificationsService,
   ) {}
 
   async tenantBySlug(slug: string) {
@@ -84,26 +104,26 @@ export class AuthService {
     return t;
   }
 
-  private identifierWhere(identifier: string) {
+  private identifierWhere(identifier: string, dial: string) {
     const id = identifier.trim();
-    return id.includes('@') ? { email: id.toLowerCase() } : { phone: normalizePhone(id) };
+    return id.includes('@') ? { email: id.toLowerCase() } : { phone: normalizePhone(id, dial) };
   }
 
   /** Téléphone, e-mail, ou matricule pour les comptes élèves. */
-  private async findByIdentifier(tx: Tx, identifier: string) {
+  private async findByIdentifier(tx: Tx, identifier: string, dial: string) {
     const id = identifier.trim();
     if (!id.includes('@') && /[a-z]/i.test(id)) {
       const student = await tx.student.findFirst({ where: { matricule: id.toUpperCase() }, select: { userId: true } });
       if (!student?.userId) return null;
       return tx.user.findUnique({ where: { id: student.userId }, include: { roles: true } });
     }
-    return tx.user.findFirst({ where: this.identifierWhere(id), include: { roles: true } });
+    return tx.user.findFirst({ where: this.identifierWhere(id, dial), include: { roles: true } });
   }
 
   async login(tenantSlug: string, identifier: string, password: string, meta: SessionMeta) {
     const tenant = await this.tenantBySlug(tenantSlug);
     return settle(this.db.forTenant(tenant.id, async (tx) => {
-      const user = await this.findByIdentifier(tx, identifier);
+      const user = await this.findByIdentifier(tx, identifier, country(tenant.country).dial);
       const fail = new UnauthorizedException(LOGIN_FAILED);
       // Compte inconnu, désactivé ou bloqué : même calcul et même réponse (SEC-024).
       if (!user || user.status !== 'ACTIVE' || (user.lockedUntil && user.lockedUntil > new Date())) {
@@ -119,6 +139,12 @@ export class AuthService {
       }
       await tx.user.update({ where: { id: user.id }, data: { failedLogins: 0, lockedUntil: null } });
 
+      // Récupération validée : aucune session tant que la nouvelle double authentification n'est pas configurée,
+      // avec le code de réactivation remis en main propre (le mot de passe seul ne suffit pas).
+      if (user.twoFactorReenroll) {
+        const challenge = this.jwt.sign({ sub: user.id, tid: tenant.id, purpose: 'reenroll' }, { secret: config.jwt.accessSecret, audience: REENROLL_AUDIENCE, expiresIn: 900 });
+        return { twoFactorRequired: false as const, reenrollRequired: true as const, challenge };
+      }
       if (user.totpEnabled) {
         const challenge = this.jwt.sign({ sub: user.id, tid: tenant.id, purpose: '2fa' }, { secret: config.jwt.accessSecret, audience: '2fa', expiresIn: 300 });
         return { twoFactorRequired: true as const, challenge };
@@ -140,14 +166,19 @@ export class AuthService {
     await this.audit.log(tx, auditSubject({ ...user, tenantId }, meta.ip), lock ? 'auth.locked' : `${what}.failed`, 'User', user.id);
   }
 
-  async verifyTwoFactor(challenge: string, code: string, meta: SessionMeta) {
+  private readChallenge(challenge: string, audience: string, purpose: string) {
     let p: { sub: string; tid: string; purpose: string };
     try {
-      p = this.jwt.verify(challenge, { secret: config.jwt.accessSecret, audience: '2fa' });
+      p = this.jwt.verify(challenge, { secret: config.jwt.accessSecret, audience });
     } catch {
       throw new UnauthorizedException('Délai dépassé, reconnectez-vous');
     }
-    if (p.purpose !== '2fa') throw new UnauthorizedException();
+    if (p.purpose !== purpose) throw new UnauthorizedException();
+    return p;
+  }
+
+  async verifyTwoFactor(challenge: string, code: string, meta: SessionMeta) {
+    const p = this.readChallenge(challenge, '2fa', '2fa');
     return settle(this.db.forTenant(p.tid, async (tx) => {
       const user = await tx.user.findUniqueOrThrow({ where: { id: p.sub }, include: { roles: true } });
       const wrong = new UnauthorizedException('Code incorrect. Après 5 erreurs, le compte est bloqué 15 minutes.');
@@ -161,6 +192,97 @@ export class AuthService {
       const tokens = await this.openSession(tx, user, meta);
       return { twoFactorRequired: false as const, ...tokens, mustChangePassword: user.mustChangePassword };
     }));
+  }
+
+  /**
+   * Connexion avec un code de récupération à la place du code de l'application (téléphone perdu).
+   * Le code est consommé en une seule requête : deux tentatives simultanées avec le même code, une seule réussit.
+   * La double authentification reste active ; un jeton de 10 minutes permet de configurer le nouveau téléphone.
+   */
+  async verifyRecoveryCode(challenge: string, code: string, meta: SessionMeta) {
+    const p = this.readChallenge(challenge, '2fa', '2fa');
+    return settle(this.db.forTenant(p.tid, async (tx) => {
+      const user = await tx.user.findUniqueOrThrow({ where: { id: p.sub }, include: { roles: true } });
+      const wrong = new UnauthorizedException('Code de récupération incorrect ou déjà utilisé. Après 5 erreurs, le compte est bloqué 15 minutes.');
+      if (user.status !== 'ACTIVE' || !user.totpEnabled || (user.lockedUntil && user.lockedUntil > new Date())) throw wrong;
+      const used = looksLikeRecoveryCode(code)
+        ? await tx.recoveryCode.updateMany({ where: { userId: user.id, codeHash: hashCode(code), usedAt: null }, data: { usedAt: new Date() } })
+        : { count: 0 };
+      if (used.count !== 1) {
+        await this.countFailure(tx, user, p.tid, meta, 'auth.recovery_code');
+        return new Deferred(wrong);
+      }
+      const remaining = await tx.recoveryCode.count({ where: { userId: user.id, usedAt: null } });
+      await tx.user.update({ where: { id: user.id }, data: { failedLogins: 0 } });
+      await this.audit.log(tx, auditSubject(user, meta.ip), 'auth.recovery_code_used', 'User', user.id, { remaining, userAgent: meta.userAgent?.slice(0, 300) });
+      await this.notifications.notify(tx, p.tid, [user.id], {
+        kind: 'securite', title: 'Connexion avec un code de récupération',
+        body: `Un code de récupération a servi à vous connecter le ${when()}. Il vous en reste ${remaining}. Si ce n'est pas vous, prévenez tout de suite la direction de l'établissement.`,
+        sms: `Un code de récupération a servi à vous connecter à votre compte. Si ce n'est pas vous, prévenez la direction.`, smsMode: 'immediate',
+      });
+      const tokens = await this.openSession(tx, user, meta);
+      const reconfigureToken = this.jwt.sign({ sub: user.id, tid: p.tid }, { secret: config.jwt.accessSecret, audience: RECOVERED_AUDIENCE, expiresIn: 600 });
+      return { twoFactorRequired: false as const, ...tokens, mustChangePassword: user.mustChangePassword, recoveryUsed: true as const, recoveryCodesRemaining: remaining, reconfigureToken };
+    }));
+  }
+
+  /**
+   * Après une récupération validée : vérifie le code de réactivation remis en main propre et prépare le nouveau
+   * téléphone. Le code n'est consommé qu'à la fin (finishReenroll), en une seule requête.
+   */
+  async startReenroll(challenge: string, activationCode: string, meta: SessionMeta) {
+    const p = this.readChallenge(challenge, REENROLL_AUDIENCE, 'reenroll');
+    return settle(this.db.forTenant(p.tid, async (tx) => {
+      const user = await tx.user.findUniqueOrThrow({ where: { id: p.sub } });
+      const wrong = new UnauthorizedException('Code de réactivation incorrect ou expiré. Demandez-en un nouveau à votre établissement.');
+      if (user.status !== 'ACTIVE' || !user.twoFactorReenroll || (user.lockedUntil && user.lockedUntil > new Date())) throw wrong;
+      const req = await tx.twoFactorRecoveryRequest.findFirst({ where: { userId: user.id, status: 'APPROVED' }, orderBy: { decidedAt: 'desc' } });
+      if (!req?.activationHash || !req.activationExpiresAt || req.activationExpiresAt <= new Date() || req.activationAttempts >= config.security.activationMaxAttempts) throw wrong;
+      if (!looksLikeActivationCode(activationCode) || hashCode(activationCode, 'activation') !== req.activationHash) {
+        await tx.twoFactorRecoveryRequest.update({ where: { id: req.id }, data: { activationAttempts: { increment: 1 } } });
+        await this.countFailure(tx, user, p.tid, meta, 'auth.activation_code');
+        return new Deferred(wrong);
+      }
+      const t = await this.db.tenant.findUniqueOrThrow({ where: { id: p.tid }, select: { shortName: true, name: true } });
+      const secret = authenticator.generateSecret();
+      const otpauth = authenticator.keyuri(user.email ?? user.phone ?? user.id, t.shortName ?? t.name, secret);
+      const setupToken = this.jwt.sign({ sub: user.id, tid: p.tid, rid: req.id, sec: encrypt(secret) }, { secret: config.jwt.accessSecret, audience: REENROLL_SETUP_AUDIENCE, expiresIn: 900 });
+      return { otpauth, qr: await QRCode.toDataURL(otpauth), secret, setupToken };
+    }));
+  }
+
+  /** Nouveau téléphone confirmé par un code valide : code de réactivation consommé, nouveaux codes de secours, session. */
+  async finishReenroll(challenge: string, setupToken: string, code: string, meta: SessionMeta) {
+    const p = this.readChallenge(challenge, REENROLL_AUDIENCE, 'reenroll');
+    let s: { sub: string; tid: string; rid: string; sec: string };
+    try {
+      s = this.jwt.verify(setupToken, { secret: config.jwt.accessSecret, audience: REENROLL_SETUP_AUDIENCE });
+    } catch {
+      throw new BadRequestException('Configuration expirée : recommencez avec votre code de réactivation');
+    }
+    if (s.sub !== p.sub || s.tid !== p.tid) throw new ForbiddenException();
+    const secret = decrypt(s.sec);
+    const step = totpStep(secret, code, null);
+    if (step === null) throw new BadRequestException('Code incorrect : vérifiez l’heure du téléphone et réessayez');
+    return this.db.forTenant(p.tid, async (tx) => {
+      const done = await tx.twoFactorRecoveryRequest.updateMany({
+        where: { id: s.rid, userId: p.sub, status: 'APPROVED', activationExpiresAt: { gt: new Date() } },
+        data: { status: 'COMPLETED', completedAt: new Date(), activationHash: null },
+      });
+      if (done.count !== 1) throw new UnauthorizedException('Code de réactivation déjà utilisé ou expiré');
+      const user = await tx.user.update({
+        where: { id: p.sub }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step, twoFactorReenroll: false, failedLogins: 0 }, include: { roles: true },
+      });
+      const recoveryCodes = await replaceRecoveryCodes(tx, p.tid, user.id);
+      await this.audit.log(tx, auditSubject(user, meta.ip), 'auth.2fa_reenrolled', 'User', user.id, { requestId: s.rid });
+      await this.audit.log(tx, auditSubject(user, meta.ip), 'auth.recovery_codes_generated', 'User', user.id, { count: recoveryCodes.length });
+      await this.notifications.notify(tx, p.tid, [user.id], {
+        kind: 'securite', title: 'Nouvelle double authentification configurée',
+        body: `Votre nouveau téléphone a été configuré le ${when()}. L'ancien ne fonctionne plus. Conservez vos nouveaux codes de récupération en lieu sûr.`,
+      });
+      const tokens = await this.openSession(tx, user, meta);
+      return { twoFactorRequired: false as const, ...tokens, mustChangePassword: user.mustChangePassword, recoveryCodes };
+    });
   }
 
   private async openSession(tx: Tx, user: User & { roles: { role: any; siteId: string | null }[] }, meta: SessionMeta) {
@@ -269,7 +391,8 @@ export class AuthService {
       });
       const t = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { id: true, slug: true, name: true, shortName: true, country: true, currency: true, settings: true } });
       const { settings, ...rest } = t;
-      const tenant = { ...rest, logoUrl: logoUrl(t), primaryColor: tenantSettings(settings).branding.primaryColor };
+      const c = country(t.country);
+      const tenant = { ...rest, dial: c.dial, einvoice: c.einvoice, logoUrl: logoUrl(t), primaryColor: tenantSettings(settings).branding.primaryColor };
       const sites = await tx.site.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
       const year = await tx.academicYear.findFirst({ where: { isCurrent: true }, select: { id: true, label: true } });
       let children: { id: string; firstName: string; lastName: string; className: string | null }[] = [];
@@ -311,7 +434,7 @@ export class AuthService {
   async forgot(tenantSlug: string, identifier: string) {
     const tenant = await this.tenantBySlug(tenantSlug);
     await this.db.forTenant(tenant.id, async (tx) => {
-      const user = await this.findByIdentifier(tx, identifier);
+      const user = await this.findByIdentifier(tx, identifier, country(tenant.country).dial);
       if (!user?.phone || user.status !== 'ACTIVE') return;
       const code = String(randomInt(100000, 1000000));
       await tx.otpCode.updateMany({ where: { userId: user.id, purpose: 'PASSWORD_RESET', consumedAt: null }, data: { consumedAt: new Date() } });
@@ -328,7 +451,7 @@ export class AuthService {
     const tenant = await this.tenantBySlug(tenantSlug);
     return settle(this.db.forTenant(tenant.id, async (tx) => {
       const invalid = new BadRequestException('Code invalide ou expiré');
-      const user = await this.findByIdentifier(tx, identifier);
+      const user = await this.findByIdentifier(tx, identifier, country(tenant.country).dial);
       if (!user) throw invalid;
       const otp = await tx.otpCode.findFirst({
         where: { userId: user.id, purpose: 'PASSWORD_RESET', consumedAt: null, expiresAt: { gt: new Date() } },
@@ -353,11 +476,22 @@ export class AuthService {
    * jeton signé de 10 minutes et n'est enregistré que par enableTwoFactor, avec un code valide.
    * Si elle est déjà active, le code actuel est exigé pour la reconfigurer.
    */
-  setupTwoFactor(actor: Actor, currentCode?: string) {
+  setupTwoFactor(actor: Actor, currentCode?: string, reconfigureToken?: string) {
     return settle(this.db.forTenant(actor.tenantId, async (tx) => {
       const user = await tx.user.findUniqueOrThrow({ where: { id: actor.userId } });
       const tenant = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { shortName: true, name: true } });
-      if (user.totpEnabled && user.totpSecret) {
+      // Juste après une connexion par code de récupération, ce jeton de 10 minutes remplace le code de l'ancien téléphone.
+      let recovered = false;
+      if (reconfigureToken) {
+        try {
+          const r = this.jwt.verify<{ sub: string; tid: string }>(reconfigureToken, { secret: config.jwt.accessSecret, audience: RECOVERED_AUDIENCE });
+          recovered = r.sub === actor.userId && r.tid === actor.tenantId;
+        } catch {
+          recovered = false;
+        }
+        if (!recovered) throw new ForbiddenException('Délai dépassé : saisissez un code de votre application, ou reconnectez-vous avec un code de récupération');
+      }
+      if (user.totpEnabled && user.totpSecret && !recovered) {
         if (!currentCode) throw new ForbiddenException("La double authentification est déjà active : saisissez le code actuel de votre application pour la reconfigurer");
         const step = totpStep(decrypt(user.totpSecret), currentCode, user.totpLastStep);
         if (step === null) {
@@ -387,10 +521,51 @@ export class AuthService {
       const user = await tx.user.findUniqueOrThrow({ where: { id: actor.userId } });
       const step = totpStep(secret, code, null);
       if (step === null) throw new BadRequestException('Code incorrect');
-      await tx.user.update({ where: { id: user.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step } });
+      await tx.user.update({ where: { id: user.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step, twoFactorReenroll: false } });
       forgetSessions({ userId: user.id }); // une session limitée en attente de la 2FA (SEC-020) s'ouvre aussitôt
       await this.audit.log(tx, actor, user.totpEnabled ? 'auth.2fa_reset' : 'auth.2fa_enabled', 'User', user.id);
-      return { ok: true };
+      // Nouveau téléphone : nouveaux codes de récupération, les anciens ne servent plus.
+      const recoveryCodes = await replaceRecoveryCodes(tx, actor.tenantId, user.id);
+      await this.audit.log(tx, actor, 'auth.recovery_codes_generated', 'User', user.id, { count: recoveryCodes.length });
+      if (user.totpEnabled) {
+        // Reconfiguration : les autres appareils sont déconnectés et la personne est prévenue (REC-007).
+        await tx.session.updateMany({ where: { userId: user.id, revokedAt: null, id: { not: actor.sessionId } }, data: { revokedAt: new Date() } });
+        forgetSessions({ userId: user.id });
+        await this.notifications.notify(tx, actor.tenantId, [user.id], {
+          kind: 'securite', title: 'Double authentification reconfigurée',
+          body: `Un nouveau téléphone a été configuré le ${when()}. Les autres appareils ont été déconnectés. Si ce n'est pas vous, prévenez tout de suite la direction de l'établissement.`,
+        });
+      }
+      return { ok: true, recoveryCodes };
     });
+  }
+
+  /** État des codes de récupération du compte (jamais les codes eux-mêmes). */
+  recoveryCodesStatus(actor: Actor) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const user = await tx.user.findUniqueOrThrow({ where: { id: actor.userId }, select: { totpEnabled: true } });
+      const rows = await tx.recoveryCode.findMany({ where: { userId: actor.userId }, select: { usedAt: true, createdAt: true } });
+      return { twoFactorEnabled: user.totpEnabled, total: rows.length, remaining: rows.filter((r) => !r.usedAt).length, createdAt: rows[0]?.createdAt ?? null };
+    });
+  }
+
+  /**
+   * Génère ou régénère les codes de récupération, sans toucher à la double authentification : le code actuel
+   * de l'application est exigé (une session volée ne suffit pas). Les anciens codes sont supprimés dans la même opération.
+   */
+  regenerateRecoveryCodes(actor: Actor, currentCode: string) {
+    return settle(this.db.forTenant(actor.tenantId, async (tx) => {
+      const user = await tx.user.findUniqueOrThrow({ where: { id: actor.userId } });
+      if (!user.totpEnabled || !user.totpSecret) throw new BadRequestException("Activez d'abord la double authentification");
+      const step = totpStep(decrypt(user.totpSecret), currentCode, user.totpLastStep);
+      if (step === null) {
+        await this.countFailure(tx, user, actor.tenantId, { ip: actor.ip }, 'auth.2fa');
+        return new Deferred(new ForbiddenException('Code de votre application incorrect'));
+      }
+      await tx.user.update({ where: { id: user.id }, data: { totpLastStep: step, failedLogins: 0 } });
+      const recoveryCodes = await replaceRecoveryCodes(tx, actor.tenantId, user.id);
+      await this.audit.log(tx, actor, 'auth.recovery_codes_generated', 'User', user.id, { count: recoveryCodes.length });
+      return { recoveryCodes };
+    }));
   }
 }

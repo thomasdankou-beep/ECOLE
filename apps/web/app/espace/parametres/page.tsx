@@ -16,7 +16,7 @@ import { Honneur } from './honneur';
 import { ImageEcole, type PublicTexts } from './image';
 
 type Settings = {
-  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
+  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; country: string; countryName: string; currency: string; timezone: string; operators: string[]; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean; photoUrl: string | null }[];
@@ -46,7 +46,7 @@ export default function Parametres() {
       <Loader {...q}>
         {(s) => (
           <>
-            {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} reload={q.reload} />}
+            {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} locale={s.tenant} reload={q.reload} />}
             {tab === 'image' && <ImageEcole name={s.tenant.name} shortName={s.tenant.shortName} logoUrl={s.tenant.identity.logoUrl} primaryColor={s.tenant.settings.branding.primaryColor} texts={s.tenant.settings.public ?? {}} reload={q.reload} />}
             {tab === 'honneur' && <Honneur />}
             {tab === 'classes' && <Classes s={s} />}

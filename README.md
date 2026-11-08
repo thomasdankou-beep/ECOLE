@@ -54,6 +54,14 @@ cd ecole
 
 Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès que le DNS envoie le domaine et `*.domaine` vers le serveur : `./installer-serveur.sh --domaine exemple.com` passe en HTTPS, chaque école sur `<identifiant>.exemple.com`.
 
+### Téléphone perdu : récupérer un compte à double authentification
+
+- **Chaque personne** garde ses 10 codes de récupération (Mon compte > Double authentification). Un code permet de se connecter sans le téléphone, une seule fois, puis de configurer le nouveau téléphone.
+- **Téléphone et codes perdus (personnel d’une école)** : la direction ouvre une demande (menu « Récupération des comptes ») après avoir vérifié l’identité ; une autre personne de la direction la valide et remet le code de réactivation (24 heures, une seule fois). Un compte Direction est validé par le Super Admin (rubrique « Récupération des comptes » de `/plateforme`).
+- **Super Admin, téléphone et codes perdus** : procédure exceptionnelle, seulement sur le serveur (accès à l’hébergement) :
+  `docker compose exec api npm run platform:admin -- vous@exemple.bj --operateur "Prénom Nom" --motif "Téléphone volé le 12/11, codes perdus"`
+  Elle remet un mot de passe provisoire (affiché une fois), retire l’ancienne double authentification et les anciens codes, coupe les sessions, et impose une nouvelle double authentification avant tout autre écran. L’opérateur et le motif sont inscrits au journal de la plateforme. Conseil : créez un second compte Super Admin confié à une personne de confiance.
+
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
 Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Une fois le codespace ouvert, tapez `./demarrer.sh` dans son terminal (plusieurs minutes la première fois) ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.

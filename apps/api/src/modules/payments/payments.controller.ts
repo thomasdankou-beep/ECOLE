@@ -1,15 +1,15 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import { IsBoolean, IsIn, IsInt, IsString, IsUUID, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 import type { Request } from 'express';
 import { Actor, Can, CurrentActor, Public } from '../../common/auth';
-import { OPERATORS, PaymentsService } from './payments.service';
+import { PaymentsService } from './payments.service';
 
 class InitiateDto {
   @IsUUID() invoiceId: string;
   @IsInt() @Min(100) amount: number;
-  @IsIn(OPERATORS) operator: string;
+  @IsString() @MaxLength(40) operator: string;
   @IsString() @MaxLength(30) phone: string;
 }
 
@@ -22,10 +22,10 @@ class SandboxDecisionDto {
 export class PaymentsController {
   constructor(private s: PaymentsService) {}
 
-  @Get('operators')
-  @Public()
-  operators() {
-    return { provider: this.s.provider.name, operators: OPERATORS };
+  @ApiBearerAuth()
+  @Get('operators') @Can('finance.pay')
+  operators(@CurrentActor() a: Actor) {
+    return this.s.operators(a);
   }
 
   @ApiBearerAuth()

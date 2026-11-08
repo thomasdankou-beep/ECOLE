@@ -5,6 +5,7 @@ import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { isoDay, toDate } from '../../common/util';
+import { tenantToday } from '../../common/country';
 import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { tenantSettings } from '../settings/settings.service';
@@ -31,7 +32,7 @@ export class AttendanceService {
   /** Cours du jour de l'enseignant, avec l'état de l'appel. */
   myCourses(actor: Actor, date?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      const day = toDate(date ?? isoDay(new Date()));
+      const day = toDate(date ?? await tenantToday(tx, actor.tenantId));
       const dow = day.getUTCDay() || 7;
       const yearId = await this.scope.currentYearId(tx);
       const slots = await tx.timetableSlot.findMany({
@@ -192,7 +193,7 @@ export class AttendanceService {
   /** Tableau de bord d'assiduité du jour (CDC §4.3). */
   today(actor: Actor, date?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      const day = toDate(date ?? isoDay(new Date()));
+      const day = toDate(date ?? await tenantToday(tx, actor.tenantId));
       const classIds = await this.scope.classIds(tx, actor);
       const sessionWhere = { date: day, ...(classIds ? { classId: { in: classIds } } : {}) };
       const [absent, late, total, pending, unjustified, sessions] = await Promise.all([

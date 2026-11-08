@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, CanActivate, ConflictException, ForbiddenException, Controller, ExecutionContext, Get, Injectable, NotFoundException,
+  BadRequestException, Body, CanActivate, ConflictException, ForbiddenException, Controller, ExecutionContext, Get, Header, Injectable, NotFoundException,
   OnModuleDestroy, Param, ParseUUIDPipe, Patch, Post, Query, Req, Res, UnauthorizedException, UseGuards,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -11,20 +11,27 @@ import * as QRCode from 'qrcode';
 import { Prisma, PrismaClient, TenantStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
-import { IsEmail, IsEnum, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsEmail, IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
 import { ALLOW_PENDING_PASSWORD, AllowPendingPassword, forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
 import { maskIdentifier } from '../../common/audit.service';
 import { decrypt, encrypt } from '../../common/util';
 import { normalizePhone } from '../../common/util';
+import { country, COUNTRIES, COUNTRY_CODES, CURRENCIES, validTimezone } from '../../common/country';
 import { config, tenantOrigin } from '../../config';
 import { hashPassword, totpStep, TOTP_SETUP_AUDIENCE } from '../auth/auth.service';
+import { generateRecoveryCodes, hashCode, looksLikeRecoveryCode } from '../auth/recovery-codes';
+import {
+  approveRecoveryRequest, createRecoveryRequest, Decider, listRecoveryRequests, RecoveryDecisionDto, RecoveryRequestDto, rejectRecoveryRequest,
+} from '../auth/recovery';
 import { createSmsProvider } from '../notifications/sms.provider';
 import { temporaryPassword } from '../settings/settings.service';
 
 const COOKIE = 'erp_pt';
 const SESSION_HOURS = 8;
 const PLATFORM_2FA_AUDIENCE = 'platform-2fa';
+/** Après une connexion par code de récupération : configurer le nouveau téléphone sans l'ancien code (10 min). */
+const PLATFORM_RECOVERED_AUDIENCE = 'platform-2fa-recovered';
 const LOGIN_FAILED = 'Adresse e-mail ou mot de passe incorrect. Après 5 erreurs, le compte est bloqué 15 minutes.';
 /** Sous-domaines réservés à la plateforme. */
 
@@ -41,7 +48,10 @@ export class CreateTenantDto {
   slug: string;
   @IsString() @MinLength(3) @MaxLength(160) name: string;
   @IsOptional() @IsString() @MaxLength(60) shortName?: string;
-  @IsOptional() @Matches(/^[A-Z]{2}$/) country?: string;
+  @IsOptional() @IsIn(COUNTRY_CODES, { message: 'Pays non pris en charge' }) country?: string;
+  /// Monnaie et fuseau : ceux du pays si absents.
+  @IsOptional() @IsIn(CURRENCIES, { message: 'Monnaie non prise en charge' }) currency?: string;
+  @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @Matches(/^[A-Z]{2,5}$/, { message: 'Préfixe des matricules : 2 à 5 lettres majuscules' }) matriculePrefix: string;
   @IsOptional() @Matches(/^[a-z0-9.-]+\.[a-z]{2,}$/, { message: 'Nom de domaine invalide' }) domain?: string;
   @IsString() @MaxLength(120) siteName: string;
@@ -53,6 +63,9 @@ export class UpdateTenantDto {
   @IsOptional() @IsString() @MaxLength(60) shortName?: string | null;
   @IsOptional() @Matches(/^[a-z0-9.-]+\.[a-z]{2,}$/, { message: 'Nom de domaine invalide' }) domain?: string | null;
   @IsOptional() @IsEnum(TenantStatus) status?: TenantStatus;
+  @IsOptional() @IsIn(COUNTRY_CODES, { message: 'Pays non pris en charge' }) country?: string;
+  @IsOptional() @IsIn(CURRENCIES, { message: 'Monnaie non prise en charge' }) currency?: string;
+  @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @IsOptional() @IsString() @MaxLength(4000) platformNotes?: string | null;
 }
 
@@ -68,6 +81,16 @@ export class PlatformTwoFactorDto {
 
 export class PlatformSetupDto {
   @IsOptional() @IsString() @Length(6, 8) code?: string;
+  @IsOptional() @IsString() @MaxLength(2000) reconfigureToken?: string;
+}
+
+export class PlatformRecoveryLoginDto {
+  @IsString() @IsNotEmpty() @MaxLength(2000) challenge: string;
+  @IsString() @Length(8, 24) code: string;
+}
+
+export class PlatformRegenerateDto {
+  @IsString() @Length(6, 8) code: string;
 }
 
 export class PlatformEnableDto {
@@ -120,7 +143,7 @@ export class PlatformGuard implements CanActivate {
     }
     // Un compte désactivé ou dont le mot de passe a changé depuis perd sa session immédiatement.
     // Une déconnexion refuse tout jeton émis avant elle (SEC-021) ; « at » est l'heure d'émission en millisecondes.
-    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub }, select: { active: true, passwordChangedAt: true, sessionsRevokedAt: true, mustChangePassword: true, totpEnabled: true } });
+    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub }, select: { active: true, passwordChangedAt: true, sessionsRevokedAt: true, mustChangePassword: true, mustSetupTwoFactor: true, totpEnabled: true } });
     const issuedAt = p.at ?? p.iat * 1000;
     if (!admin?.active || (admin.passwordChangedAt && admin.passwordChangedAt.getTime() > p.iat * 1000 + 999)
       || (admin.sessionsRevokedAt && admin.sessionsRevokedAt.getTime() >= issuedAt)) throw new UnauthorizedException('Session expirée');
@@ -130,6 +153,10 @@ export class PlatformGuard implements CanActivate {
     const pending2fa = config.security.enforceTwoFactor && !admin.totpEnabled;
     if ((admin.mustChangePassword || pending2fa) && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, [ctx.getHandler(), ctx.getClass()])) {
       throw new ForbiddenException(admin.mustChangePassword ? 'Choisissez d’abord un nouveau mot de passe' : 'Activez d’abord la double authentification');
+    }
+    // Récupération exceptionnelle : une nouvelle double authentification avant tout autre écran.
+    if (admin.mustSetupTwoFactor && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, [ctx.getHandler(), ctx.getClass()])) {
+      throw new ForbiddenException('Configurez d’abord votre double authentification');
     }
     return true;
   }
@@ -162,10 +189,66 @@ export class PlatformService {
     await this.log({ id: admin.id, name: admin.name, ip }, lock ? 'platform.auth.locked' : what, null);
   }
 
-  private async open(admin: { id: string; name: string; email: string; mustChangePassword: boolean }, ip?: string) {
+  private async open(admin: { id: string; name: string; email: string; mustChangePassword: boolean; mustSetupTwoFactor?: boolean }, ip?: string) {
     await this.db.platformAdmin.update({ where: { id: admin.id }, data: { failedLogins: 0, lockedUntil: null, lastLoginAt: new Date() } });
     await this.log({ id: admin.id, name: admin.name, ip }, 'platform.auth.login', null);
-    return { token: this.sign(admin), admin: { id: admin.id, name: admin.name, email: admin.email, mustChangePassword: admin.mustChangePassword } };
+    return { token: this.sign(admin), admin: { id: admin.id, name: admin.name, email: admin.email, mustChangePassword: admin.mustChangePassword, mustSetupTwoFactor: !!admin.mustSetupTwoFactor } };
+  }
+
+  /** Remplace les codes de récupération du Super Admin ; renvoie les codes en clair, une seule fois. */
+  private async replaceCodes(adminId: string) {
+    const { codes, hashes } = generateRecoveryCodes();
+    await this.db.$transaction([
+      this.db.platformRecoveryCode.deleteMany({ where: { adminId } }),
+      this.db.platformRecoveryCode.createMany({ data: hashes.map((codeHash) => ({ adminId, codeHash })) }),
+    ]);
+    return codes;
+  }
+
+  /** Connexion du Super Admin avec un code de récupération (consommé en une seule requête, une seule fois). */
+  async verifyRecoveryCode(dto: PlatformRecoveryLoginDto, ip?: string) {
+    let p: { sub: string };
+    try {
+      p = this.jwt.verify(dto.challenge, { secret: config.jwt.accessSecret, audience: PLATFORM_2FA_AUDIENCE });
+    } catch {
+      throw new UnauthorizedException('Délai dépassé, reconnectez-vous');
+    }
+    const admin = await this.db.platformAdmin.findUnique({ where: { id: p.sub } });
+    const wrong = new UnauthorizedException('Code de récupération incorrect ou déjà utilisé. Après 5 erreurs, le compte est bloqué 15 minutes.');
+    if (!admin?.active || !admin.totpEnabled || (admin.lockedUntil && admin.lockedUntil > new Date())) throw wrong;
+    const used = looksLikeRecoveryCode(dto.code)
+      ? await this.db.platformRecoveryCode.updateMany({ where: { adminId: admin.id, codeHash: hashCode(dto.code), usedAt: null }, data: { usedAt: new Date() } })
+      : { count: 0 };
+    if (used.count !== 1) {
+      await this.countFailure(admin, 'platform.auth.recovery_code_failed', ip);
+      throw wrong;
+    }
+    const remaining = await this.db.platformRecoveryCode.count({ where: { adminId: admin.id, usedAt: null } });
+    await this.log({ id: admin.id, name: admin.name, ip }, 'platform.auth.recovery_code_used', null, { remaining });
+    const r = await this.open(admin, ip);
+    const reconfigureToken = this.jwt.sign({ sub: admin.id }, { secret: config.jwt.accessSecret, audience: PLATFORM_RECOVERED_AUDIENCE, expiresIn: 600 });
+    return { ...r, recoveryCodesRemaining: remaining, reconfigureToken };
+  }
+
+  async recoveryStatus(actor: PlatformActor) {
+    const a = await this.db.platformAdmin.findUniqueOrThrow({ where: { id: actor.id }, select: { totpEnabled: true } });
+    const rows = await this.db.platformRecoveryCode.findMany({ where: { adminId: actor.id }, select: { usedAt: true, createdAt: true } });
+    return { twoFactorEnabled: a.totpEnabled, total: rows.length, remaining: rows.filter((r) => !r.usedAt).length, createdAt: rows[0]?.createdAt ?? null };
+  }
+
+  /** Génère ou régénère les codes du Super Admin avec le code actuel de son application. */
+  async regenerateRecoveryCodes(actor: PlatformActor, code: string) {
+    const a = await this.db.platformAdmin.findUniqueOrThrow({ where: { id: actor.id } });
+    if (!a.totpEnabled || !a.totpSecret) throw new BadRequestException("Activez d'abord la double authentification");
+    const step = totpStep(decrypt(a.totpSecret), code, a.totpLastStep);
+    if (step === null) {
+      await this.countFailure(a, 'platform.auth.2fa_failed', actor.ip ?? undefined);
+      throw new ForbiddenException('Code de votre application incorrect');
+    }
+    await this.db.platformAdmin.update({ where: { id: a.id }, data: { totpLastStep: step, failedLogins: 0 } });
+    const recoveryCodes = await this.replaceCodes(a.id);
+    await this.log(actor, 'platform.auth.recovery_codes_generated', null, { count: recoveryCodes.length });
+    return { recoveryCodes };
   }
 
   /** Mot de passe, puis code de l'application d'authentification si la double authentification est active (SEC-021). */
@@ -224,9 +307,18 @@ export class PlatformService {
   }
 
   /** Prépare la double authentification sans toucher au compte (même principe que les écoles, SEC-019). */
-  async setupTwoFactor(actor: PlatformActor, currentCode?: string) {
+  async setupTwoFactor(actor: PlatformActor, currentCode?: string, reconfigureToken?: string) {
     const a = await this.db.platformAdmin.findUniqueOrThrow({ where: { id: actor.id } });
-    if (a.totpEnabled && a.totpSecret) {
+    let recovered = false;
+    if (reconfigureToken) {
+      try {
+        recovered = this.jwt.verify<{ sub: string }>(reconfigureToken, { secret: config.jwt.accessSecret, audience: PLATFORM_RECOVERED_AUDIENCE }).sub === a.id;
+      } catch {
+        recovered = false;
+      }
+      if (!recovered) throw new ForbiddenException('Délai dépassé : saisissez un code de votre application, ou reconnectez-vous avec un code de récupération');
+    }
+    if (a.totpEnabled && a.totpSecret && !recovered) {
       if (!currentCode) throw new ForbiddenException("La double authentification est déjà active : saisissez le code actuel pour la reconfigurer");
       const step = totpStep(decrypt(a.totpSecret), currentCode, a.totpLastStep);
       if (step === null) {
@@ -253,15 +345,18 @@ export class PlatformService {
     const step = totpStep(secret, dto.code, null);
     if (step === null) throw new BadRequestException('Code incorrect');
     const a = await this.db.platformAdmin.findUniqueOrThrow({ where: { id: actor.id } });
-    await this.db.platformAdmin.update({ where: { id: a.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step } });
+    await this.db.platformAdmin.update({ where: { id: a.id }, data: { totpSecret: encrypt(secret), totpEnabled: true, totpLastStep: step, mustSetupTwoFactor: false } });
     await this.log(actor, a.totpEnabled ? 'platform.auth.2fa_reset' : 'platform.auth.2fa_enabled', null);
-    return { ok: true };
+    // Nouveau téléphone : nouveaux codes de récupération, les anciens ne servent plus.
+    const recoveryCodes = await this.replaceCodes(a.id);
+    await this.log(actor, 'platform.auth.recovery_codes_generated', null, { count: recoveryCodes.length });
+    return { ok: true, recoveryCodes };
   }
 
   async me(actor: PlatformActor) {
     const a = await this.db.platformAdmin.findUnique({ where: { id: actor.id } });
     if (!a?.active) throw new UnauthorizedException('Session expirée');
-    return { id: a.id, name: a.name, email: a.email, mustChangePassword: a.mustChangePassword, totpEnabled: a.totpEnabled, mustSetupTwoFactor: config.security.enforceTwoFactor && !a.totpEnabled, platformDomain: config.platformDomain || null };
+    return { id: a.id, name: a.name, email: a.email, mustChangePassword: a.mustChangePassword, mustSetupTwoFactor: a.mustSetupTwoFactor || (config.security.enforceTwoFactor && !a.totpEnabled), totpEnabled: a.totpEnabled, platformDomain: config.platformDomain || null };
   }
 
   async changePassword(actor: PlatformActor, dto: PlatformPasswordDto) {
@@ -286,7 +381,7 @@ export class PlatformService {
         return { students, staff, sites, lastActivityAt: lastSession?.createdAt ?? null };
       });
       return {
-        id: t.id, slug: t.slug, name: t.name, shortName: t.shortName, country: t.country, status: t.status, domain: t.domain,
+        id: t.id, slug: t.slug, name: t.name, shortName: t.shortName, country: t.country, currency: t.currency, timezone: t.timezone, status: t.status, domain: t.domain,
         platformNotes: t.platformNotes, createdAt: t.createdAt, demo: !!(t.settings as any)?.demo, ...stats,
       };
     }));
@@ -296,11 +391,14 @@ export class PlatformService {
     if (RESERVED.includes(dto.slug)) throw new BadRequestException('Cet identifiant est réservé à la plateforme');
     const exists = await this.db.tenant.findFirst({ where: { OR: [{ slug: dto.slug }, ...(dto.domain ? [{ domain: dto.domain }] : [])] } });
     if (exists) throw new ConflictException(exists.slug === dto.slug ? 'Cet identifiant est déjà utilisé' : 'Ce nom de domaine est déjà utilisé');
+    const c = country(dto.country ?? 'BJ');
+    const timezone = dto.timezone || c.timezone;
+    if (!validTimezone(timezone)) throw new BadRequestException('Fuseau horaire inconnu');
     const password = temporaryPassword();
-    const phone = normalizePhone(dto.director.phone);
+    const phone = normalizePhone(dto.director.phone, c.dial);
     const tenant = await this.db.tenant.create({
       data: {
-        slug: dto.slug, name: dto.name.trim(), shortName: dto.shortName?.trim() || null, country: dto.country ?? 'BJ', domain: dto.domain ?? null,
+        slug: dto.slug, name: dto.name.trim(), shortName: dto.shortName?.trim() || null, country: c.code, currency: dto.currency || c.currency, timezone, domain: dto.domain ?? null,
         settings: { matriculePrefix: dto.matriculePrefix },
       },
     });
@@ -328,6 +426,9 @@ export class PlatformService {
       const other = await this.db.tenant.findFirst({ where: { domain: dto.domain, NOT: { id } } });
       if (other) throw new ConflictException('Ce nom de domaine est déjà utilisé');
     }
+    if (dto.timezone && !validTimezone(dto.timezone)) throw new BadRequestException('Fuseau horaire inconnu');
+    // Changer de pays reprend la monnaie et le fuseau du nouveau pays, sauf s'ils sont donnés.
+    const c = dto.country && dto.country !== t.country ? country(dto.country) : null;
     const updated = await this.db.tenant.update({
       where: { id },
       data: {
@@ -335,11 +436,14 @@ export class PlatformService {
         ...(dto.shortName !== undefined ? { shortName: dto.shortName?.trim() || null } : {}),
         ...(dto.domain !== undefined ? { domain: dto.domain || null } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
+        ...(dto.country !== undefined ? { country: dto.country } : {}),
+        ...(dto.currency || c ? { currency: dto.currency || c!.currency } : {}),
+        ...(dto.timezone || c ? { timezone: dto.timezone || c!.timezone } : {}),
         ...(dto.platformNotes !== undefined ? { platformNotes: dto.platformNotes || null } : {}),
       },
     });
     if (dto.status) forgetSessions({ tenantId: id });
-    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
+    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status', 'country', 'currency', 'timezone'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
     if (Object.keys(visible).length) {
       const action = visible.status ? `platform.tenant.${visible.status === 'SUSPENDED' ? 'suspended' : 'reactivated'}` : 'platform.tenant.updated';
       await this.db.inTenant(id, (tx) => this.schoolLog(tx, actor, id, action, 'Tenant', id, visible));
@@ -366,6 +470,57 @@ export class PlatformService {
     await this.log(actor, 'platform.tenant.director_reset', id, { userId: user.id });
     if (user.phone) await this.sms.send(user.phone, `${t.shortName ?? t.name} : votre mot de passe provisoire est ${password}. Changez-le à la connexion.`);
     return { identifier: user.phone ?? user.email, name: `${user.firstName} ${user.lastName}`, temporaryPassword: password };
+  }
+
+  private decider(actor: PlatformActor): Decider {
+    return { id: actor.id, name: actor.name, platform: true, ip: actor.ip };
+  }
+
+  /** Demandes de récupération qui attendent le Super Admin (comptes Direction, écoles sans second validateur), toutes écoles. */
+  async recoveryRequests() {
+    const tenants = await this.db.tenant.findMany({ orderBy: { createdAt: 'asc' }, select: { id: true, name: true, slug: true } });
+    const all = await Promise.all(tenants.map((t) => this.db.inTenant(t.id, async (tx) =>
+      (await listRecoveryRequests(tx, { requiresPlatform: true })).map((r) => ({ ...r, tenantName: t.name, tenantSlug: t.slug })))));
+    return all.flat().sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  /** Comptes d'une école qui utilisent la double authentification (pour ouvrir une demande). */
+  async recoveryAccounts(tenantId: string) {
+    const t = await this.db.tenant.findUnique({ where: { id: tenantId } });
+    if (!t) throw new NotFoundException('École introuvable');
+    return this.db.inTenant(tenantId, async (tx) => {
+      const users = await tx.user.findMany({
+        where: { status: 'ACTIVE', OR: [{ totpEnabled: true }, { roles: { some: { role: 'DIRECTION' } } }] },
+        select: { id: true, firstName: true, lastName: true, phone: true, email: true, totpEnabled: true, twoFactorReenroll: true, roles: { select: { role: true } } },
+        orderBy: { lastName: 'asc' },
+      });
+      return users.map((u) => ({ id: u.id, name: `${u.firstName} ${u.lastName}`, identifier: maskIdentifier(u.phone ?? u.email ?? ''), totpEnabled: u.totpEnabled, twoFactorReenroll: u.twoFactorReenroll, roles: [...new Set(u.roles.map((r) => r.role))] }));
+    });
+  }
+
+  async createRecoveryRequest(actor: PlatformActor, tenantId: string, dto: RecoveryRequestDto) {
+    const t = await this.db.tenant.findUnique({ where: { id: tenantId } });
+    if (!t) throw new NotFoundException('École introuvable');
+    const r = await this.db.inTenant(tenantId, (tx) => createRecoveryRequest(tx, tenantId, this.decider(actor), dto));
+    await this.log(actor, 'platform.recovery.requested', tenantId, { requestId: r.id, userId: dto.userId, identityCheck: dto.identityCheck });
+    return r;
+  }
+
+  /**
+   * Validation par le Super Admin. S'il existe un autre Super Admin actif, celui qui a ouvert la demande ne peut
+   * pas la valider lui-même (contrôle à deux). Avec un seul Super Admin, c'est permis mais signalé au journal.
+   */
+  async approveRecoveryRequest(actor: PlatformActor, tenantId: string, id: string, dto: RecoveryDecisionDto) {
+    const admins = await this.db.platformAdmin.count({ where: { active: true } });
+    const r = await this.db.inTenant(tenantId, (tx) => approveRecoveryRequest(tx, tenantId, this.decider(actor), id, dto.note, { allowSameRequester: admins <= 1 }));
+    await this.log(actor, 'platform.recovery.approved', tenantId, { requestId: id, userId: r.user.id, singleAdmin: admins <= 1 });
+    return r;
+  }
+
+  async rejectRecoveryRequest(actor: PlatformActor, tenantId: string, id: string, dto: RecoveryDecisionDto) {
+    const r = await this.db.inTenant(tenantId, (tx) => rejectRecoveryRequest(tx, tenantId, this.decider(actor), id, dto.note));
+    await this.log(actor, 'platform.recovery.rejected', tenantId, { requestId: id });
+    return r;
   }
 
   /** Journal de la plateforme avec le nom de l'administrateur et l'adresse IP (SEC-036). */
@@ -442,6 +597,38 @@ export class PlatformController {
     return r.admin;
   }
 
+  @Post('platform/auth/2fa/recovery') @Throttle({ default: { limit: 5, ttl: 60000 } }) @Header('Cache-Control', 'no-store')
+  async recoveryLogin(@Req() req: Request, @Body() dto: PlatformRecoveryLoginDto, @Res({ passthrough: true }) res: Response) {
+    const r = await this.s.verifyRecoveryCode(dto, req.ip);
+    this.cookie(res, r.token);
+    return { ...r.admin, recoveryUsed: true, recoveryCodesRemaining: r.recoveryCodesRemaining, reconfigureToken: r.reconfigureToken };
+  }
+
+  @Get('platform/auth/recovery-codes') @UseGuards(PlatformGuard) @AllowPendingPassword()
+  recoveryStatus(@Req() req: Request) { return this.s.recoveryStatus((req as any).platformAdmin); }
+
+  @Post('platform/auth/recovery-codes') @UseGuards(PlatformGuard) @Throttle({ default: { limit: 5, ttl: 60000 } }) @Header('Cache-Control', 'no-store')
+  regenerate(@Req() req: Request, @Body() dto: PlatformRegenerateDto) { return this.s.regenerateRecoveryCodes((req as any).platformAdmin, dto.code); }
+
+  @Get('platform/recovery-requests') @UseGuards(PlatformGuard)
+  recoveryRequests() { return this.s.recoveryRequests(); }
+
+  @Get('platform/tenants/:id/recovery-accounts') @UseGuards(PlatformGuard)
+  recoveryAccounts(@Param('id', ParseUUIDPipe) id: string) { return this.s.recoveryAccounts(id); }
+
+  @Post('platform/tenants/:id/recovery-requests') @UseGuards(PlatformGuard) @Throttle({ default: { limit: 10, ttl: 60000 } })
+  createRecovery(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: RecoveryRequestDto) { return this.s.createRecoveryRequest((req as any).platformAdmin, id, dto); }
+
+  @Post('platform/tenants/:id/recovery-requests/:rid/approve') @UseGuards(PlatformGuard) @Header('Cache-Control', 'no-store') @Throttle({ default: { limit: 10, ttl: 60000 } })
+  approveRecovery(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Param('rid', ParseUUIDPipe) rid: string, @Body() dto: RecoveryDecisionDto) {
+    return this.s.approveRecoveryRequest((req as any).platformAdmin, id, rid, dto);
+  }
+
+  @Post('platform/tenants/:id/recovery-requests/:rid/reject') @UseGuards(PlatformGuard)
+  rejectRecovery(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Param('rid', ParseUUIDPipe) rid: string, @Body() dto: RecoveryDecisionDto) {
+    return this.s.rejectRecoveryRequest((req as any).platformAdmin, id, rid, dto);
+  }
+
   @Post('platform/auth/logout')
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     await this.s.logout(req.cookies?.[COOKIE], req.ip);
@@ -450,9 +637,9 @@ export class PlatformController {
   }
 
   @Post('platform/auth/2fa/setup') @UseGuards(PlatformGuard) @AllowPendingPassword() @Throttle({ default: { limit: 10, ttl: 60000 } })
-  setup2fa(@Req() req: Request, @Body() dto: PlatformSetupDto) { return this.s.setupTwoFactor((req as any).platformAdmin, dto.code); }
+  setup2fa(@Req() req: Request, @Body() dto: PlatformSetupDto) { return this.s.setupTwoFactor((req as any).platformAdmin, dto.code, dto.reconfigureToken); }
 
-  @Post('platform/auth/2fa/enable') @UseGuards(PlatformGuard) @AllowPendingPassword() @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('platform/auth/2fa/enable') @UseGuards(PlatformGuard) @AllowPendingPassword() @Throttle({ default: { limit: 10, ttl: 60000 } }) @Header('Cache-Control', 'no-store')
   enable2fa(@Req() req: Request, @Body() dto: PlatformEnableDto) { return this.s.enableTwoFactor((req as any).platformAdmin, dto); }
 
   @Post('platform/auth/password') @UseGuards(PlatformGuard) @AllowPendingPassword()
@@ -467,6 +654,10 @@ export class PlatformController {
 
   @Get('platform/tenants') @UseGuards(PlatformGuard)
   tenants() { return this.s.tenants(); }
+
+  /** Pays pris en charge, avec leur indicatif, monnaie et fuseau par défaut. */
+  @Get('platform/countries') @UseGuards(PlatformGuard)
+  countries() { return COUNTRIES.map(({ code, name, dial, currency, timezone, einvoice }) => ({ code, name, dial, currency, timezone, einvoice })); }
 
   @Post('platform/tenants') @UseGuards(PlatformGuard)
   create(@Req() req: Request, @Body() dto: CreateTenantDto) { return this.s.createTenant((req as any).platformAdmin, dto); }

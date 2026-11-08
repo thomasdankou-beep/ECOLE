@@ -7,6 +7,7 @@ import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService } from '../../common/prisma.service';
 import { nextNumber, normalizePhone, pad, toDate } from '../../common/util';
+import { country } from '../../common/country';
 import { NotificationsService } from '../notifications/notifications.service';
 import { createSmsProvider } from '../notifications/sms.provider';
 import { config } from '../../config';
@@ -48,7 +49,7 @@ export class AdmissionsService {
     return this.db.forTenant(tenant.id, async (tx) => {
       const year = new Date().getUTCFullYear();
       const reference = `PRE-${year}-${pad(await nextNumber(tx, tenant.id, `application-${year}`), 4)}`;
-      const phone = normalizePhone(dto.guardianPhone);
+      const phone = normalizePhone(dto.guardianPhone, country(tenant.country).dial);
       const a = await tx.application.create({
         data: { ...dto, tenantId: tenant.id, reference, guardianPhone: phone, birthDate: dto.birthDate ? toDate(dto.birthDate) : null, studentLastName: dto.studentLastName.toUpperCase() },
       });

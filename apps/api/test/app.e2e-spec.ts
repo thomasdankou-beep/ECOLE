@@ -467,10 +467,10 @@ describe('Plateforme : plusieurs écoles sur un même serveur', () => {
   let director: { identifier: string; temporaryPassword: string };
 
   beforeAll(async () => {
-    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Super Admin Test"`, { env: process.env, cwd: `${__dirname}/..` });
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Super Admin Test" --operateur "Tests automatiques" --motif "Remise à zéro du compte de test"`, { env: process.env, cwd: `${__dirname}/..` });
     // Mot de passe connu pour le test, sans passer par la sortie de la commande.
     const argon2 = await import('argon2');
-    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Test-2026'), mustChangePassword: false } });
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Test-2026'), mustChangePassword: false, mustSetupTwoFactor: false } });
   });
 
   it('le rôle applicatif des écoles ne lit pas les comptes de la plateforme', async () => {
@@ -1580,9 +1580,9 @@ describe("Sécurité v1.1, étape 5 : page du journal et journal Super Admin (SE
 
   it("SEC-036 : le journal Super Admin garde l'adresse IP et le nom de l'administrateur", async () => {
     const email = 'journal-plateforme@test.local';
-    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Admin Journal"`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'ignore' });
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Admin Journal" --operateur "Tests automatiques" --motif "Remise à zéro du compte de test"`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'ignore' });
     const argon2 = await import('argon2');
-    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Journal-2026'), mustChangePassword: false } });
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Journal-2026'), mustChangePassword: false, mustSetupTwoFactor: false } });
     await http.post('/api/v1/platform/auth/login').set('X-Forwarded-For', '198.51.100.9').send({ email, password: 'mauvais' }).expect(401);
     await http.post('/api/v1/platform/auth/login').set('X-Forwarded-For', '198.51.100.9').send({ email: 'inconnu@test.local', password: 'mauvais' }).expect(401);
     const r = await http.post('/api/v1/platform/auth/login').set('X-Forwarded-For', '198.51.100.9').send({ email, password: 'Plateforme-Journal-2026' }).expect(201);
@@ -1641,17 +1641,11 @@ describe('Double authentification obligatoire (SEC-020)', () => {
     expect((await http.get('/api/v1/students').set('Authorization', `Bearer ${l.body.accessToken}`)).status).toBe(200);
   });
 
-  it('téléphone perdu : la direction retire la 2FA d\'un autre compte, jamais la sienne', async () => {
+  it("téléphone perdu : l'ancien retrait direct de la 2FA n'existe plus, remplacé par la récupération validée", async () => {
     config.security.enforceTwoFactor = false; // la direction de démonstration n'a pas de 2FA
     const d = await login(PHONES.direction);
-    const directionId = (await http.get('/api/v1/auth/me').set('Authorization', `Bearer ${d}`)).body.user.id;
-    expect((await http.post(`/api/v1/users/${directionId}/reset-2fa`).set('Authorization', `Bearer ${d}`)).status).toBe(403);
-    expect((await http.post(`/api/v1/users/${userId}/reset-2fa`).set('Authorization', `Bearer ${d}`)).status).toBe(201);
-    const u = await inTenant((tx) => tx.user.findUniqueOrThrow({ where: { id: userId } }));
-    expect(u.totpEnabled).toBe(false);
-    expect(u.totpSecret).toBeNull();
-    const teacher = await login(PHONES.teacher);
-    expect((await http.post(`/api/v1/users/${userId}/reset-2fa`).set('Authorization', `Bearer ${teacher}`)).status).toBe(403);
+    expect((await http.post(`/api/v1/users/${userId}/reset-2fa`).set('Authorization', `Bearer ${d}`)).status).toBe(404);
+    expect((await inTenant((tx) => tx.user.findUniqueOrThrow({ where: { id: userId } }))).totpEnabled).toBe(true);
     config.security.enforceTwoFactor = true;
   });
 
@@ -1964,7 +1958,7 @@ describe('Sécurité v1.1, étape 6 : garde-fous de structure de la base (SEC-04
     const weak = rows.filter((r) => !PLATFORM_ONLY.includes(r.table) && (!r.rls || !r.forced || r.policies === 0)).map((r) => r.table);
     expect(weak).toEqual([]);
     const grants = await admin.$queryRaw<{ table: string }[]>`
-      SELECT table_name AS table FROM information_schema.role_table_grants WHERE grantee = 'erp_app' AND table_name = ANY(${PLATFORM_ONLY})`;
+      SELECT table_name AS table FROM information_schema.role_table_grants WHERE grantee = 'erp_app' AND table_name = ANY(${[...PLATFORM_ONLY, 'platform_recovery_codes', 'platform_admins']})`;
     expect(grants).toEqual([]);
   });
 
@@ -1991,5 +1985,482 @@ describe('Sécurité v1.1, étape 6 : garde-fous de structure de la base (SEC-04
     for (const sql of [
       'DELETE FROM audit_logs', "UPDATE audit_logs SET action = 'x'", 'DELETE FROM receipts', 'DELETE FROM payments', 'DELETE FROM grades',
     ]) expect(await attempt(sql)).not.toBe('accepté');
+  });
+});
+
+describe('Écoles de plusieurs pays (lot « Pays de l’école »)', () => {
+  const email = 'pays-plateforme@test.local';
+  const slug = `ci-${Date.now().toString(36)}`;
+  let cookie: string;
+  let tenantId: string;
+  let token: string;
+
+  beforeAll(async () => {
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Admin Pays" --operateur "Tests automatiques" --motif "Remise à zéro du compte de test"`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'ignore' });
+    const argon2 = await import('argon2');
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Pays-2026'), mustChangePassword: false, mustSetupTwoFactor: false } });
+    const r = await http.post('/api/v1/platform/auth/login').send({ email, password: 'Plateforme-Pays-2026' }).expect(201);
+    cookie = (r.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('erp_pt='))!.split(';')[0];
+  });
+
+  it('liste les pays avec leur indicatif, leur monnaie et leur fuseau', async () => {
+    const r = await http.get('/api/v1/platform/countries').set('Cookie', cookie).expect(200);
+    expect(r.body.find((c: any) => c.code === 'CI')).toMatchObject({ dial: '225', currency: 'XOF', timezone: 'Africa/Abidjan', einvoice: 'FNE' });
+    expect(r.body.find((c: any) => c.code === 'BJ')).toMatchObject({ dial: '229', einvoice: 'e-MECeF' });
+    expect((await http.get('/api/v1/platform/countries')).status).toBe(401);
+  });
+
+  it("une école ivoirienne prend +225, la monnaie et l'heure d'Abidjan", async () => {
+    const bad = await http.post('/api/v1/platform/tenants').set('Cookie', cookie)
+      .send({ slug: `${slug}-x`, name: 'École Pays Inconnu', country: 'ZZ', matriculePrefix: 'EPI', siteName: 'Centre', director: { firstName: 'A', lastName: 'B', phone: '0707000001' } });
+    expect(bad.status).toBe(400);
+    const c = await http.post('/api/v1/platform/tenants').set('Cookie', cookie)
+      .send({ slug, name: 'Groupe scolaire Test Abidjan', country: 'CI', matriculePrefix: 'GTA', siteName: 'Cocody', director: { firstName: 'Awa', lastName: 'Koné', phone: '07 07 00 00 01' } });
+    expect(c.status).toBe(201);
+    expect(c.body.director.identifier).toBe('+2250707000001');
+    tenantId = c.body.tenant.id;
+    const t = await admin.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+    expect(t).toMatchObject({ country: 'CI', currency: 'XOF', timezone: 'Africa/Abidjan' });
+
+    // Le directeur se connecte en tapant son numéro sans indicatif : +225 est ajouté, pas +229.
+    const l = await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: '0707000001', password: c.body.director.temporaryPassword });
+    expect(l.status).toBe(200);
+    await http.post('/api/v1/auth/change-password').set('Authorization', `Bearer ${l.body.accessToken}`)
+      .send({ current: c.body.director.temporaryPassword, next: 'Abidjan2026xy' }).expect(200);
+    token = (await http.post('/api/v1/auth/login').send({ tenant: slug, identifier: '0707000001', password: 'Abidjan2026xy' }).expect(200)).body.accessToken;
+    const me = await http.get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(me.body.tenant).toMatchObject({ country: 'CI', currency: 'XOF', dial: '225', einvoice: 'FNE' });
+  });
+
+  it('le personnel enregistré sans indicatif reçoit celui de son école', async () => {
+    const s = await http.post('/api/v1/staff').set('Authorization', `Bearer ${token}`)
+      .send({ firstName: 'Yao', lastName: 'Comptable', phone: '05 05 00 00 02', roles: [{ role: 'COMPTABLE' }] });
+    expect(s.status).toBe(201);
+    const u = await inTenant(slug, (tx) => tx.user.findUniqueOrThrow({ where: { id: s.body.id } }));
+    expect(u.phone).toBe('+2250505000002');
+  });
+
+  it("aucun opérateur Mobile Money n'est inventé hors du Bénin ; la direction saisit les siens", async () => {
+    const before = await http.get('/api/v1/settings').set('Authorization', `Bearer ${token}`).expect(200);
+    expect(before.body.tenant).toMatchObject({ country: 'CI', countryName: "Côte d'Ivoire", operators: [], einvoice: 'FNE' });
+    await http.patch('/api/v1/settings').set('Authorization', `Bearer ${token}`)
+      .send({ settings: { payments: { operators: [' Orange Money ', 'Wave', 'Wave', ''] } } }).expect(200);
+    const after = await http.get('/api/v1/settings').set('Authorization', `Bearer ${token}`);
+    expect(after.body.tenant.operators).toEqual(['Orange Money', 'Wave']);
+    expect((await http.patch('/api/v1/settings').set('Authorization', `Bearer ${token}`).send({ settings: { payments: { operators: 'Wave' } } })).status).toBe(400);
+    // Saint Kisito (Bénin) garde MTN MoMo et Moov Money tant que sa direction n'a rien saisi.
+    expect((await as('parent').get('/payments/operators')).body.operators).toEqual(['MTN MoMo', 'Moov Money']);
+  });
+
+  it("le parent ne peut pas payer avec un opérateur que l'école ne propose pas", async () => {
+    const invoices = await as('parent').get('/finance/invoices');
+    const open = invoices.body.find((i: any) => i.remaining > 0);
+    if (!open) return;
+    const r = await as('parent').post('/payments/mobile-money', { invoiceId: open.id, amount: open.remaining, operator: 'Wave', phone: '0197000001' });
+    expect(r.status).toBe(400);
+  });
+
+  it("le Super Admin change le pays : la monnaie et le fuseau suivent ; le texte d'examen se règle", async () => {
+    const r = await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ country: 'GN' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ country: 'GN', currency: 'GNF', timezone: 'Africa/Conakry' });
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ timezone: 'Pas/UnFuseau' })).status).toBe(400);
+    await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ country: 'CI' }).expect(200);
+    await http.patch('/api/v1/settings').set('Authorization', `Bearer ${token}`).send({ settings: { public: { collegeExam: 'BEPC' } } }).expect(200);
+    expect((await http.get(`/api/v1/public/${slug}`)).body).toMatchObject({ country: 'CI', public: { collegeExam: 'BEPC' } });
+  });
+});
+
+describe('Récupération sécurisée des comptes 2FA (v1.1)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { authenticator } = require('otplib');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const argon2 = require('argon2');
+  const PH = { compta: '+2290190009101', dir1: '+2290190009102', dir2: '+2290190009103' };
+  const ids: Record<string, string> = {};
+  const secrets: Record<string, string> = {};
+  /** Tout code affiché pendant ces tests : aucun ne doit se retrouver dans le journal, les notifications ou les SMS. */
+  const shown: string[] = [];
+  let tid: string;
+  let dirAId: string;
+  const ctx = <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) => inTenant('saint-kisito', fn);
+  const signIn = (phone: string) => http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier: phone, password: PASSWORD });
+  const bearer = (t: string) => ({
+    get: (url: string) => http.get(`/api/v1${url}`).set('Authorization', `Bearer ${t}`),
+    post: (url: string, body: object = {}) => http.post(`/api/v1${url}`).set('Authorization', `Bearer ${t}`).send(body),
+  });
+  const fresh = (id: string) => ctx((tx) => tx.user.update({ where: { id }, data: { totpLastStep: null, failedLogins: 0, lockedUntil: null } }));
+  const userRow = (id: string) => ctx((tx) => tx.user.findUniqueOrThrow({ where: { id } }));
+  const codesOf = (id: string) => ctx((tx) => tx.recoveryCode.findMany({ where: { userId: id } }));
+  const CODE = /^[A-HJKMNP-Z2-9]{5}-[A-HJKMNP-Z2-9]{5}$/;
+
+  async function enable2fa(key: keyof typeof PH) {
+    const t = (await signIn(PH[key])).body.accessToken;
+    const setup = await bearer(t).post('/auth/2fa/setup');
+    const en = await bearer(t).post('/auth/2fa/enable', { code: authenticator.generate(setup.body.secret), setupToken: setup.body.setupToken });
+    expect(en.status).toBe(200);
+    secrets[key] = setup.body.secret;
+    shown.push(...en.body.recoveryCodes);
+    return en.body.recoveryCodes as string[];
+  }
+  async function fullLogin(key: keyof typeof PH) {
+    await fresh(ids[key]);
+    const c = (await signIn(PH[key])).body.challenge;
+    const r = await http.post('/api/v1/auth/2fa/verify').send({ challenge: c, code: authenticator.generate(secrets[key]) });
+    expect(r.status).toBe(200);
+    return r.body.accessToken as string;
+  }
+  async function reenroll(key: keyof typeof PH, activationCode: string) {
+    const l = await signIn(PH[key]);
+    expect(l.status).toBe(200);
+    expect(l.body.reenrollRequired).toBe(true);
+    expect(l.body.accessToken).toBeUndefined();
+    const start = await http.post('/api/v1/auth/2fa/reenroll/start').send({ challenge: l.body.challenge, activationCode });
+    expect(start.status).toBe(200);
+    const fin = await http.post('/api/v1/auth/2fa/reenroll/finish').send({ challenge: l.body.challenge, setupToken: start.body.setupToken, code: authenticator.generate(start.body.secret) });
+    expect(fin.status).toBe(200);
+    secrets[key] = start.body.secret;
+    shown.push(...fin.body.recoveryCodes);
+    return fin.body;
+  }
+
+  // Super Admin fictifs (deux, pour le contrôle à deux), créés directement dans la base de test.
+  const PA = { a: 'recup-a@exemple.test', b: 'recup-b@exemple.test' };
+  const PA_PW = 'Recuperation-Test-2026';
+  const pcookie = (r: any) => (r.headers['set-cookie'] as unknown as string[]).find((c: string) => c.startsWith('erp_pt='))!.split(';')[0];
+  const pa: Record<string, string> = {};
+
+  beforeAll(async () => {
+    tid = (await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } })).id;
+    const hash = await argon2.hash(PASSWORD);
+    for (const [key, role] of [['compta', 'COMPTABLE'], ['dir1', 'DIRECTION'], ['dir2', 'DIRECTION']] as const) {
+      ids[key] = await ctx(async (tx) => {
+        await tx.user.deleteMany({ where: { phone: PH[key] } });
+        const u = await tx.user.create({
+          data: { tenantId: tid, firstName: 'Fictif', lastName: `Recup-${key}`, phone: PH[key], passwordHash: hash, mustChangePassword: false, roles: { create: [{ tenantId: tid, role }] } },
+        });
+        return u.id;
+      });
+    }
+    dirAId = (await as('direction').get('/auth/me')).body.user.id;
+    for (const [k, email] of Object.entries(PA)) {
+      await admin.platformAdmin.deleteMany({ where: { email } });
+      await admin.platformAdmin.create({ data: { email, name: `Super Admin fictif ${k}`, passwordHash: await argon2.hash(PA_PW), mustChangePassword: false } });
+      pa[k] = pcookie(await http.post('/api/v1/platform/auth/login').send({ email, password: PA_PW }));
+    }
+  });
+
+  afterAll(async () => {
+    await admin.platformAdmin.deleteMany({ where: { email: { in: Object.values(PA) } } });
+  });
+
+  it('1. connexion normale avec Google Authenticator : inchangée, 10 codes créés à l’activation, jamais en clair', async () => {
+    const codes = await enable2fa('compta');
+    expect(codes).toHaveLength(10);
+    for (const c of codes) expect(c).toMatch(CODE);
+    expect(new Set(codes).size).toBe(10);
+    const rows = await codesOf(ids.compta);
+    expect(rows).toHaveLength(10);
+    for (const r of rows) {
+      expect(r.codeHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(codes.some((c) => r.codeHash.includes(c.replace('-', '')))).toBe(false);
+    }
+    const l = await signIn(PH.compta);
+    expect(l.body.twoFactorRequired).toBe(true);
+    expect(l.body.accessToken).toBeUndefined();
+    expect(await fullLogin('compta')).toBeTruthy();
+  });
+
+  it('un compte qui avait déjà Google Authenticator obtient ses codes sans désactiver la 2FA ni changer son secret', async () => {
+    // Comme un compte activé avant cette version : aucun code enregistré.
+    await ctx((tx) => tx.recoveryCode.deleteMany({ where: { userId: ids.compta } }));
+    const before = await userRow(ids.compta);
+    const t = await fullLogin('compta');
+    expect((await bearer(t).get('/auth/2fa/recovery-codes')).body).toMatchObject({ twoFactorEnabled: true, total: 0, remaining: 0 });
+    expect((await bearer(t).post('/auth/2fa/recovery-codes', { code: '000000' })).status).toBe(403);
+    await fresh(ids.compta);
+    const g = await bearer(t).post('/auth/2fa/recovery-codes', { code: authenticator.generate(secrets.compta) });
+    expect(g.status).toBe(200);
+    expect(g.headers['cache-control']).toMatch(/no-store/);
+    expect(g.body.recoveryCodes).toHaveLength(10);
+    shown.push(...g.body.recoveryCodes);
+    const after = await userRow(ids.compta);
+    expect(after.totpEnabled).toBe(true);
+    expect(after.totpSecret).toBe(before.totpSecret);
+    expect((await bearer(t).get('/auth/2fa/recovery-codes')).body).toMatchObject({ total: 10, remaining: 10 });
+    secrets.comptaCodes = JSON.stringify(g.body.recoveryCodes);
+  });
+
+  it('2-3. connexion avec un code de récupération, puis refus du même code ; deux essais simultanés, un seul passe', async () => {
+    const codes: string[] = JSON.parse(secrets.comptaCodes);
+    const secretBefore = (await userRow(ids.compta)).totpSecret;
+    const c1 = (await signIn(PH.compta)).body.challenge;
+    const ok = await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c1, code: codes[0] });
+    expect(ok.status).toBe(200);
+    expect(ok.body.accessToken).toBeTruthy();
+    expect(ok.body.recoveryCodesRemaining).toBe(9);
+    expect(ok.body.reconfigureToken).toBeTruthy();
+    // Le même code, rejoué : refusé.
+    const c2 = (await signIn(PH.compta)).body.challenge;
+    expect((await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c2, code: codes[0] })).status).toBe(401);
+    // Saisie tolérante : minuscules, sans tiret.
+    const low = await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c2, code: codes[1].toLowerCase().replace('-', ' ') });
+    expect(low.status).toBe(200);
+    // Deux connexions simultanées avec le même code : une seule réussit.
+    await fresh(ids.compta);
+    const c3 = (await signIn(PH.compta)).body.challenge;
+    const both = await Promise.all([0, 1].map(() => http.post('/api/v1/auth/2fa/recovery').send({ challenge: c3, code: codes[2] })));
+    expect(both.map((r) => r.status).sort()).toEqual([200, 401]);
+    // La 2FA reste active, le secret n'a pas changé.
+    const u = await userRow(ids.compta);
+    expect(u.totpEnabled).toBe(true);
+    expect(u.totpSecret).toBe(secretBefore);
+    expect((await codesOf(ids.compta)).filter((r) => !r.usedAt)).toHaveLength(7);
+    // Un code de récupération ne remplace pas le mot de passe : sans le défi de connexion, rien.
+    expect((await http.post('/api/v1/auth/2fa/recovery').send({ challenge: 'faux', code: codes[3] })).status).toBe(401);
+    await fresh(ids.compta);
+  });
+
+  it('après un code de récupération, le nouveau téléphone se configure sans l’ancien, et les autres sessions sont coupées', async () => {
+    const codes: string[] = JSON.parse(secrets.comptaCodes);
+    const other = await fullLogin('compta');
+    const c = (await signIn(PH.compta)).body.challenge;
+    const r = await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c, code: codes[3] });
+    const t = r.body.accessToken;
+    // Sans le jeton de récupération, il faudrait le code de l'ancien téléphone.
+    expect((await bearer(t).post('/auth/2fa/setup')).status).toBe(403);
+    expect((await bearer(t).post('/auth/2fa/setup', { reconfigureToken: 'faux' })).status).toBe(403);
+    const setup = await bearer(t).post('/auth/2fa/setup', { reconfigureToken: r.body.reconfigureToken });
+    expect(setup.status).toBe(200);
+    const en = await bearer(t).post('/auth/2fa/enable', { code: authenticator.generate(setup.body.secret), setupToken: setup.body.setupToken });
+    expect(en.status).toBe(200);
+    expect(en.body.recoveryCodes).toHaveLength(10);
+    shown.push(...en.body.recoveryCodes);
+    secrets.compta = setup.body.secret;
+    secrets.comptaCodes = JSON.stringify(en.body.recoveryCodes);
+    expect((await bearer(other).get('/auth/me')).status).toBe(401);
+    expect((await bearer(t).get('/auth/me')).status).toBe(200);
+    // Les anciens codes ne servent plus.
+    const c2 = (await signIn(PH.compta)).body.challenge;
+    expect((await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c2, code: codes[4] })).status).toBe(401);
+    await fresh(ids.compta);
+  });
+
+  it('4. régénération : exige le code actuel, remplace tous les codes', async () => {
+    const old: string[] = JSON.parse(secrets.comptaCodes);
+    const t = await fullLogin('compta');
+    await fresh(ids.compta);
+    const g = await bearer(t).post('/auth/2fa/recovery-codes', { code: authenticator.generate(secrets.compta) });
+    expect(g.status).toBe(200);
+    shown.push(...g.body.recoveryCodes);
+    expect(g.body.recoveryCodes.some((c: string) => old.includes(c))).toBe(false);
+    const c = (await signIn(PH.compta)).body.challenge;
+    expect((await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c, code: old[0] })).status).toBe(401);
+    expect((await http.post('/api/v1/auth/2fa/recovery').send({ challenge: c, code: g.body.recoveryCodes[0] })).status).toBe(200);
+    await fresh(ids.compta);
+  });
+
+  it('6. demandes refusées : sans le droit, pour soi-même, en double, ou validée par le demandeur', async () => {
+    expect((await as('teacher').get('/recovery-requests')).status).toBe(403);
+    expect((await as('secretariat').post('/recovery-requests', { userId: ids.compta, reason: 'Téléphone perdu', identityCheck: 'PIECE_IDENTITE' })).status).toBe(403);
+    expect((await as('comptable').post('/recovery-requests', { userId: ids.dir1, reason: 'Téléphone perdu', identityCheck: 'PIECE_IDENTITE' })).status).toBe(403);
+    expect((await as('direction').post('/recovery-requests', { userId: dirAId, reason: 'Mon téléphone', identityCheck: 'AUTRE' })).status).toBe(403);
+    expect((await as('direction').post('/recovery-requests', { userId: ids.compta, reason: 'x', identityCheck: 'PIECE_IDENTITE' })).status).toBe(400);
+    expect((await as('direction').post('/recovery-requests', { userId: ids.compta, reason: 'Téléphone perdu', identityCheck: 'RIEN' })).status).toBe(400);
+    // Compte sans double authentification : rien à récupérer.
+    expect((await as('direction').post('/recovery-requests', { userId: ids.dir2, reason: 'Téléphone perdu', identityCheck: 'PIECE_IDENTITE' })).status).toBe(400);
+  });
+
+  it('5. récupération d’un comptable : demandée par une direction, validée par une autre, après vérification d’identité', async () => {
+    const t = await fullLogin('compta');
+    const r = await as('direction').post('/recovery-requests', { userId: ids.compta, reason: 'Téléphone volé le 8/11', identityCheck: 'PIECE_IDENTITE', identityNote: 'CNI vue au bureau' });
+    expect(r.status).toBe(201);
+    expect(r.body.requiresPlatform).toBe(false);
+    expect((await as('direction').post('/recovery-requests', { userId: ids.compta, reason: 'Encore une fois', identityCheck: 'PIECE_IDENTITE' })).status).toBe(409);
+    // Le demandeur ne valide pas sa propre demande ; la personne concernée non plus.
+    expect((await as('direction').post(`/recovery-requests/${r.body.id}/approve`, { note: 'Vu, ok' })).status).toBe(403);
+    expect((await bearer(t).post(`/recovery-requests/${r.body.id}/approve`, { note: 'Vu, ok' })).status).toBe(403);
+    const dir2 = (await signIn(PH.dir2)).body.accessToken;
+    expect((await bearer(dir2).post(`/recovery-requests/${r.body.id}/approve`, { note: '' })).status).toBe(400);
+    const ok = await bearer(dir2).post(`/recovery-requests/${r.body.id}/approve`, { note: 'Identité vérifiée, CNI' });
+    expect(ok.status).toBe(200);
+    expect(ok.headers['cache-control']).toMatch(/no-store/);
+    expect(ok.body.activationCode).toMatch(/^[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/);
+    shown.push(ok.body.activationCode);
+    secrets.comptaActivation = ok.body.activationCode;
+    expect((await bearer(dir2).post(`/recovery-requests/${r.body.id}/approve`, { note: 'Deux fois' })).status).toBe(409);
+    // Ancienne 2FA retirée, codes effacés, sessions coupées, réactivation imposée.
+    const u = await userRow(ids.compta);
+    expect(u).toMatchObject({ totpEnabled: false, totpSecret: null, twoFactorReenroll: true });
+    expect(await codesOf(ids.compta)).toHaveLength(0);
+    expect((await bearer(t).get('/auth/me')).status).toBe(401);
+    const row = await ctx((tx) => tx.twoFactorRecoveryRequest.findUniqueOrThrow({ where: { id: r.body.id } }));
+    expect(row.status).toBe('APPROVED');
+    expect(row.activationHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.decidedById).toBe(ids.dir2);
+    // La liste ne montre jamais l'empreinte du code.
+    const list = await bearer(dir2).get('/recovery-requests');
+    expect(JSON.stringify(list.body)).not.toContain(row.activationHash!);
+  });
+
+  it('8. réactivation obligatoire : aucun accès avant le nouveau téléphone, code de réactivation à usage unique', async () => {
+    const l = await signIn(PH.compta);
+    expect(l.body.reenrollRequired).toBe(true);
+    expect(l.body.accessToken).toBeUndefined();
+    // Ce défi ne sert pas à la connexion ordinaire.
+    expect((await http.post('/api/v1/auth/2fa/verify').send({ challenge: l.body.challenge, code: '123456' })).status).toBe(401);
+    expect((await http.post('/api/v1/auth/2fa/recovery').send({ challenge: l.body.challenge, code: 'AAAAA-BBBBB' })).status).toBe(401);
+    expect((await http.post('/api/v1/auth/2fa/reenroll/start').send({ challenge: l.body.challenge, activationCode: 'AAAA-BBBB' })).status).toBe(401);
+    await fresh(ids.compta);
+    const done = await reenroll('compta', secrets.comptaActivation);
+    expect(done.accessToken).toBeTruthy();
+    expect(done.recoveryCodes).toHaveLength(10);
+    const u = await userRow(ids.compta);
+    expect(u).toMatchObject({ totpEnabled: true, twoFactorReenroll: false });
+    const req = await ctx((tx) => tx.twoFactorRecoveryRequest.findFirstOrThrow({ where: { userId: ids.compta }, orderBy: { createdAt: 'desc' } }));
+    expect(req.status).toBe('COMPLETED');
+    expect(req.activationHash).toBeNull();
+    // Le code de réactivation ne resservira pas ; la connexion redemande le code du nouveau téléphone.
+    const again = await signIn(PH.compta);
+    expect(again.body.twoFactorRequired).toBe(true);
+    expect((await http.post('/api/v1/auth/2fa/reenroll/start').send({ challenge: again.body.challenge, activationCode: secrets.comptaActivation })).status).toBe(401);
+    expect(await fullLogin('compta')).toBeTruthy();
+  });
+
+  it('5 codes de réactivation faux épuisent le code : même le bon ne passe plus', async () => {
+    await enable2fa('dir2');
+    const r = await as('direction').post('/recovery-requests', { userId: ids.dir2, reason: 'Téléphone tombé dans l’eau', identityCheck: 'RAPPEL_NUMERO_CONNU' });
+    expect(r.body.requiresPlatform).toBe(true); // compte Direction : Super Admin
+    const ok = await http.post(`/api/v1/platform/tenants/${tid}/recovery-requests/${r.body.id}/approve`).set('Cookie', pa.a).send({ note: 'Rappel au numéro connu' });
+    expect(ok.status).toBe(201);
+    shown.push(ok.body.activationCode);
+    for (let i = 0; i < 5; i++) {
+      await ctx((tx) => tx.user.update({ where: { id: ids.dir2 }, data: { lockedUntil: null } }));
+      const l = await signIn(PH.dir2);
+      expect((await http.post('/api/v1/auth/2fa/reenroll/start').send({ challenge: l.body.challenge, activationCode: 'AAAA-BBBB' })).status).toBe(401);
+    }
+    // Chaque erreur est comptée sur la demande : au 5e essai faux, le code de réactivation est épuisé.
+    expect((await ctx((tx) => tx.twoFactorRecoveryRequest.findUniqueOrThrow({ where: { id: r.body.id } }))).activationAttempts).toBe(5);
+    await fresh(ids.dir2);
+    const l = await signIn(PH.dir2);
+    expect((await http.post('/api/v1/auth/2fa/reenroll/start').send({ challenge: l.body.challenge, activationCode: ok.body.activationCode })).status).toBe(401);
+    // Un nouveau code est nécessaire : la demande épuisée ne bloque pas une nouvelle demande… une fois expirée.
+    await ctx((tx) => tx.twoFactorRecoveryRequest.update({ where: { id: r.body.id }, data: { activationExpiresAt: new Date(Date.now() - 1000) } }));
+  });
+
+  it('5 bis. compte Direction : seule la plateforme valide, et pas le Super Admin qui a ouvert la demande quand ils sont deux', async () => {
+    await enable2fa('dir1');
+    const r = await as('direction').post('/recovery-requests', { userId: ids.dir1, reason: 'Téléphone perdu en mission', identityCheck: 'CONNAISSANCE_PERSONNELLE' });
+    expect(r.status).toBe(201);
+    expect(r.body.requiresPlatform).toBe(true);
+    // Une autre direction de l'école ne peut pas valider la récupération d'un compte Direction.
+    expect((await as('direction').post(`/recovery-requests/${r.body.id}/approve`, { note: 'Vu, ok' })).status).toBe(403);
+    const queue = await http.get('/api/v1/platform/recovery-requests').set('Cookie', pa.a);
+    expect(queue.status).toBe(200);
+    expect(queue.body.some((q: any) => q.id === r.body.id && q.tenantSlug === 'saint-kisito')).toBe(true);
+    expect(JSON.stringify(queue.body)).not.toMatch(/activationHash/);
+    // Demande ouverte par le Super Admin A : A ne peut pas la valider lui-même, B si.
+    expect((await http.post(`/api/v1/platform/tenants/${tid}/recovery-requests/${r.body.id}/reject`).set('Cookie', pa.a).send({ note: 'Refaite par la plateforme' })).status).toBe(201);
+    const accounts = await http.get(`/api/v1/platform/tenants/${tid}/recovery-accounts`).set('Cookie', pa.a);
+    const acc = accounts.body.find((x: any) => x.id === ids.dir1);
+    expect(acc.identifier).not.toBe(PH.dir1);
+    const p = await http.post(`/api/v1/platform/tenants/${tid}/recovery-requests`).set('Cookie', pa.a).send({ userId: ids.dir1, reason: 'Appel du directeur au numéro connu', identityCheck: 'RAPPEL_NUMERO_CONNU' });
+    expect(p.status).toBe(201);
+    expect((await http.post(`/api/v1/platform/tenants/${tid}/recovery-requests/${p.body.id}/approve`).set('Cookie', pa.a).send({ note: 'Moi-même' })).status).toBe(403);
+    const ok = await http.post(`/api/v1/platform/tenants/${tid}/recovery-requests/${p.body.id}/approve`).set('Cookie', pa.b).send({ note: 'Validé par le second Super Admin' });
+    expect(ok.status).toBe(201);
+    shown.push(ok.body.activationCode);
+    await fresh(ids.dir1);
+    expect((await reenroll('dir1', ok.body.activationCode)).accessToken).toBeTruthy();
+    const logs = await admin.platformAuditLog.findMany({ where: { action: { startsWith: 'platform.recovery.' }, tenantId: tid } });
+    expect(logs.map((l) => l.action)).toEqual(expect.arrayContaining(['platform.recovery.requested', 'platform.recovery.approved', 'platform.recovery.rejected']));
+  });
+
+  it('9. isolation entre écoles : ni demande ni validation sur le compte d’une autre école', async () => {
+    const other = await admin.tenant.findUniqueOrThrow({ where: { slug: 'autre-ecole' } });
+    const foreignId = await inTenant('autre-ecole', async (tx) => {
+      await tx.user.deleteMany({ where: { phone: '+2290190009199' } });
+      return (await tx.user.create({ data: { tenantId: other.id, firstName: 'Ailleurs', lastName: 'Recup', phone: '+2290190009199', passwordHash: 'x', totpEnabled: true, totpSecret: 'chiffré-fictif' } })).id;
+    });
+    const fr = await http.post(`/api/v1/platform/tenants/${other.id}/recovery-requests`).set('Cookie', pa.a).send({ userId: foreignId, reason: 'Test isolation', identityCheck: 'AUTRE' });
+    expect(fr.status).toBe(201);
+    // Depuis Saint Kisito : le compte et la demande de l'autre école sont introuvables.
+    expect((await as('direction').post('/recovery-requests', { userId: foreignId, reason: 'Pas mon école', identityCheck: 'PIECE_IDENTITE' })).status).toBe(404);
+    expect((await as('direction').post(`/recovery-requests/${fr.body.id}/approve`, { note: 'Intrusion' })).status).toBe(404);
+    expect((await as('direction').post(`/recovery-requests/${fr.body.id}/reject`, { note: 'Intrusion' })).status).toBe(404);
+    expect((await as('direction').get('/recovery-requests')).body.some((x: any) => x.id === fr.body.id)).toBe(false);
+    // Le Super Admin non plus ne peut pas viser la demande d'une école par l'adresse d'une autre.
+    expect((await http.post(`/api/v1/platform/tenants/${tid}/recovery-requests/${fr.body.id}/approve`).set('Cookie', pa.b).send({ note: 'Mauvaise école' })).status).toBe(404);
+    expect((await http.get(`/api/v1/platform/tenants/${tid}/recovery-accounts`).set('Cookie', pa.a)).body.some((x: any) => x.id === foreignId)).toBe(false);
+    // Dans la base : pas de code d'une école rattaché au compte d'une autre, et rien de visible d'une école à l'autre.
+    await expect(app_.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tid}, true)`;
+      await tx.recoveryCode.create({ data: { tenantId: tid, userId: foreignId, codeHash: 'f'.repeat(64) } });
+    })).rejects.toBeTruthy();
+    const seen = await app_.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tid}, true)`;
+      return tx.twoFactorRecoveryRequest.findMany({ where: { id: fr.body.id } });
+    });
+    expect(seen).toHaveLength(0);
+    await expect(app_.$queryRaw`SELECT count(*) FROM platform_recovery_codes`).rejects.toThrow();
+    await http.post(`/api/v1/platform/tenants/${other.id}/recovery-requests/${fr.body.id}/reject`).set('Cookie', pa.b).send({ note: 'Fin du test' }).expect(201);
+  });
+
+  it('7. Super Admin : code de récupération, puis procédure exceptionnelle (téléphone et codes perdus)', async () => {
+    const email = PA.a;
+    const setup = await http.post('/api/v1/platform/auth/2fa/setup').set('Cookie', pa.a).send({});
+    const en = await http.post('/api/v1/platform/auth/2fa/enable').set('Cookie', pa.a).send({ code: authenticator.generate(setup.body.secret), setupToken: setup.body.setupToken });
+    expect(en.status).toBe(201);
+    expect(en.body.recoveryCodes).toHaveLength(10);
+    shown.push(...en.body.recoveryCodes);
+    const step1 = await http.post('/api/v1/platform/auth/login').send({ email, password: PA_PW });
+    expect(step1.body.twoFactorRequired).toBe(true);
+    const rc = await http.post('/api/v1/platform/auth/2fa/recovery').send({ challenge: step1.body.challenge, code: en.body.recoveryCodes[0] });
+    expect(rc.status).toBe(201);
+    expect(rc.body.recoveryCodesRemaining).toBe(9);
+    const live = pcookie(rc);
+    expect((await http.post('/api/v1/platform/auth/2fa/recovery').send({ challenge: step1.body.challenge, code: en.body.recoveryCodes[0] })).status).toBe(401);
+    const before = await admin.platformAdmin.findUniqueOrThrow({ where: { email } });
+    // Sans opérateur ni motif, la commande refuse de toucher au compte.
+    expect(() => execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email}`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'pipe' })).toThrow();
+    expect((await admin.platformAdmin.findUniqueOrThrow({ where: { email } })).passwordHash).toBe(before.passwordHash);
+    const out = execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} --operateur "Opérateur fictif" --motif "Téléphone et codes perdus (test)"`, { env: process.env, cwd: `${__dirname}/..` }).toString();
+    const temp = out.match(/une seule fois\) : (\S+)/)![1];
+    const after = await admin.platformAdmin.findUniqueOrThrow({ where: { email } });
+    expect(after).toMatchObject({ totpEnabled: false, totpSecret: null, mustSetupTwoFactor: true, mustChangePassword: true });
+    expect(await admin.platformRecoveryCode.count({ where: { adminId: after.id } })).toBe(0);
+    expect((await http.get('/api/v1/platform/me').set('Cookie', live)).status).toBe(401);
+    const log = await admin.platformAuditLog.findFirstOrThrow({ where: { adminId: after.id, action: 'platform.admin.reset_cli' }, orderBy: { createdAt: 'desc' } });
+    expect(log.data).toMatchObject({ operator: 'Opérateur fictif', reason: 'Téléphone et codes perdus (test)' });
+    expect(JSON.stringify(log.data)).not.toContain(temp);
+    // Connexion avec le mot de passe provisoire : seul le compte répond tant que la 2FA n'est pas refaite.
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash(PA_PW), mustChangePassword: false } });
+    const c = pcookie(await http.post('/api/v1/platform/auth/login').send({ email, password: PA_PW }));
+    expect((await http.get('/api/v1/platform/tenants').set('Cookie', c)).status).toBe(403);
+    expect((await http.get('/api/v1/platform/me').set('Cookie', c)).body.mustSetupTwoFactor).toBe(true);
+    const s2 = await http.post('/api/v1/platform/auth/2fa/setup').set('Cookie', c).send({});
+    expect(s2.status).toBe(201);
+    const e2 = await http.post('/api/v1/platform/auth/2fa/enable').set('Cookie', c).send({ code: authenticator.generate(s2.body.secret), setupToken: s2.body.setupToken });
+    expect(e2.status).toBe(201);
+    shown.push(...e2.body.recoveryCodes);
+    expect((await http.get('/api/v1/platform/tenants').set('Cookie', c)).status).toBe(200);
+    pa.a = c;
+  });
+
+  it('aucun code ni secret dans le journal, les notifications ou les SMS', async () => {
+    expect(shown.length).toBeGreaterThan(50);
+    const bare = shown.map((s) => s.replace('-', ''));
+    const school = await ctx(async (tx) => [
+      ...(await tx.auditLog.findMany({ where: { createdAt: { gt: new Date(Date.now() - 3600000) } } })).map((r) => JSON.stringify(r)),
+      ...(await tx.notification.findMany({ where: { kind: 'securite' } })).map((r) => `${r.title} ${r.body}`),
+    ]);
+    const platform = (await admin.platformAuditLog.findMany({ where: { createdAt: { gt: new Date(Date.now() - 3600000) } } })).map((r) => JSON.stringify(r));
+    const sms = consoleSms.sent.map((m) => m.text);
+    const haystack = [...school, ...platform, ...sms].join('\n').toUpperCase();
+    for (const c of [...shown, ...bare]) expect(haystack.includes(c)).toBe(false);
+    for (const s of Object.values(secrets)) expect(haystack.includes(s.toUpperCase())).toBe(false);
+    // Les opérations sensibles sont bien journalisées.
+    const actions = await ctx((tx) => tx.auditLog.findMany({ where: { action: { in: ['auth.recovery_code_used', 'auth.recovery_codes_generated', 'security.recovery_requested', 'security.recovery_approved', 'auth.2fa_reenrolled'] } }, select: { action: true } }));
+    expect(new Set(actions.map((a) => a.action)).size).toBe(5);
   });
 });

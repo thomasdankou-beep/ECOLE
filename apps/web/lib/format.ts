@@ -1,5 +1,13 @@
+/** Libellé de la monnaie de l'école connectée : FCFA pour les francs CFA (XOF, XAF), sinon son code (GNF…). */
+let currencyLabel = 'FCFA';
+export function setCurrency(code: string | null | undefined) {
+  currencyLabel = !code || code === 'XOF' || code === 'XAF' ? 'FCFA' : code;
+}
+export const currency = () => currencyLabel;
+
+/** Montant dans la monnaie de l'école (le nom est resté « fcfa » : la plupart des écoles sont en franc CFA). */
 export const fcfa = (n: number | null | undefined) =>
-  n === null || n === undefined ? '—' : `${new Intl.NumberFormat('fr-FR').format(Math.round(n)).replace(/ | /g, ' ')} FCFA`;
+  n === null || n === undefined ? '—' : `${new Intl.NumberFormat('fr-FR').format(Math.round(n)).replace(/[\u00a0\u202f]/g, ' ')} ${currencyLabel}`;
 
 export const num = (n: number | string | null | undefined, digits = 2) =>
   n === null || n === undefined || n === '' || Number.isNaN(Number(n))

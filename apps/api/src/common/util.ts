@@ -32,7 +32,7 @@ export function toDate(s: string | Date): Date {
 
 export const isoDay = (d: Date) => d.toISOString().slice(0, 10);
 
-export const fcfa = (n: number) => new Intl.NumberFormat('fr-FR').format(n).replace(/ | /g, ' ') + ' FCFA';
+export const fcfa = (n: number) => new Intl.NumberFormat('fr-FR').format(n).replace(/[\u00a0\u202f]/g, ' ') + ' FCFA';
 
 /** Chiffrement applicatif AES-256-GCM des champs sensibles (secret 2FA). */
 export function encrypt(plain: string): string {
@@ -51,13 +51,16 @@ export function decrypt(payload: string): string {
   return Buffer.concat([d.update(enc), d.final()]).toString('utf8');
 }
 
-/** Normalise un numéro béninois saisi librement en +229XXXXXXXXXX. */
-export function normalizePhone(raw: string): string {
+/**
+ * Normalise un numéro saisi librement en +<indicatif><numéro>. Sans indicatif, celui du pays de l'école
+ * est ajouté (229 pour le Bénin par défaut).
+ */
+export function normalizePhone(raw: string, dial = '229'): string {
   const digits = raw.replace(/[^\d+]/g, '');
   if (digits.startsWith('+')) return digits;
   if (digits.startsWith('00')) return '+' + digits.slice(2);
-  if (digits.startsWith('229')) return '+' + digits;
-  return '+229' + digits;
+  if (digits.startsWith(dial) && digits.length > dial.length + 7) return '+' + digits;
+  return '+' + dial + digits;
 }
 
 export function fullName(p: { firstName: string; lastName: string }) {

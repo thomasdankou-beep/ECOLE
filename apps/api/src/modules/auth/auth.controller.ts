@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Header, HttpCode, Param, ParseUUIDPipe, Post, Req, Res } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { IsNotEmpty, IsOptional, IsString, Length, MaxLength } from 'class-validator';
@@ -31,6 +31,24 @@ class ResetDto extends ForgotDto {
 class SetupDto {
   /** Code actuel, exigé quand la double authentification est déjà active (SEC-019). */
   @IsOptional() @IsString() @Length(6, 8) code?: string;
+  /** Jeton remis par une connexion avec un code de récupération : remplace le code de l'ancien téléphone (10 min). */
+  @IsOptional() @IsString() @MaxLength(2000) reconfigureToken?: string;
+}
+class RecoveryLoginDto {
+  @IsString() @IsNotEmpty() @MaxLength(2000) challenge: string;
+  @IsString() @Length(8, 24) code: string;
+}
+class RegenerateDto {
+  @IsString() @Length(6, 8) code: string;
+}
+class ReenrollStartDto {
+  @IsString() @IsNotEmpty() @MaxLength(2000) challenge: string;
+  @IsString() @Length(6, 20) activationCode: string;
+}
+class ReenrollFinishDto {
+  @IsString() @IsNotEmpty() @MaxLength(2000) challenge: string;
+  @IsString() @IsNotEmpty() @MaxLength(2000) setupToken: string;
+  @IsString() @Length(6, 8) code: string;
 }
 class EnableDto {
   @IsString() @Length(6, 8) code: string;
@@ -81,6 +99,33 @@ export class AuthController {
   @HttpCode(200)
   async verify(@Body() dto: TwoFactorDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
     return this.respond(res, await this.auth.verifyTwoFactor(dto.challenge, dto.code, this.meta(req)));
+  }
+
+  /** Téléphone perdu : code de récupération à la place du code de l'application. */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post('2fa/recovery')
+  @HttpCode(200)
+  async recovery(@Body() dto: RecoveryLoginDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    return this.respond(res, await this.auth.verifyRecoveryCode(dto.challenge, dto.code, this.meta(req)));
+  }
+
+  /** Récupération validée par l'établissement : code de réactivation remis en main propre, puis nouveau téléphone. */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post('2fa/reenroll/start')
+  @HttpCode(200)
+  reenrollStart(@Body() dto: ReenrollStartDto, @Req() req: Request) {
+    return this.auth.startReenroll(dto.challenge, dto.activationCode, this.meta(req));
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('2fa/reenroll/finish')
+  @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
+  async reenrollFinish(@Body() dto: ReenrollFinishDto, @Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    return this.respond(res, await this.auth.finishReenroll(dto.challenge, dto.setupToken, dto.code, this.meta(req)));
   }
 
   @Public()
@@ -162,13 +207,30 @@ export class AuthController {
   @HttpCode(200)
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   setup(@CurrentActor() actor: Actor, @Body() dto: SetupDto) {
-    return this.auth.setupTwoFactor(actor, dto.code);
+    return this.auth.setupTwoFactor(actor, dto.code, dto.reconfigureToken);
+  }
+
+  @ApiBearerAuth()
+  @Get('2fa/recovery-codes')
+  recoveryStatus(@CurrentActor() actor: Actor) {
+    return this.auth.recoveryCodesStatus(actor);
+  }
+
+  /** Génère ou régénère les codes de récupération avec le code actuel de l'application. */
+  @ApiBearerAuth()
+  @Post('2fa/recovery-codes')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Header('Cache-Control', 'no-store')
+  regenerate(@CurrentActor() actor: Actor, @Body() dto: RegenerateDto) {
+    return this.auth.regenerateRecoveryCodes(actor, dto.code);
   }
 
   @ApiBearerAuth()
   @AllowPendingPassword()
   @Post('2fa/enable')
   @HttpCode(200)
+  @Header('Cache-Control', 'no-store')
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   enable(@CurrentActor() actor: Actor, @Body() dto: EnableDto) {
     return this.auth.enableTwoFactor(actor, dto.code, dto.setupToken);
