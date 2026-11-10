@@ -12,7 +12,7 @@ import { AuditService, auditSubject, maskIdentifier } from '../../common/audit.s
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
 import { country } from '../../common/country';
-import { createSmsProvider } from '../notifications/sms.provider';
+import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { NotificationsService } from '../notifications/notifications.service';
 import { generateRecoveryCodes, hashCode, looksLikeActivationCode, looksLikeRecoveryCode } from './recovery-codes';
 
@@ -441,7 +441,7 @@ export class AuthService {
       await tx.otpCode.create({
         data: { tenantId: tenant.id, userId: user.id, purpose: 'PASSWORD_RESET', codeHash: sha256(code), expiresAt: new Date(Date.now() + config.security.otpTtlMinutes * 60000) },
       });
-      await this.sms.send(user.phone, `${tenant.shortName ?? tenant.name} : votre code de réinitialisation est ${code}. Il expire dans ${config.security.otpTtlMinutes} minutes. Ne le communiquez à personne.`);
+      await sendQuietly(this.sms, user.phone, `${tenant.shortName ?? tenant.name} : votre code de réinitialisation est ${code}. Il expire dans ${config.security.otpTtlMinutes} minutes. Ne le communiquez à personne.`, tenant.settings);
     });
     return { ok: true };
   }

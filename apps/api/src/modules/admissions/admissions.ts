@@ -9,7 +9,7 @@ import { PrismaService } from '../../common/prisma.service';
 import { nextNumber, normalizePhone, pad, toDate } from '../../common/util';
 import { country } from '../../common/country';
 import { NotificationsService } from '../notifications/notifications.service';
-import { createSmsProvider } from '../notifications/sms.provider';
+import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { config } from '../../config';
 
 class ApplicationDto {
@@ -57,7 +57,7 @@ export class AdmissionsService {
       await this.notifications.notify(tx, tenant.id, staff.map((s) => s.userId), {
         kind: 'application', title: 'Nouvelle pré-inscription', body: `${dto.studentFirstName} ${dto.studentLastName} · ${dto.wantedLevel}${dto.wantedTrack ? ` · ${dto.wantedTrack}` : ''}`, data: { applicationId: a.id }, smsMode: 'none',
       });
-      await this.sms.send(phone, `${tenant.shortName ?? tenant.name} : pré-inscription de ${dto.studentFirstName} reçue (réf. ${reference}). Le secrétariat vous recontactera.`);
+      await sendQuietly(this.sms, phone, `${tenant.shortName ?? tenant.name} : pré-inscription de ${dto.studentFirstName} reçue (réf. ${reference}). Le secrétariat vous recontactera.`, tenant.settings);
       return { reference };
     });
   }
@@ -77,7 +77,7 @@ export class AdmissionsService {
       const a = await tx.application.update({ where: { id }, data: dto });
       if (dto.status !== 'RECU' && dto.status !== 'INSCRIT') {
         const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
-        await this.sms.send(a.guardianPhone, `${tenant.shortName ?? tenant.name} : la demande de ${a.studentFirstName} (réf. ${a.reference}) est ${STATUS_LABEL[dto.status]}.`);
+        await sendQuietly(this.sms, a.guardianPhone, `${tenant.shortName ?? tenant.name} : la demande de ${a.studentFirstName} (réf. ${a.reference}) est ${STATUS_LABEL[dto.status]}.`, tenant.settings);
       }
       await this.audit.log(tx, actor, 'application.reviewed', 'Application', id, dto);
       return a;

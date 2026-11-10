@@ -10,7 +10,7 @@ import { assertOwned } from '../../common/ownership';
 import { toDate } from '../../common/util';
 import { country, schoolOperators, tenantPhone } from '../../common/country';
 import { hashPassword } from '../auth/auth.service';
-import { createSmsProvider } from '../notifications/sms.provider';
+import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { FilesService } from '../files/files.service';
 import { config, tenantOrigin } from '../../config';
 import {
@@ -210,6 +210,8 @@ export class SettingsService {
         incoming.notifications = { absenceSms: pick('absenceSms'), paymentSms: pick('paymentSms'), smsAlways: pick('smsAlways') };
       }
       if ('demo' in incoming) delete incoming.demo;
+      // Le nom d'expéditeur SMS est enregistré chez le fournisseur : seul le Super Admin le change.
+      if ('smsSender' in incoming) delete incoming.smsSender;
       if (incoming.public) incoming.public = publicTexts(incoming.public, (current as any).public);
       const merged = tenantSettings({ ...(t.settings as object), ...incoming });
       const rename = {
@@ -629,6 +631,6 @@ export class SettingsService {
   async sendCredentials(tx: Tx, actor: Actor, phone: string, password: string) {
     const tenant = await tx.tenant.findUnique({ where: { id: actor.tenantId } });
     if (!tenant) throw new NotFoundException();
-    await this.sms.send(phone, `${tenant.shortName ?? tenant.name} : votre compte est prêt. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Connectez-vous sur ${tenantOrigin(tenant)}/connexion`);
+    await sendQuietly(this.sms, phone, `${tenant.shortName ?? tenant.name} : votre compte est prêt. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Connectez-vous sur ${tenantOrigin(tenant)}/connexion`, tenant.settings);
   }
 }

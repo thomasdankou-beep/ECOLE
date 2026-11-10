@@ -11,7 +11,7 @@ import * as QRCode from 'qrcode';
 import { Prisma, PrismaClient, TenantStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
-import { IsEmail, IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { IsEmail, IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateIf, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
 import { ALLOW_PENDING_PASSWORD, AllowPendingPassword, forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
 import { maskIdentifier } from '../../common/audit.service';
@@ -24,7 +24,7 @@ import { generateRecoveryCodes, hashCode, looksLikeRecoveryCode } from '../auth/
 import {
   approveRecoveryRequest, createRecoveryRequest, Decider, listRecoveryRequests, RecoveryDecisionDto, RecoveryRequestDto, rejectRecoveryRequest,
 } from '../auth/recovery';
-import { createSmsProvider } from '../notifications/sms.provider';
+import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { temporaryPassword } from '../settings/settings.service';
 
 const COOKIE = 'erp_pt';
@@ -67,6 +67,8 @@ export class UpdateTenantDto {
   @IsOptional() @IsIn(CURRENCIES, { message: 'Monnaie non prise en charge' }) currency?: string;
   @IsOptional() @IsString() @MaxLength(60) timezone?: string;
   @IsOptional() @IsString() @MaxLength(4000) platformNotes?: string | null;
+  /// Nom d'expéditeur des SMS de l'école, tel qu'enregistré chez le fournisseur (vide : celui de la plateforme).
+  @IsOptional() @ValidateIf((_, v) => v !== null && v !== '') @Matches(/^(?=.*[A-Za-z])[A-Za-z0-9 .-]{3,11}$/, { message: 'Nom d’expéditeur SMS : 3 à 11 lettres ou chiffres, sans accent' }) smsSender?: string | null;
 }
 
 export class PlatformLoginDto {
@@ -380,7 +382,7 @@ export class PlatformService {
       });
       return {
         id: t.id, slug: t.slug, name: t.name, shortName: t.shortName, country: t.country, currency: t.currency, timezone: t.timezone, status: t.status, domain: t.domain,
-        platformNotes: t.platformNotes, createdAt: t.createdAt, demo: !!(t.settings as any)?.demo, ...stats,
+        platformNotes: t.platformNotes, smsSender: (t.settings as any)?.smsSender ?? null, createdAt: t.createdAt, demo: !!(t.settings as any)?.demo, ...stats,
       };
     }));
   }
@@ -413,7 +415,7 @@ export class PlatformService {
       return u;
     });
     await this.log(actor, 'platform.tenant.created', tenant.id, { slug: dto.slug, name: dto.name, directorId: director.id });
-    await this.sms.send(phone, `Votre espace ${tenant.shortName ?? tenant.name} est prêt : ${tenantOrigin(tenant)}/connexion. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Changez-le à la première connexion.`);
+    await sendQuietly(this.sms, phone, `Votre espace ${tenant.shortName ?? tenant.name} est prêt : ${tenantOrigin(tenant)}/connexion. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Changez-le à la première connexion.`, tenant.settings);
     return { tenant: { id: tenant.id, slug: tenant.slug, name: tenant.name }, director: { identifier: phone, temporaryPassword: password } };
   }
 
@@ -438,10 +440,11 @@ export class PlatformService {
         ...(dto.currency || c ? { currency: dto.currency || c!.currency } : {}),
         ...(dto.timezone || c ? { timezone: dto.timezone || c!.timezone } : {}),
         ...(dto.platformNotes !== undefined ? { platformNotes: dto.platformNotes || null } : {}),
+        ...(dto.smsSender !== undefined ? { settings: { ...((t.settings as object) ?? {}), smsSender: dto.smsSender?.trim() || null } } : {}),
       },
     });
     if (dto.status) forgetSessions({ tenantId: id });
-    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status', 'country', 'currency', 'timezone'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
+    const visible = Object.fromEntries((['name', 'shortName', 'domain', 'status', 'country', 'currency', 'timezone', 'smsSender'] as const).filter((k) => dto[k] !== undefined && dto[k] !== (t as any)[k]).map((k) => [k, dto[k]]));
     if (Object.keys(visible).length) {
       const action = visible.status ? `platform.tenant.${visible.status === 'SUSPENDED' ? 'suspended' : 'reactivated'}` : 'platform.tenant.updated';
       await this.db.inTenant(id, (tx) => this.schoolLog(tx, actor, id, action, 'Tenant', id, visible));
@@ -465,7 +468,7 @@ export class PlatformService {
       return u;
     });
     await this.log(actor, 'platform.tenant.director_reset', id, { userId: user.id });
-    if (user.phone) await this.sms.send(user.phone, `${t.shortName ?? t.name} : votre mot de passe provisoire est ${password}. Changez-le à la connexion.`);
+    if (user.phone) await sendQuietly(this.sms, user.phone, `${t.shortName ?? t.name} : votre mot de passe provisoire est ${password}. Changez-le à la connexion.`, t.settings);
     return { identifier: user.phone ?? user.email, name: `${user.firstName} ${user.lastName}`, temporaryPassword: password };
   }
 

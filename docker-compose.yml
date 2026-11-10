@@ -58,6 +58,10 @@ services:
       CINETPAY_SITE_ID: ${CINETPAY_SITE_ID:-}
       CINETPAY_SECRET_KEY: ${CINETPAY_SECRET_KEY:-}
       SMS_PROVIDER: ${SMS_PROVIDER:-console}
+      # SMS_PROVIDER=bulkgate : identifiants de l'application BulkGate et nom d'expéditeur par défaut (plateforme).
+      BULKGATE_APPLICATION_ID: ${BULKGATE_APPLICATION_ID:-}
+      BULKGATE_APPLICATION_TOKEN: ${BULKGATE_APPLICATION_TOKEN:-}
+      SMS_SENDER: ${SMS_SENDER:-}
       # SEC-044 : texte des SMS « console » dans les journaux, poste de démonstration seulement.
       SMS_CONSOLE_SHOW_TEXT: ${SMS_CONSOLE_SHOW_TEXT:-false}
       # SEC-045 : documentation /api/docs, fermée en production sauf API_DOCS=true.

@@ -184,7 +184,7 @@ Rien de ce qui suit n’a été inventé. Ces points sont signalés dans le code
 **À fournir pour brancher les services externes** :
 
 1. **Prestataire Mobile Money** : contrat et identifiants (CinetPay, PayDunya ou autre). En attendant : mode test.
-2. **Fournisseur SMS** et nom d’expéditeur. En attendant : les SMS sont écrits dans le journal de l’API.
+2. **Fournisseur SMS** : BulkGate est branché (Côte d’Ivoire, Bénin). Dans `.env` du serveur : `SMS_PROVIDER=bulkgate`, `BULKGATE_APPLICATION_ID`, `BULKGATE_APPLICATION_TOKEN` (portail BulkGate, Simple API), et `SMS_SENDER` une fois le nom d’expéditeur validé par les opérateurs. Le nom propre à chaque école se saisit dans le Super Admin (fiche de l’école). Sans ces réglages : fournisseur « console », aucun SMS ne part.
 3. **Facturation normalisée e-MECeF** (DGI Bénin) : identifiants et raccordement ; les reçus actuels sont non fiscaux.
 4. Nom de domaine de la plateforme (et des écoles qui ont le leur) et hébergement de production.
 5. Tarifs et facturation des abonnements des écoles clientes : non construits, à définir avant la vente.

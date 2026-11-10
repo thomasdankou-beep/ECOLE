@@ -11,7 +11,7 @@ import { pf } from '@/lib/platform';
 type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; mustSetupTwoFactor?: boolean; platformDomain: string | null };
 type Tenant = {
   id: string; slug: string; name: string; shortName: string | null; country: string; currency: string; timezone: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
-  platformNotes: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
+  platformNotes: string | null; smsSender: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
 };
 type Audit = { id: string; action: string; tenantId: string | null; createdAt: string; data: unknown; adminName: string | null; ip: string | null };
 type Secret = { title: string; school: string; identifier: string; password: string };
@@ -323,7 +323,7 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
 }
 
 function EditDialog({ t, done }: { t: Tenant; done: () => void }) {
-  const [f, setF] = useState({ name: t.name, shortName: t.shortName ?? '', domain: t.domain ?? '', platformNotes: t.platformNotes ?? '' });
+  const [f, setF] = useState({ name: t.name, shortName: t.shortName ?? '', domain: t.domain ?? '', platformNotes: t.platformNotes ?? '', smsSender: t.smsSender ?? '' });
   const countries = useCountries();
   const [loc, setLoc] = useState<Locale>({ country: t.country, currency: t.currency, timezone: t.timezone });
   const [error, setError] = useState<unknown>(null);
@@ -335,7 +335,7 @@ function EditDialog({ t, done }: { t: Tenant; done: () => void }) {
         setBusy(true);
         setError(null);
         try {
-          await pf('PATCH', `/tenants/${t.id}`, { name: f.name, shortName: f.shortName || null, domain: f.domain || null, platformNotes: f.platformNotes || null, ...loc });
+          await pf('PATCH', `/tenants/${t.id}`, { name: f.name, shortName: f.shortName || null, domain: f.domain || null, platformNotes: f.platformNotes || null, smsSender: f.smsSender.trim() || null, ...loc });
           done();
         } catch (err) {
           setError(err);
@@ -347,6 +347,7 @@ function EditDialog({ t, done }: { t: Tenant; done: () => void }) {
         <Field label="Nom court"><Input value={f.shortName} onChange={(e) => setF({ ...f, shortName: e.target.value })} maxLength={60} /></Field>
         <LocaleFields value={loc} onChange={setLoc} countries={countries} />
         <Field label="Nom de domaine propre"><Input value={f.domain} onChange={(e) => setF({ ...f, domain: e.target.value })} maxLength={120} /></Field>
+        <Field label="Nom d’expéditeur des SMS" hint="Tel qu’enregistré chez le fournisseur SMS (11 caractères au plus, sans accent, ex. ST KISITO). Vide : nom de la plateforme. Ne le saisissez qu’une fois validé par les opérateurs."><Input value={f.smsSender} onChange={(e) => setF({ ...f, smsSender: e.target.value })} maxLength={11} placeholder="ST KISITO" /></Field>
         <Field label="Notes internes" hint="Visibles seulement ici : contact, contrat, remarques."><Textarea value={f.platformNotes} onChange={(e) => setF({ ...f, platformNotes: e.target.value })} rows={3} maxLength={4000} /></Field>
         <ErrorNote error={error} />
         <Button type="submit" loading={busy}>Enregistrer</Button>

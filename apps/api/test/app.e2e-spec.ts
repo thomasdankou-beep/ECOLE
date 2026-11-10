@@ -563,6 +563,18 @@ describe('Plateforme : plusieurs écoles sur un même serveur', () => {
     expect(audit.body.map((a: any) => a.action)).toEqual(expect.arrayContaining(['platform.tenant.created', 'platform.tenant.suspended', 'platform.tenant.reactivated']));
   });
 
+  it("le nom d'expéditeur SMS de l'école se règle par le Super Admin seulement", async () => {
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ smsSender: 'Nom bien trop long' })).status).toBe(400);
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ smsSender: 'ST KISITO' })).status).toBe(200);
+    const row = (await http.get('/api/v1/platform/tenants').set('Cookie', cookie)).body.find((t: any) => t.id === tenantId);
+    expect(row.smsSender).toBe('ST KISITO');
+    // La direction de l'école ne peut pas le remplacer par ses propres paramètres.
+    await as('direction').patch('/settings', { settings: { smsSender: 'PIRATE' } }).expect(200);
+    const own = await admin.tenant.findUniqueOrThrow({ where: { slug: 'saint-kisito' } });
+    expect((own.settings as any).smsSender).toBeUndefined();
+    expect((await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ smsSender: '' })).status).toBe(200);
+  });
+
   it("trouve l'école d'après l'adresse : domaine propre, sinon école par défaut", async () => {
     await http.patch(`/api/v1/platform/tenants/${tenantId}`).set('Cookie', cookie).send({ domain: `${slug}.example.org` });
     expect((await http.get(`/api/v1/platform/resolve?host=${slug}.example.org`)).body.slug).toBe(slug);

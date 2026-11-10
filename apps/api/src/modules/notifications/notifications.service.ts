@@ -4,7 +4,7 @@ import { Queue, Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { config } from '../../config';
 import { PrismaService, Tx } from '../../common/prisma.service';
-import { SmsProvider, createSmsProvider } from './sms.provider';
+import { SmsProvider, createSmsProvider, schoolSender } from './sms.provider';
 import { smsSegments } from './sms-text';
 
 export interface NotifyInput {
@@ -139,8 +139,9 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         await tx.smsMessage.update({ where: { id: sms.id }, data: { status: 'FAILED', error: 'Aucun numéro de téléphone' } });
         return;
       }
+      const tenant = await tx.tenant.findUnique({ where: { id: job.tenantId }, select: { settings: true } });
       try {
-        await this.sms.send(sms.phone, sms.body);
+        await this.sms.send(sms.phone, sms.body, { sender: schoolSender(tenant?.settings) });
         await tx.smsMessage.update({ where: { id: sms.id }, data: { status: 'SENT', sentAt: new Date() } });
       } catch (e: any) {
         await tx.smsMessage.update({ where: { id: sms.id }, data: { status: 'FAILED', error: String(e.message).slice(0, 500) } });
