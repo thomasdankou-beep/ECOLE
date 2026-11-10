@@ -303,7 +303,7 @@ async function wipe(tenantId: string) {
     const guarded = ['audit_logs', 'receipts', 'payments', 'grades'];
     for (const t of guarded) await tx.$executeRawUnsafe(`ALTER TABLE ${t} DISABLE TRIGGER USER`);
     const tables = [
-      'notifications', 'announcements', 'documents', 'receipts', 'payments', 'invoice_items', 'invoices', 'fee_types', 'cash_closings',
+      'notifications', 'sms_messages', 'announcements', 'documents', 'receipts', 'payments', 'invoice_items', 'invoices', 'fee_types', 'cash_closings',
       'report_card_items', 'report_cards', 'report_card_runs', 'appreciations', 'grades', 'assessments', 'attendance_records', 'attendance_sessions',
       'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'student_files', 'public_honors', 'annual_decisions', 'teacher_assignments', 'teacher_subjects', 'class_subjects', 'enrollments', 'student_guardians',
       'applications', 'guardians', 'students', 'otp_codes', 'sessions', 'user_roles', 'classes', 'users', 'rooms', 'subjects', 'tracks', 'levels',

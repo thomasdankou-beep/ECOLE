@@ -8,9 +8,10 @@ import { assertOwned } from '../../common/ownership';
 import { fcfa, isoDay, nextNumber, pad, toDate, verifyCode } from '../../common/util';
 import { money, tenantLocale, tenantToday } from '../../common/country';
 import { NotificationsService } from '../notifications/notifications.service';
+import { paymentSms, toGsm } from '../notifications/sms-text';
 import { BatchInvoiceDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto } from './finance.dto';
 import { FilesService } from '../files/files.service';
-import { schoolIdentity } from '../settings/settings.service';
+import { schoolIdentity, tenantSettings } from '../settings/settings.service';
 
 const METHOD_LABEL: Record<string, string> = {
   CASH: 'Espèces', CHEQUE: 'Chèque', TRANSFER: 'Virement', MOBILE_MONEY_DESK: 'Mobile Money (au bureau)', ONLINE: 'Paiement en ligne',
@@ -253,15 +254,24 @@ export class FinanceService {
       },
     });
     await this.audit.log(tx, actor, 'payment.confirmed', 'Payment', payment.id, { tenantId: payment.tenantId, amount: payment.amount, method: payment.method, receipt: number });
-    const parents = await this.notifications.guardianUserIds(tx, inv.studentId);
     const left = inv.total - paid;
-    await this.notifications.notify(tx, payment.tenantId, parents, {
+    // SMS comme sur les reçus papier : total à payer de l'élève (toutes ses factures), déjà payé, reste.
+    const t = await tx.tenant.findUniqueOrThrow({ where: { id: payment.tenantId }, select: { settings: true, timezone: true } });
+    const prefs = tenantSettings(t.settings).notifications;
+    const sums = await tx.invoice.aggregate({ where: { studentId: inv.studentId, status: { not: 'CANCELLED' } }, _sum: { total: true, paid: true } });
+    const enr = await tx.enrollment.findFirst({ where: { studentId: inv.studentId, status: 'ACTIVE' }, orderBy: { enrolledAt: 'desc' }, select: { class: { select: { name: true } } } });
+    await this.notifications.notifyFamily(tx, payment.tenantId, {
+      studentId: inv.studentId,
       kind: 'payment',
       title: 'Paiement reçu',
       body: `Paiement de ${fcfa(payment.amount)} reçu pour ${inv.student.firstName} (${inv.label}). Reçu ${number}. ${left > 0 ? `Reste à payer : ${fcfa(left)}.` : 'Facture soldée.'}`,
-      sms: `Paiement de ${fcfa(payment.amount)} reçu pour ${inv.student.firstName}. Reçu ${number}.`,
+      sms: paymentSms({
+        date: payment.confirmedAt ?? new Date(), timeZone: t.timezone, amount: payment.amount, pupil: inv.student, className: enr?.class.name ?? null,
+        total: sums._sum.total ?? inv.total, paid: sums._sum.paid ?? paid,
+      }),
       data: { receiptId: receipt.id, invoiceId: inv.id },
-      smsMode: 'fallback',
+      sendSms: prefs.paymentSms,
+      smsAlways: prefs.smsAlways,
     });
     return receipt;
   }
@@ -424,13 +434,14 @@ export class FinanceService {
       for (const { student } of enr) {
         const due = balances.get(student.id) ?? 0;
         if (due <= 0) continue;
-        const parents = await this.notifications.guardianUserIds(tx, student.id);
-        families += await this.notifications.notify(tx, actor.tenantId, parents, {
+        families += await this.notifications.notifyFamily(tx, actor.tenantId, {
+          studentId: student.id,
           kind: 'reminder',
           title: 'Rappel de paiement',
           body: `Il reste ${fcfa(due)} à régler pour la scolarité de ${student.firstName}. Vous pouvez payer par Mobile Money depuis votre espace parent (référence ${student.matricule}).`,
-          sms: `Rappel : il reste ${fcfa(due)} a regler pour ${student.firstName}. Ref ${student.matricule}.`,
-          smsMode: 'immediate',
+          sms: toGsm(`Rappel : il reste ${fcfa(due)} à régler pour ${student.firstName}. Réf. ${student.matricule}.`),
+          sendSms: true,
+          smsAlways: true,
         });
       }
       await this.audit.log(tx, actor, 'finance.reminders_sent', 'Invoice', null, { classId: dto.classId, families });

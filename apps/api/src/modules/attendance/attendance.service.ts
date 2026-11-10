@@ -8,6 +8,7 @@ import { isoDay, toDate } from '../../common/util';
 import { tenantToday } from '../../common/country';
 import { FilesService } from '../files/files.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { absenceSms } from '../notifications/sms-text';
 import { tenantSettings } from '../settings/settings.service';
 import { hhmm } from '../timetable/timetable.service';
 
@@ -89,7 +90,12 @@ export class AttendanceService {
 
       const subject = input.classSubjectId ? (await tx.classSubject.findUnique({ where: { id: input.classSubjectId }, include: { subject: true } }))?.subject.name : null;
       const tenant = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });
-      const smsOn = tenantSettings(tenant.settings).notifications.absenceSms;
+      const prefs = tenantSettings(tenant.settings).notifications;
+      const className = (await tx.class.findUnique({ where: { id: input.classId }, select: { name: true } }))?.name ?? null;
+      // Fin du cours d'après l'emploi du temps (10h30-12h20), si le créneau y figure.
+      const slot = input.classSubjectId
+        ? await tx.timetableSlot.findFirst({ where: { classSubjectId: input.classSubjectId, dayOfWeek: date.getUTCDay() === 0 ? 7 : date.getUTCDay(), startMinute: input.startMinute }, select: { endMinute: true } })
+        : null;
       let notified = 0;
       for (const r of input.records) {
         await tx.attendanceRecord.upsert({
@@ -98,18 +104,20 @@ export class AttendanceService {
           update: { status: r.status, minutesLate: r.status === 'LATE' ? r.minutesLate ?? null : null },
         });
         if (r.status !== 'PRESENT' && before.get(r.studentId) !== r.status) {
-          const st = await tx.student.findUniqueOrThrow({ where: { id: r.studentId }, select: { firstName: true } });
+          const st = await tx.student.findUniqueOrThrow({ where: { id: r.studentId }, select: { firstName: true, lastName: true, sex: true } });
           const course = subject ? `en ${subject}` : 'en cours';
           const msg = r.status === 'ABSENT'
             ? `${st.firstName} est absent(e) ${course} ce ${date.toLocaleDateString('fr-FR', { weekday: 'long', timeZone: 'UTC' })} à ${hhmm(input.startMinute)}.`
             : `${st.firstName} est arrivé(e) en retard ${course}${r.minutesLate ? ` (${r.minutesLate} min)` : ''}.`;
-          notified += await this.notifications.notify(tx, actor.tenantId, await this.notifications.guardianUserIds(tx, r.studentId), {
+          notified += await this.notifications.notifyFamily(tx, actor.tenantId, {
+            studentId: r.studentId,
             kind: r.status === 'ABSENT' ? 'absence' : 'late',
             title: r.status === 'ABSENT' ? 'Absence' : 'Retard',
             body: `${msg} Vous pouvez justifier depuis votre espace parent.`,
-            sms: `${msg} Justifiez depuis l'application.`,
-            data: { studentId: r.studentId, sessionId: session.id },
-            smsMode: smsOn && r.status === 'ABSENT' ? 'fallback' : 'none',
+            sms: absenceSms({ date, pupil: st, className, subject, startMinute: input.startMinute, endMinute: slot?.endMinute ?? null }),
+            data: { sessionId: session.id },
+            sendSms: prefs.absenceSms && r.status === 'ABSENT',
+            smsAlways: prefs.smsAlways,
           });
         }
       }

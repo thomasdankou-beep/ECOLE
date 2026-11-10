@@ -33,7 +33,9 @@ export const DEFAULT_SETTINGS = {
   },
   /// Bloquer l'accès au bulletin en ligne en cas d'impayé (option CDC §3.3), désactivé par défaut.
   blockReportCardIfUnpaid: false,
-  notifications: { absenceSms: true },
+  /// SMS aux familles. absenceSms : à chaque absence à l'appel ; paymentSms : à chaque paiement encaissé ;
+  /// smsAlways : SMS même si le parent a vu la notification dans l'application (sinon SMS seulement si non lue après 10 min).
+  notifications: { absenceSms: true, paymentSms: true, smsAlways: true },
   /// Identité officielle imprimée sur les documents : saisie par la direction, jamais pré-remplie.
   identity: {
     authorization: '',
@@ -201,6 +203,11 @@ export class SettingsService {
         if (!Array.isArray(ops)) throw new BadRequestException('Liste des opérateurs invalide');
         const operators = [...new Set(ops.map((x) => (typeof x === 'string' ? x.trim().slice(0, 40) : '')).filter(Boolean))].slice(0, 10);
         incoming.payments = { operators };
+      }
+      if (incoming.notifications) {
+        const n = incoming.notifications as Record<string, unknown>;
+        const pick = (k: 'absenceSms' | 'paymentSms' | 'smsAlways') => (typeof n[k] === 'boolean' ? (n[k] as boolean) : current.notifications[k]);
+        incoming.notifications = { absenceSms: pick('absenceSms'), paymentSms: pick('paymentSms'), smsAlways: pick('smsAlways') };
       }
       if ('demo' in incoming) delete incoming.demo;
       if (incoming.public) incoming.public = publicTexts(incoming.public, (current as any).public);

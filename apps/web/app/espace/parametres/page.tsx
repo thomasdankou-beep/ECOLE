@@ -16,7 +16,7 @@ import { Honneur } from './honneur';
 import { ImageEcole, type PublicTexts } from './image';
 
 type Settings = {
-  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; country: string; countryName: string; currency: string; timezone: string; operators: string[]; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean }; identity: IdentitySettings } };
+  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; country: string; countryName: string; currency: string; timezone: string; operators: string[]; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean; paymentSms: boolean; smsAlways: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean; photoUrl: string | null }[];
@@ -435,7 +435,13 @@ function Rules({ s, reload }: { s: Settings; reload: () => void }) {
       <Field label="Moyenne annuelle pour passer en classe supérieure" hint="Saisie par l’école. Au-dessus ou égale : « Admis » proposé ; en dessous : « Non admis ». Laissez vide pour ne rien proposer ; la direction arrête toujours la décision finale.">
         <Input type="number" min={0} max={20} step={0.25} placeholder="Ex. 10" value={r.grading.passMark ?? ''} onChange={(e) => setR({ ...r, grading: { ...r.grading, passMark: e.target.value === '' ? null : Number(e.target.value) } })} className="max-w-40" />
       </Field>
-      <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={r.notifications.absenceSms} onChange={(e) => setR({ ...r, notifications: { ...r.notifications, absenceSms: e.target.checked } })} /> Prévenir les parents par SMS si l’absence n’est pas vue dans l’application</label>
+      <fieldset className="grid gap-1 rounded-xl border border-line p-3">
+        <legend className="px-1 text-sm font-bold">SMS aux parents</legend>
+        <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={r.notifications.paymentSms} onChange={(e) => setR({ ...r, notifications: { ...r.notifications, paymentSms: e.target.checked } })} /> SMS à chaque paiement (montant, net à payer, payé, reste)</label>
+        <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={r.notifications.absenceSms} onChange={(e) => setR({ ...r, notifications: { ...r.notifications, absenceSms: e.target.checked } })} /> SMS à chaque absence (matière et heure du cours)</label>
+        <label className="flex min-h-11 items-center gap-3"><input type="checkbox" className="size-5" checked={r.notifications.smsAlways} onChange={(e) => setR({ ...r, notifications: { ...r.notifications, smsAlways: e.target.checked } })} /> Envoyer le SMS même si le parent a vu la notification dans l’application</label>
+        <p className="text-xs text-muted">Le SMS part au numéro du responsable inscrit dans la fiche de l’élève, même s’il n’a pas de compte. Sans la dernière case, un parent qui a l’application ne reçoit le SMS que s’il n’a pas lu la notification après 10 minutes. Chaque SMS est payé à l’opérateur : voir le menu « SMS envoyés ».</p>
+      </fieldset>
       <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={r.blockReportCardIfUnpaid} onChange={(e) => setR({ ...r, blockReportCardIfUnpaid: e.target.checked })} /> Suspendre le bulletin en ligne en cas d’impayé</label>
       <Button loading={busy} onClick={async () => { if (await run(() => api.patch('/settings', { settings: { grading: { ...r.grading, distinctions: [...r.grading.distinctions].sort((a, b) => b.min - a.min) }, notifications: r.notifications, blockReportCardIfUnpaid: r.blockReportCardIfUnpaid } }), toast, 'Règles enregistrées')) reload(); }}>Enregistrer</Button>
     </Card>

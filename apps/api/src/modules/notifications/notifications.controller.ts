@@ -1,13 +1,22 @@
-import { Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Actor, CurrentActor } from '../../common/auth';
+import { Actor, Can, CurrentActor } from '../../common/auth';
 import { PrismaService } from '../../common/prisma.service';
+import { NotificationsService } from './notifications.service';
 
 @ApiTags('Notifications')
 @ApiBearerAuth()
 @Controller('notifications')
 export class NotificationsController {
-  constructor(private db: PrismaService) {}
+  constructor(private db: PrismaService, private notifications: NotificationsService) {}
+
+  /** SMS envoyés aux familles sur un mois (par défaut le mois en cours) : direction seulement. */
+  @Get('sms') @Can('settings.manage')
+  sms(@CurrentActor() actor: Actor, @Query('month') month?: string) {
+    const m = month ?? new Date().toISOString().slice(0, 7);
+    if (!/^20\d\d-(0[1-9]|1[0-2])$/.test(m)) throw new BadRequestException('Mois attendu au format AAAA-MM');
+    return this.notifications.smsLog(actor.tenantId, m);
+  }
 
   @Get()
   list(@CurrentActor() actor: Actor, @Query('unread') unread?: string) {

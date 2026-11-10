@@ -195,9 +195,14 @@ describe('Appel et absences (CDC §4.3)', () => {
     const notifs = await as('parent').get('/notifications');
     expect(notifs.body.items[0].body).toMatch(/Koffi est absent/);
 
-    // Non lue : le SMS de repli part.
-    await new Promise((res) => setTimeout(res, 400));
-    expect(consoleSms.sent.some((m) => m.to === PHONES.parent && /Koffi est absent/.test(m.text))).toBe(true);
+    // SMS au parent, au format des écoles : élève, classe, matière et créneau du cours.
+    await new Promise((res) => setTimeout(res, 900));
+    const absSms = consoleSms.sent.filter((m) => m.to === PHONES.parent && /votre enfant/.test(m.text) && /KOFFI/.test(m.text)).pop();
+    expect(absSms?.text).toMatch(/^Ce lundi 19\/10\/2026, votre enfant .*KOFFI en classe de .+ est absent pendant le cours de .+ de 8h00/);
+    const log = await as('direction').get('/notifications/sms?month=2026-' + new Date().toISOString().slice(5, 7));
+    expect(log.status).toBe(200);
+    expect(log.body.items.some((i: any) => i.kind === 'absence' && i.phone === PHONES.parent && i.status === 'SENT' && i.segments === 1)).toBe(true);
+    expect((await as('teacher').get('/notifications/sms')).status).toBe(403);
 
     const abs = await as('parent').get(`/attendance/absences?studentId=${koffi.id}`);
     const rec = abs.body.find((a: any) => a.status === 'ABSENT');
@@ -261,6 +266,10 @@ describe('Paiement Mobile Money (CDC §4.4, recette 7.3)', () => {
     expect(b.body.duplicate).toBe(true);
     expect(b.body.receipt.id).toBe(a.body.receipt.id);
     expect((await as('comptable').post('/finance/payments/desk', { ...body, idempotencyKey: undefined, amount: 10 ** 9 })).status).toBe(400);
+    // SMS de paiement au responsable, même sans compte Cahiora : net à payer, payé, reste.
+    await new Promise((res) => setTimeout(res, 900));
+    const paySms = consoleSms.sent.filter((m) => /un paiement de 10 000 a été effectué pour/.test(m.text)).pop();
+    expect(paySms?.text).toMatch(/en classe de .+\. NAP: [\d ]+, PAYE: [\d ]+, RESTE: [\d ]+$/);
     // SEC-015 : le comptable demande, le reçu reste valide ; il n'est annulé qu'à la validation de la direction.
     await as('comptable').post(`/finance/receipts/${a.body.receipt.id}/cancel`, { reason: 'Erreur de saisie' }).expect(201);
     expect((await http.get(`/api/v1/public/verify/${a.body.receipt.verifyCode}`)).body).toMatchObject({ valid: true });

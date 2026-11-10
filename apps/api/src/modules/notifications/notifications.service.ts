@@ -5,6 +5,7 @@ import IORedis from 'ioredis';
 import { config } from '../../config';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { SmsProvider, createSmsProvider } from './sms.provider';
+import { smsSegments } from './sms-text';
 
 export interface NotifyInput {
   kind: string;
@@ -20,10 +21,24 @@ export interface NotifyInput {
 
 interface SmsJob {
   tenantId: string;
-  inAppId: string;
-  userId: string;
+  /// SMS lié à une notification de l'application (compte Cahiora du destinataire).
+  inAppId?: string;
+  userId?: string;
+  /// SMS direct vers un numéro (responsable avec ou sans compte), déjà écrit dans sms_messages.
+  smsId?: string;
   text: string;
   mode: 'fallback' | 'immediate';
+  /// Nouvelle tentative quand la ligne n'est pas encore visible (transaction pas encore validée).
+  retry?: number;
+}
+
+export interface FamilyNotifyInput extends Omit<NotifyInput, 'smsMode'> {
+  sms: string;
+  /// true : SMS à chaque responsable tout de suite, même s'il a l'application ; false : SMS de repli seulement
+  /// pour ceux qui ont un compte, SMS direct pour ceux qui n'en ont pas. Absent : pas de SMS.
+  smsAlways?: boolean;
+  sendSms: boolean;
+  studentId: string;
 }
 
 const QUEUE = 'notifications';
@@ -98,23 +113,93 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
 
   async processSms(job: SmsJob) {
     await this.db.forTenant(job.tenantId, async (tx) => {
-      const inApp = await tx.notification.findUnique({ where: { id: job.inAppId } });
-      if (!inApp) return;
-      if (job.mode === 'fallback' && inApp.readAt) return; // lue dans l'application : pas de SMS payant
-      const user = await tx.user.findUnique({ where: { id: job.userId }, select: { phone: true } });
-      const sms = await tx.notification.create({
-        data: { tenantId: job.tenantId, userId: job.userId, channel: 'SMS', kind: inApp.kind, title: inApp.title, body: job.text, readAt: new Date() },
-      });
-      if (!user?.phone) {
-        await tx.notification.update({ where: { id: sms.id }, data: { status: 'FAILED', error: 'Aucun numéro de téléphone' } });
+      let sms;
+      if (job.smsId) {
+        sms = await tx.smsMessage.findUnique({ where: { id: job.smsId } });
+        if (!sms) {
+          // Transaction pas encore validée, ou annulée : on réessaie deux fois, puis on abandonne.
+          if ((job.retry ?? 0) < 2) setImmediate(() => this.enqueue({ ...job, retry: (job.retry ?? 0) + 1 }));
+          return;
+        }
+        if (sms.status !== 'QUEUED') return; // déjà traité (tâche rejouée)
+      } else {
+        const inApp = await tx.notification.findUnique({ where: { id: job.inAppId } });
+        if (!inApp) return;
+        if (job.mode === 'fallback' && inApp.readAt) return; // lue dans l'application : pas de SMS payant
+        const user = await tx.user.findUnique({ where: { id: job.userId }, select: { phone: true } });
+        const data = (inApp.data ?? {}) as { studentId?: unknown };
+        sms = await tx.smsMessage.create({
+          data: {
+            tenantId: job.tenantId, userId: job.userId, kind: inApp.kind, phone: user?.phone ?? '', body: job.text, segments: smsSegments(job.text),
+            studentId: typeof data.studentId === 'string' ? data.studentId : null,
+          },
+        });
+      }
+      if (!sms.phone) {
+        await tx.smsMessage.update({ where: { id: sms.id }, data: { status: 'FAILED', error: 'Aucun numéro de téléphone' } });
         return;
       }
       try {
-        await this.sms.send(user.phone, job.text);
-        await tx.notification.update({ where: { id: sms.id }, data: { status: 'SENT', sentAt: new Date() } });
+        await this.sms.send(sms.phone, sms.body);
+        await tx.smsMessage.update({ where: { id: sms.id }, data: { status: 'SENT', sentAt: new Date() } });
       } catch (e: any) {
-        await tx.notification.update({ where: { id: sms.id }, data: { status: 'FAILED', error: String(e.message).slice(0, 500) } });
+        await tx.smsMessage.update({ where: { id: sms.id }, data: { status: 'FAILED', error: String(e.message).slice(0, 500) } });
       }
+    });
+  }
+
+  /**
+   * Prévient les responsables d'un élève (paiement, absence...) : notification dans l'application pour ceux qui ont
+   * un compte, SMS au numéro de la fiche pour tous ceux qui en ont besoin, même sans compte Cahiora.
+   * Renvoie le nombre de responsables prévenus.
+   */
+  async notifyFamily(tx: Tx, tenantId: string, input: FamilyNotifyInput) {
+    const links = await tx.studentGuardian.findMany({ where: { studentId: input.studentId }, select: { guardian: { select: { userId: true, phone: true } } } });
+    const guardians = links.map((l) => l.guardian);
+    const users = guardians.map((g) => g.userId).filter((x): x is string => !!x);
+    const { sendSms, smsAlways, studentId, ...rest } = input;
+    const data = { ...(input.data ?? {}), studentId };
+    await this.notify(tx, tenantId, users, { ...rest, data, smsMode: sendSms && !smsAlways ? 'fallback' : 'none' });
+    let direct: string[] = [];
+    if (sendSms) {
+      direct = guardians.filter((g) => smsAlways || !g.userId).map((g) => g.phone?.trim()).filter((x): x is string => !!x);
+      direct = [...new Set(direct)];
+      const jobs: SmsJob[] = [];
+      for (const phone of direct) {
+        const sms = await tx.smsMessage.create({ data: { tenantId, kind: input.kind, phone, body: input.sms, segments: smsSegments(input.sms), studentId } });
+        jobs.push({ tenantId, smsId: sms.id, text: input.sms, mode: 'immediate' });
+      }
+      setImmediate(() => jobs.forEach((j) => this.enqueue(j)));
+    }
+    return guardians.filter((g) => g.userId || (sendSms && g.phone)).length;
+  }
+
+  /** SMS envoyés aux familles sur un mois (AAAA-MM), pour la direction : liste et nombre de SMS facturés. */
+  smsLog(tenantId: string, month: string) {
+    const [y, m] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(y, m - 1, 1));
+    const to = new Date(Date.UTC(y, m, 1));
+    return this.db.forTenant(tenantId, async (tx) => {
+      const where = { createdAt: { gte: from, lt: to } };
+      const [items, totals] = await Promise.all([
+        tx.smsMessage.findMany({ where, orderBy: { createdAt: 'desc' }, take: 500 }),
+        tx.smsMessage.groupBy({ by: ['status'], where, _count: { _all: true }, _sum: { segments: true } }),
+      ]);
+      const ids = [...new Set(items.map((i) => i.studentId).filter((x): x is string => !!x))];
+      const students = await tx.student.findMany({ where: { id: { in: ids } }, select: { id: true, firstName: true, lastName: true } });
+      const names = new Map(students.map((s) => [s.id, `${s.lastName} ${s.firstName}`]));
+      const count = (st: string) => totals.find((t) => t.status === st);
+      return {
+        month,
+        sent: count('SENT')?._count._all ?? 0,
+        failed: count('FAILED')?._count._all ?? 0,
+        queued: count('QUEUED')?._count._all ?? 0,
+        billed: count('SENT')?._sum.segments ?? 0,
+        items: items.map((i) => ({
+          id: i.id, kind: i.kind, phone: i.phone, body: i.body, segments: i.segments, status: i.status, error: i.error,
+          student: i.studentId ? names.get(i.studentId) ?? null : null, createdAt: i.createdAt, sentAt: i.sentAt,
+        })),
+      };
     });
   }
 

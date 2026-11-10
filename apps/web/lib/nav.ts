@@ -1,6 +1,6 @@
 import {
   Banknote, BarChart3, Briefcase, Bell, BookOpen, CalendarDays, ClipboardCheck, ClipboardList, CreditCard, FileBadge, FileText, Gavel, GraduationCap,
-  Home, Inbox, KeyRound, LayoutDashboard, LifeBuoy, Megaphone, NotebookPen, Receipt, ScrollText, Settings, ShieldCheck, Tags, UserPlus, Users, Wallet,
+  Home, Inbox, KeyRound, LayoutDashboard, LifeBuoy, Megaphone, MessageSquareText, NotebookPen, Receipt, ScrollText, Settings, ShieldCheck, Tags, UserPlus, Users, Wallet,
   type LucideIcon,
 } from 'lucide-react';
 import type { Role } from './auth';
@@ -30,6 +30,7 @@ export const NAV: Record<Role, NavItem[]> = {
     { href: '/espace/documents', label: 'Documents', icon: FileBadge },
     { href: '/espace/personnel', label: 'Personnel', icon: ShieldCheck },
     { href: '/espace/recuperation', label: 'Récupération des comptes', icon: LifeBuoy },
+    { href: '/espace/sms', label: 'SMS envoyés', icon: MessageSquareText },
     { href: '/espace/parametres', label: 'Paramètres', icon: Settings },
     { href: '/espace/audit', label: 'Journal d’audit', icon: ScrollText },
     ...common,
