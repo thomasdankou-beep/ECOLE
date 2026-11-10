@@ -198,7 +198,7 @@ describe('Appel et absences (CDC §4.3)', () => {
     // SMS au parent, au format des écoles : élève, classe, matière et créneau du cours.
     await new Promise((res) => setTimeout(res, 900));
     const absSms = consoleSms.sent.filter((m) => m.to === PHONES.parent && /votre enfant/.test(m.text) && /KOFFI/.test(m.text)).pop();
-    expect(absSms?.text).toMatch(/^Ce lundi 19\/10\/2026, votre enfant .*KOFFI en classe de .+ est absent pendant le cours de .+ de 8h00/);
+    expect(absSms?.text).toMatch(/^Saint Kisito-GESA : Ce lundi 19\/10\/2026, votre enfant .*KOFFI en classe de .+ est absent pendant le cours de .+ de 8h00/);
     const log = await as('direction').get('/notifications/sms?month=2026-' + new Date().toISOString().slice(5, 7));
     expect(log.status).toBe(200);
     expect(log.body.items.some((i: any) => i.kind === 'absence' && i.phone === PHONES.parent && i.status === 'SENT' && i.segments === 1)).toBe(true);

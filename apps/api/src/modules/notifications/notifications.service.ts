@@ -5,7 +5,7 @@ import IORedis from 'ioredis';
 import { config } from '../../config';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { SmsProvider, createSmsProvider, schoolSender } from './sms.provider';
-import { smsSegments } from './sms-text';
+import { smsSegments, toGsm } from './sms-text';
 
 export interface NotifyInput {
   kind: string;
@@ -81,6 +81,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   async notify(tx: Tx, tenantId: string, userIds: string[], input: NotifyInput) {
     const unique = [...new Set(userIds)].filter(Boolean);
     const jobs: SmsJob[] = [];
+    const smsText = (input.smsMode ?? 'none') !== 'none' ? await this.signed(tx, tenantId, input.sms ?? input.body) : '';
     for (const userId of unique) {
       const n = await tx.notification.create({
         data: {
@@ -89,7 +90,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         },
       });
       const mode = input.smsMode ?? 'none';
-      if (mode !== 'none') jobs.push({ tenantId, inAppId: n.id, userId, text: input.sms ?? input.body, mode });
+      if (mode !== 'none') jobs.push({ tenantId, inAppId: n.id, userId, text: smsText, mode });
     }
     // Les jobs partent après la validation de la transaction : un job dont la notification
     // n'existe pas (transaction annulée) est ignoré par le worker.
@@ -166,9 +167,10 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       direct = guardians.filter((g) => smsAlways || !g.userId).map((g) => g.phone?.trim()).filter((x): x is string => !!x);
       direct = [...new Set(direct)];
       const jobs: SmsJob[] = [];
+      const text = await this.signed(tx, tenantId, input.sms);
       for (const phone of direct) {
-        const sms = await tx.smsMessage.create({ data: { tenantId, kind: input.kind, phone, body: input.sms, segments: smsSegments(input.sms), studentId } });
-        jobs.push({ tenantId, smsId: sms.id, text: input.sms, mode: 'immediate' });
+        const sms = await tx.smsMessage.create({ data: { tenantId, kind: input.kind, phone, body: text, segments: smsSegments(text), studentId } });
+        jobs.push({ tenantId, smsId: sms.id, text, mode: 'immediate' });
       }
       setImmediate(() => jobs.forEach((j) => this.enqueue(j)));
     }
@@ -202,6 +204,17 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         })),
       };
     });
+  }
+
+  /**
+   * Quand l'école n'a pas son propre nom d'expéditeur, le SMS part sous le nom commun de la plateforme :
+   * le nom court de l'école est alors ajouté au début, pour que le parent sache d'où vient le message.
+   */
+  async signed(tx: Tx, tenantId: string, text: string) {
+    const t = await tx.tenant.findUnique({ where: { id: tenantId }, select: { name: true, shortName: true, settings: true } });
+    if (!t || schoolSender(t.settings)) return text;
+    const name = toGsm((t.shortName || t.name).trim()).slice(0, 30);
+    return name && !text.startsWith(name) ? `${name} : ${text}` : text;
   }
 
   /** Comptes utilisateurs des responsables légaux d'un élève. */
