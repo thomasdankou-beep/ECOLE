@@ -16,6 +16,12 @@ import { configureApp } from '../src/bootstrap';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { consoleSms } from '../src/modules/notifications/sms.provider';
 import { PlatformDb } from '../src/modules/platform/platform';
+import { directionIds } from '../src/modules/auth/recovery';
+import { ModulesContainer } from '@nestjs/core';
+import { RequestMethod } from '@nestjs/common';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { ALLOW_PENDING_PASSWORD, IS_PUBLIC } from '../src/common/auth';
+import { hashPassword } from '../src/modules/auth/auth.service';
 import { JwtService } from '@nestjs/jwt';
 import { config } from '../src/config';
 
@@ -2412,5 +2418,362 @@ describe('Récupération sécurisée des comptes 2FA (v1.1)', () => {
     // Les opérations sensibles sont bien journalisées.
     const actions = await ctx((tx) => tx.auditLog.findMany({ where: { action: { in: ['auth.recovery_code_used', 'auth.recovery_codes_generated', 'security.recovery_requested', 'security.recovery_approved', 'auth.2fa_reenrolled'] } }, select: { action: true } }));
     expect(new Set(actions.map((a) => a.action)).size).toBe(5);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lot G0 : GRP-001 (une direction couvre toujours tout l'établissement) et GRP-002 (grille des frais commune).
+// Comptes fictifs seulement. Chaque bloc remet l'école dans son état de départ ; le dernier bloc le vérifie.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Ce que touchent les tests du lot G0 : comptes, rôles et grille des frais de l'école de démonstration. */
+async function g0State() {
+  return inTenant('saint-kisito', async (tx) => {
+    const users = await tx.user.findMany({ select: { id: true, phone: true, status: true }, orderBy: { id: 'asc' } });
+    const roles = (await tx.userRole.findMany({ select: { userId: true, role: true, siteId: true } })).map((r) => `${r.userId}|${r.role}|${r.siteId ?? ''}`).sort();
+    const fees = await tx.feeType.findMany({
+      orderBy: { id: 'asc' },
+      select: { id: true, name: true, amount: true, active: true, dueDate: true, audience: true, optional: true, levelId: true, trackId: true },
+    });
+    return { users, roles, fees };
+  });
+}
+let g0Before: Awaited<ReturnType<typeof g0State>> | null = null;
+
+/** Numéros fictifs réservés aux comptes du lot G0. */
+const G0 = {
+  directionTeacher: '+2290190009301', twoDirections: '+2290190009302', comptableDirection: '+2290190009303',
+  staffProbe: '+2290190009304', limitedProbe: '+2290190009305', scriptA: '+2290190009311', scriptB: '+2290190009312',
+};
+async function g0Sites() {
+  return inTenant('saint-kisito', async (tx) => {
+    const sites = await tx.site.findMany({ where: { active: true }, orderBy: { name: 'asc' } });
+    expect(sites.length).toBeGreaterThan(1);
+    return { T: sites[0].tenantId, siteA: sites[0].id, siteB: sites[1].id };
+  });
+}
+/** Compte fictif créé directement en base (mot de passe des tests), éventuellement limité à un site. */
+async function g0Account(phone: string, firstName: string, roles: { role: 'DIRECTION' | 'ENSEIGNANT' | 'COMPTABLE' | 'SECRETARIAT'; siteId: string | null }[]) {
+  const passwordHash = await hashPassword(PASSWORD);
+  return inTenant('saint-kisito', async (tx) => {
+    const t = await tx.site.findFirstOrThrow();
+    await tx.user.deleteMany({ where: { phone } });
+    const u = await tx.user.create({
+      data: { tenantId: t.tenantId, firstName, lastName: 'FICTIF', phone, passwordHash, mustChangePassword: false, roles: { create: roles.map((r) => ({ tenantId: t.tenantId, ...r })) } },
+    });
+    return u.id;
+  });
+}
+const g0Forget = (phones: string[]) => inTenant('saint-kisito', (tx) => tx.user.deleteMany({ where: { phone: { in: phones } } }));
+const g0Roles = async (phone: string) =>
+  (await inTenant('saint-kisito', (tx) => tx.userRole.findMany({ where: { user: { phone } }, select: { role: true, siteId: true } }))).map((r) => `${r.role}${r.siteId ? '@site' : ''}`).sort();
+/** Appels avec un jeton donné et, si besoin, un rôle actif choisi (en-tête X-Active-Role, comme le site). */
+const g0As = (token: string, role?: string) => {
+  const h = (r: request.Test) => {
+    r.set('Authorization', `Bearer ${token}`);
+    if (role) r.set('X-Active-Role', role);
+    return r;
+  };
+  return {
+    get: (url: string) => h(http.get(`/api/v1${url}`)),
+    post: (url: string, body: object = {}) => h(http.post(`/api/v1${url}`)).send(body),
+    put: (url: string, body: object = {}) => h(http.put(`/api/v1${url}`)).send(body),
+    patch: (url: string, body: object = {}) => h(http.patch(`/api/v1${url}`)).send(body),
+  };
+};
+
+/** Toutes les routes de l'API, lues dans les contrôleurs : méthode, chemin, publique ou non, route du compte ou non. */
+function g0Routes() {
+  const join = (...parts: string[]) => `/${parts.map((p) => p.replace(/^\/+|\/+$/g, '')).filter(Boolean).join('/')}`;
+  const out: { method: string; path: string; isPublic: boolean; account: boolean }[] = [];
+  for (const mod of app.get(ModulesContainer).values()) {
+    for (const wrapper of mod.controllers.values()) {
+      const ctrl = wrapper.metatype as any;
+      if (!ctrl?.prototype) continue;
+      const bases: string[] = [].concat(Reflect.getMetadata(PATH_METADATA, ctrl) ?? '');
+      for (const name of Object.getOwnPropertyNames(ctrl.prototype)) {
+        const handler = ctrl.prototype[name];
+        if (name === 'constructor' || typeof handler !== 'function') continue;
+        const sub = Reflect.getMetadata(PATH_METADATA, handler);
+        if (sub === undefined) continue;
+        const method = RequestMethod[Reflect.getMetadata(METHOD_METADATA, handler) as number];
+        const meta = (key: string) => !!(Reflect.getMetadata(key, handler) ?? Reflect.getMetadata(key, ctrl));
+        for (const base of bases) for (const p of [].concat(sub) as string[]) {
+          out.push({ method, path: join(base, p), isPublic: meta(IS_PUBLIC), account: meta(ALLOW_PENDING_PASSWORD) });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+describe("Lot G0 · GRP-001 : une direction couvre toujours tout l'établissement", () => {
+  let siteA = '';
+  let siteB = '';
+  let classB = '';
+  let termId = '';
+  let directionId = '';
+  let limited = '';
+
+  beforeAll(async () => {
+    g0Before = await g0State();
+    ({ siteA, siteB } = await g0Sites());
+    await inTenant('saint-kisito', async (tx) => {
+      const year = await tx.academicYear.findFirstOrThrow({ where: { isCurrent: true } });
+      classB = (await tx.class.findFirstOrThrow({ where: { siteId: siteB, academicYearId: year.id } })).id;
+      termId = (await tx.term.findFirstOrThrow({ where: { academicYearId: year.id }, orderBy: { position: 'asc' } })).id;
+      const u = await tx.user.findFirstOrThrow({ where: { phone: PHONES.direction } });
+      directionId = u.id;
+      // Ancien compte Direction limité à un site, tel qu'on pouvait le créer avant la correction (sondes A1 à A7 de l'audit).
+      await tx.userRole.updateMany({ where: { userId: u.id, role: 'DIRECTION' }, data: { siteId: siteA } });
+      await tx.user.update({ where: { id: u.id }, data: { failedLogins: 0, lockedUntil: null } });
+    });
+    limited = await login(PHONES.direction);
+  });
+
+  afterAll(async () => {
+    // Remise en état, même si un test a échoué en cours de route.
+    await inTenant('saint-kisito', (tx) => tx.userRole.updateMany({ where: { userId: directionId, role: 'DIRECTION' }, data: { siteId: null } }));
+    await g0Forget([G0.directionTeacher, G0.twoDirections, G0.staffProbe, G0.limitedProbe]);
+  });
+
+  it("un ancien compte Direction limité à un site est refusé sur toutes les routes de l'école, sauf celles de son propre compte", async () => {
+    const routes = g0Routes();
+    const guarded = routes.filter((r) => !r.isPublic && !r.account);
+    // Les seules routes encore ouvertes à ce compte : son profil, ses sessions, son mot de passe, sa double authentification.
+    expect(routes.filter((r) => !r.isPublic && r.account).map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      'DELETE /auth/sessions/:id', 'GET /auth/me', 'GET /auth/sessions', 'POST /auth/2fa/enable', 'POST /auth/2fa/setup', 'POST /auth/change-password', 'POST /auth/logout-all',
+    ]);
+    expect(guarded.length).toBeGreaterThan(100);
+    const open: string[] = [];
+    for (const r of guarded) {
+      const url = `/api/v1${r.path.replace(/:[A-Za-z]+/g, '00000000-0000-4000-8000-000000000000')}`;
+      const res = await (http as any)[r.method.toLowerCase()](url).set('Authorization', `Bearer ${limited}`).send({});
+      if (res.status !== 403 || !JSON.stringify(res.body).includes('ne peut pas être limité à un site')) open.push(`${r.method} ${r.path} → ${res.status}`);
+    }
+    expect(open).toEqual([]);
+    // Ses routes de compte ne renvoient que ses propres informations.
+    const me = await g0As(limited).get('/auth/me');
+    expect(me.status).toBe(200);
+    expect(me.body.user.id).toBe(directionId);
+    expect(Object.keys(me.body).sort()).toEqual(['children', 'self', 'sites', 'tenant', 'user', 'year']);
+    const sessions = await g0As(limited).get('/auth/sessions');
+    expect(sessions.status).toBe(200);
+    const own = await inTenant('saint-kisito', (tx) => tx.session.findMany({ where: { userId: directionId }, select: { id: true } }));
+    expect(sessions.body.every((x: any) => own.some((o) => o.id === x.id))).toBe(true);
+    // Chaque refus est tracé dans le journal de l'école.
+    const log: any = await inTenant('saint-kisito', (tx) => tx.auditLog.findFirst({ where: { action: 'access.denied', userId: directionId }, orderBy: { createdAt: 'desc' } }));
+    expect(JSON.stringify(log?.data)).toContain('GRP-001');
+  });
+
+  it("sondes A1 à A7 de l'audit : ni tableau de bord d'un autre site, ni compte Direction complet créé", async () => {
+    const d = g0As(limited);
+    expect((await d.get('/dashboard')).status).toBe(403);
+    expect((await d.get(`/dashboard?siteId=${siteB}`)).status).toBe(403);
+    for (const url of ['/students', '/staff', '/audit?limit=5', '/finance/dashboard', `/report-cards/runs/${classB}/${termId}`]) {
+      expect([url, (await d.get(url)).status]).toEqual([url, 403]);
+    }
+    const probe = await d.post('/staff', { firstName: 'Sonde', lastName: 'GRP', phone: G0.limitedProbe, roles: [{ role: 'DIRECTION', siteId: null }] });
+    expect(probe.status).toBe(403);
+    expect(await g0Roles(G0.limitedProbe)).toEqual([]);
+  });
+
+  it('comptes à plusieurs rôles : seul le rôle Direction limité est bloqué', async () => {
+    await g0Account(G0.directionTeacher, 'Directeur-enseignant', [{ role: 'DIRECTION', siteId: siteA }, { role: 'ENSEIGNANT', siteId: null }]);
+    await g0Account(G0.twoDirections, 'Deux-directions', [{ role: 'DIRECTION', siteId: siteA }, { role: 'DIRECTION', siteId: null }]);
+    const dt = await login(G0.directionTeacher);
+    // Rôle Enseignant choisi : il travaille normalement ; rôle Direction choisi : refusé.
+    expect((await g0As(dt, 'ENSEIGNANT').get('/students')).status).toBe(200);
+    expect((await g0As(dt, 'ENSEIGNANT').get('/classes')).status).toBe(200);
+    const asDirection = await g0As(dt, 'DIRECTION').get('/students');
+    expect(asDirection.status).toBe(403);
+    expect(JSON.stringify(asDirection.body)).toContain('ne peut pas être limité à un site');
+    // Un rôle Direction de tout l'établissement en plus d'un ancien rôle limité : le compte couvre tout l'établissement.
+    const two = await login(G0.twoDirections);
+    const all = await as('direction').get('/dashboard');
+    const mine = await g0As(two, 'DIRECTION').get('/dashboard');
+    expect(mine.status).toBe(200);
+    expect(mine.body.students).toBe(all.body.students);
+  });
+
+  it('la direction ne peut plus être limitée à un site, ni à la création ni à la modification ; les autres rôles le peuvent', async () => {
+    const bad = await as('direction').post('/staff', { firstName: 'Sonde', lastName: 'GRP', phone: G0.staffProbe, roles: [{ role: 'DIRECTION', siteId: siteA }] });
+    expect(bad.status).toBe(400);
+    expect(JSON.stringify(bad.body)).toContain('ne peut pas être limité à un site');
+    expect(await g0Roles(G0.staffProbe)).toEqual([]);
+    const ok = await as('direction').post('/staff', { firstName: 'Sonde', lastName: 'GRP', phone: G0.staffProbe, roles: [{ role: 'SECRETARIAT', siteId: siteA }] });
+    expect(ok.status).toBe(201);
+    expect(await g0Roles(G0.staffProbe)).toEqual(['SECRETARIAT@site']);
+    expect((await as('direction').patch(`/staff/${ok.body.id}`, { roles: [{ role: 'DIRECTION', siteId: siteA }] })).status).toBe(400);
+    expect(await g0Roles(G0.staffProbe)).toEqual(['SECRETARIAT@site']);
+    expect((await as('direction').patch(`/staff/${ok.body.id}`, { roles: [{ role: 'DIRECTION', siteId: null }] })).status).toBe(200);
+    expect(await g0Roles(G0.staffProbe)).toEqual(['DIRECTION']);
+  });
+
+  it("la direction de tout l'établissement voit toujours tous les sites, ou un seul si elle le choisit", async () => {
+    const all = await as('direction').get('/dashboard');
+    expect(all.status).toBe(200);
+    expect(all.body.bySite.length).toBeGreaterThan(1);
+    expect(all.body.students).toBe(all.body.bySite.reduce((a: number, s: any) => a + s.count, 0));
+    const one = await as('direction').get(`/dashboard?siteId=${siteB}`);
+    expect(one.status).toBe(200);
+    expect(one.body.students).toBeGreaterThan(0);
+    expect(one.body.students).toBeLessThan(all.body.students);
+  });
+
+  it("un ancien rôle Direction limité à un site ne compte pas parmi les validateurs d'une récupération de compte", async () => {
+    expect(await inTenant('saint-kisito', (tx) => directionIds(tx))).not.toContain(directionId);
+    await inTenant('saint-kisito', (tx) => tx.userRole.updateMany({ where: { userId: directionId, role: 'DIRECTION' }, data: { siteId: null } }));
+    expect(await inTenant('saint-kisito', (tx) => directionIds(tx))).toContain(directionId);
+  });
+});
+
+describe('Lot G0 · GRP-002 : la grille des frais, commune à tous les sites, ne se modifie que pour tout l’établissement', () => {
+  let comptableId = '';
+  let limited = '';
+  let fee: { id: string; name: string; amount: number; levelId: string | null } = { id: '', name: '', amount: 0, levelId: null };
+  let levelId = '';
+
+  beforeAll(async () => {
+    const { siteA } = await g0Sites();
+    await inTenant('saint-kisito', async (tx) => {
+      const u = await tx.user.findFirstOrThrow({ where: { phone: PHONES.comptable } });
+      comptableId = u.id;
+      await tx.userRole.updateMany({ where: { userId: u.id, role: 'COMPTABLE' }, data: { siteId: siteA } });
+      await tx.user.update({ where: { id: u.id }, data: { failedLogins: 0, lockedUntil: null } });
+      const year = await tx.academicYear.findFirstOrThrow({ where: { isCurrent: true } });
+      const f = await tx.feeType.findFirstOrThrow({ where: { academicYearId: year.id, active: true }, orderBy: { name: 'asc' } });
+      fee = { id: f.id, name: f.name, amount: f.amount, levelId: f.levelId };
+      levelId = (await tx.level.findFirstOrThrow()).id;
+    });
+    limited = await login(PHONES.comptable);
+    await g0Account(G0.comptableDirection, 'Comptable-directeur', [{ role: 'COMPTABLE', siteId: siteA }, { role: 'DIRECTION', siteId: null }]);
+  });
+
+  afterAll(async () => {
+    await inTenant('saint-kisito', async (tx) => {
+      await tx.userRole.updateMany({ where: { userId: comptableId, role: 'COMPTABLE' }, data: { siteId: null } });
+      await tx.feeType.update({ where: { id: fee.id }, data: { amount: fee.amount } });
+    });
+    await g0Forget([G0.comptableDirection]);
+  });
+
+  const amountNow = async () => (await inTenant('saint-kisito', (tx) => tx.feeType.findUniqueOrThrow({ where: { id: fee.id } }))).amount;
+  const feeCount = () => inTenant('saint-kisito', (tx) => tx.feeType.count());
+
+  it('un comptable limité à un site consulte la grille mais ne peut ni la modifier, ni y ajouter un frais', async () => {
+    const c = g0As(limited);
+    const list = await c.get('/finance/fee-types');
+    expect(list.status).toBe(200);
+    expect(list.body.some((f: any) => f.id === fee.id)).toBe(true);
+    const before = await feeCount();
+    const attempts = [
+      await c.patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount + 1 }),
+      await c.put('/finance/fee-types/grid', { name: 'Sonde G0', rows: [{ levelId, amount: 1 }] }),
+      await c.post('/finance/fee-types', { name: 'Sonde G0 bis', amount: 1 }),
+    ];
+    for (const r of attempts) {
+      expect(r.status).toBe(403);
+      expect(JSON.stringify(r.body)).toContain('commune à tous les sites');
+    }
+    expect(await amountNow()).toBe(fee.amount);
+    expect(await feeCount()).toBe(before);
+    const log: any = await inTenant('saint-kisito', (tx) => tx.auditLog.findFirst({ where: { action: 'access.denied', userId: comptableId }, orderBy: { createdAt: 'desc' } }));
+    expect(JSON.stringify(log?.data)).toContain('GRP-002');
+    // Il garde ses droits sur son site.
+    expect((await c.get('/finance/dashboard')).status).toBe(200);
+    expect((await c.get('/finance/payments')).status).toBe(200);
+  });
+
+  it('la direction et un comptable de tous les sites la modifient toujours', async () => {
+    for (const who of ['comptable', 'direction']) {
+      try {
+        const r = await as(who).patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount + 1 });
+        expect([who, r.status]).toEqual([who, 200]);
+        expect(await amountNow()).toBe(fee.amount + 1);
+      } finally {
+        await as('direction').patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount });
+      }
+    }
+    expect(await amountNow()).toBe(fee.amount);
+  });
+
+  it('compte à plusieurs rôles : refusé comme comptable limité, accepté comme direction', async () => {
+    const t = await login(G0.comptableDirection);
+    expect((await g0As(t, 'COMPTABLE').patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount + 2 })).status).toBe(403);
+    expect(await amountNow()).toBe(fee.amount);
+    try {
+      expect((await g0As(t, 'DIRECTION').patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount + 2 })).status).toBe(200);
+      expect(await amountNow()).toBe(fee.amount + 2);
+    } finally {
+      await as('direction').patch(`/finance/fee-types/${fee.id}`, { name: fee.name, amount: fee.amount });
+    }
+  });
+});
+
+describe('Lot G0 · régularisation des anciens comptes Direction limités à un site (npm run directions:sites)', () => {
+  const run = (args = '') => execSync(`npx ts-node --transpile-only prisma/directions-par-site.ts ${args}`, { env: process.env, cwd: `${__dirname}/..`, stdio: 'pipe' }).toString();
+  const fails = (args: string) => {
+    try {
+      run(args);
+      return '';
+    } catch (e: any) {
+      return `${e.status} ${e.stderr?.toString() ?? ''}`;
+    }
+  };
+  let a = '';
+  let b = '';
+
+  beforeAll(async () => {
+    const { siteA } = await g0Sites();
+    a = await g0Account(G0.scriptA, 'Seule-direction', [{ role: 'DIRECTION', siteId: siteA }]);
+    b = await g0Account(G0.scriptB, 'Direction-secretariat', [{ role: 'DIRECTION', siteId: siteA }, { role: 'SECRETARIAT', siteId: null }]);
+  });
+
+  afterAll(() => g0Forget([G0.scriptA, G0.scriptB]));
+
+  it('le contrôle liste les comptes bloqués, école par école, sans rien modifier', async () => {
+    const before = await g0State();
+    const out = run();
+    expect(out).toContain("saint-kisito (");
+    expect(out).toContain('2 compte(s) Direction limité(s) à un site');
+    expect(out).toContain('Seule-direction FICTIF');
+    expect(out).toContain('Direction-secretariat FICTIF');
+    expect(out).toContain(a);
+    expect(out).not.toContain(G0.scriptA); // téléphone masqué
+    expect(out).toMatch(/autre-ecole \(.*\) : aucun compte Direction limité à un site/);
+    expect(await g0State()).toEqual(before);
+  });
+
+  it("la régularisation exige l'opérateur et le motif, corrige un seul compte, coupe ses sessions et l'inscrit au journal", async () => {
+    const before = await g0Roles(G0.scriptA);
+    expect(fails(`--ecole saint-kisito --compte ${a} --tous-les-sites`)).toMatch(/^1 /);
+    expect(fails(`--ecole saint-kisito --compte ${a} --tous-les-sites --retirer-direction --operateur "Opérateur fictif" --motif "Test G0 du 12/11"`)).toMatch(/^1 /);
+    expect(await g0Roles(G0.scriptA)).toEqual(before);
+    const old = await login(G0.scriptA);
+    expect((await g0As(old).get('/dashboard')).status).toBe(403);
+    const out = run(`--ecole saint-kisito --compte ${a} --tous-les-sites --operateur "Opérateur fictif" --motif "Test G0 du 12/11"`);
+    expect(out).toContain('1 session(s) coupée(s)');
+    expect(await g0Roles(G0.scriptA)).toEqual(['DIRECTION']);
+    expect(await g0Roles(G0.scriptB)).toEqual(['DIRECTION@site', 'SECRETARIAT']);
+    const log: any = await inTenant('saint-kisito', (tx) => tx.auditLog.findFirst({ where: { action: 'user.roles_changed', entityId: a }, orderBy: { createdAt: 'desc' } }));
+    expect(log).toMatchObject({ userId: null, userName: 'Opérateur de la plateforme (Opérateur fictif)' });
+    expect(log.data).toMatchObject({ decision: 'tous-les-sites', operateur: 'Opérateur fictif', motif: 'Test G0 du 12/11', sessionsCoupees: 1 });
+    // L'ancienne session ne sert plus ; une nouvelle connexion couvre tout l'établissement.
+    await new Promise((r) => setTimeout(r, 50));
+    const fresh = await login(G0.scriptA);
+    expect((await g0As(fresh).get('/dashboard')).status).toBe(200);
+    // Retirer le rôle Direction et garder les autres ; jamais un compte sans aucun rôle.
+    run(`--ecole saint-kisito --compte ${b} --retirer-direction --operateur "Opérateur fictif" --motif "Test G0 du 12/11"`);
+    expect(await g0Roles(G0.scriptB)).toEqual(['SECRETARIAT']);
+    expect(fails(`--ecole saint-kisito --compte ${b} --retirer-direction --operateur "Opérateur fictif" --motif "Test G0 du 12/11"`)).toContain('rien à régulariser');
+    expect(run()).toMatch(/saint-kisito \(.*\) : aucun compte Direction limité à un site/);
+  });
+});
+
+describe("Lot G0 · les tests rendent l'école exactement dans son état de départ", () => {
+  it('comptes, rôles et grille des frais identiques à ceux du début du lot G0', async () => {
+    expect(g0Before).not.toBeNull();
+    expect(await g0State()).toEqual(g0Before);
   });
 });

@@ -139,6 +139,16 @@ function uniqueViolation(e: unknown, message: string): never {
   throw e;
 }
 
+/**
+ * GRP-001 : le rôle Direction couvre toujours tout l'établissement. Seuls les autres rôles du personnel
+ * (secrétariat, comptable, vie scolaire, enseignant) peuvent être limités à un site.
+ */
+function assertDirectionWholeSchool(roles?: { role: string; siteId?: string | null }[]) {
+  if (roles?.some((r) => r.role === 'DIRECTION' && r.siteId)) {
+    throw new BadRequestException("Le rôle Direction couvre tout l'établissement : il ne peut pas être limité à un site");
+  }
+}
+
 @Injectable()
 export class SettingsService {
   private sms = createSmsProvider(config.smsProvider);
@@ -549,6 +559,7 @@ export class SettingsService {
 
   createStaff(actor: Actor, dto: StaffDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      assertDirectionWholeSchool(dto.roles);
       await assertOwned(tx, { site: dto.roles.map((r) => r.siteId), subject: dto.subjectIds });
       const password = temporaryPassword();
       const phone = await tenantPhone(tx, actor.tenantId, dto.phone);
@@ -570,6 +581,7 @@ export class SettingsService {
 
   updateStaff(actor: Actor, id: string, dto: StaffUpdateDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
+      assertDirectionWholeSchool(dto.roles);
       await assertOwned(tx, { user: id, site: dto.roles?.map((r) => r.siteId), subject: dto.subjectIds });
       const before = await tx.user.findUniqueOrThrow({ where: { id }, include: { roles: { where: { role: { notIn: ['PARENT', 'ELEVE'] } } } } });
       const data: Prisma.UserUpdateInput = {

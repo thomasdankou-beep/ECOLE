@@ -6,6 +6,7 @@ import { Loader } from '@/components/espace/bits';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, Table, useToast } from '@/components/ui';
 import type { ClassRow } from '@/lib/types';
 import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { currency, date, fcfa } from '@/lib/format';
 import { useAction, useApi } from '@/lib/use-api';
 
@@ -43,6 +44,8 @@ function KindFields({ audience, optional, set }: { audience: Audience; optional:
 }
 
 export default function Tarifs() {
+  // GRP-002 : la grille sert à tous les sites ; un compte limité à un site la consulte sans la modifier.
+  const readOnly = useAuth().siteLimited;
   const q = useApi<Fee[]>('/finance/fee-types');
   const settings = useApi<{ levels: Level[]; tracks: { id: string; name: string }[] }>('/settings');
   const [filter, setFilter] = useState('');
@@ -55,10 +58,11 @@ export default function Tarifs() {
 
   return (
     <>
-      <PageHeader title="Frais et tarifs" subtitle="Catalogue des frais de l’année, saisi par l’école : inscription, scolarité par tranche, frais généraux, TP, activités. Les frais obligatoires sont facturés à l’inscription de l’élève." actions={<Button onClick={() => setEdit({ name: '', amount: 0, levelId: null, trackId: null, dueDate: null, active: true, audience: 'ALL', optional: false })}><Plus className="size-4" /> Nouveau frais</Button>} />
-      <Chips label="Affichage" value={view} onChange={setView} options={[{ value: 'liste', label: 'Liste des frais' }, { value: 'grille', label: 'Grille par niveau' }]} />
-      {view === 'grille' && q.data && settings.data && <FeeGrid fees={q.data} levels={settings.data.levels} reload={q.reload} />}
-      {view === 'liste' && <Card>
+      <PageHeader title="Frais et tarifs" subtitle="Catalogue des frais de l’année, saisi par l’école : inscription, scolarité par tranche, frais généraux, TP, activités. Les frais obligatoires sont facturés à l’inscription de l’élève." actions={readOnly ? undefined : <Button onClick={() => setEdit({ name: '', amount: 0, levelId: null, trackId: null, dueDate: null, active: true, audience: 'ALL', optional: false })}><Plus className="size-4" /> Nouveau frais</Button>} />
+      {readOnly && <p className="rounded-xl bg-sunk p-4 text-sm">La grille des frais est commune à tous les sites : seuls la direction et un comptable de tous les sites peuvent la modifier. Vous pouvez la consulter.</p>}
+      {!readOnly && <Chips label="Affichage" value={view} onChange={setView} options={[{ value: 'liste', label: 'Liste des frais' }, { value: 'grille', label: 'Grille par niveau' }]} />}
+      {!readOnly && view === 'grille' && q.data && settings.data && <FeeGrid fees={q.data} levels={settings.data.levels} reload={q.reload} />}
+      {(readOnly || view === 'liste') && <Card>
         <Loader {...q}>
           {(all) => {
             const names = [...new Set(all.map((f) => f.name))].sort();
@@ -78,7 +82,7 @@ export default function Tarifs() {
                   <td>{date(f.dueDate)}</td>
                   <td className="text-right font-bold">{fcfa(f.amount)}</td>
                   <td>{f.active ? <Badge tone="good">Actif</Badge> : <Badge>Inactif</Badge>}</td>
-                  <td className="text-right"><Button size="sm" variant="ghost" onClick={() => setEdit(f)}>Modifier</Button></td>
+                  <td className="text-right">{!readOnly && <Button size="sm" variant="ghost" onClick={() => setEdit(f)}>Modifier</Button>}</td>
                 </tr>
               ))}</tbody>
             </Table>

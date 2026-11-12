@@ -141,7 +141,12 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
               Pour commencer, créez l’année scolaire et ses périodes dans Paramètres. Ajoutez ensuite vos classes, matières et frais.
             </Link>
           )}
-          {isFamily(auth.role) && !auth.child ? (
+          {auth.blockedDirection && !path.startsWith('/espace/compte') ? (
+            <div className="grid gap-2 rounded-xl bg-warn-soft p-4 text-warn">
+              <p className="font-bold">Ce compte Direction est limité à un site, ce qui n’est plus possible : une direction couvre tout l’établissement.</p>
+              <p>Demandez à un autre directeur de le passer sur « Tout l’établissement » dans Personnel, ou à l’éditeur de Cahiora de le régulariser.{auth.roles.length > 1 ? ' En attendant, choisissez votre autre rôle avec le sélecteur « Rôle actif ».' : ''}</p>
+            </div>
+          ) : isFamily(auth.role) && !auth.child ? (
             <p className="rounded-xl bg-warn-soft p-4 font-bold text-warn">Aucun élève n’est rattaché à ce compte. Contactez le secrétariat.</p>
           ) : (
             children

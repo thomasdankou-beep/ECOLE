@@ -62,6 +62,16 @@ Le script installe Docker si besoin, crée `.env` avec des secrets de production
   `docker compose exec api npm run platform:admin -- vous@exemple.bj --operateur "Prénom Nom" --motif "Téléphone volé le 12/11, codes perdus"`
   Elle remet un mot de passe provisoire (affiché une fois), retire l’ancienne double authentification et les anciens codes, coupe les sessions, et impose une nouvelle double authentification avant tout autre écran. L’opérateur et le motif sont inscrits au journal de la plateforme. Conseil : créez un second compte Super Admin confié à une personne de confiance.
 
+### Comptes Direction limités à un site (GRP-001)
+
+Une direction couvre toujours tout l’établissement. Un ancien compte Direction limité à un site est refusé partout (sauf sur son propre compte) tant qu’il n’est pas régularisé ; Personnel le signale « à corriger ».
+
+- **Contrôle, en lecture seule** (à lancer avant la mise en ligne de la correction) : `docker compose exec api npm run directions:sites`. Il liste, école par école, les comptes concernés et dit si une autre direction peut les corriger elle-même.
+- **Correction par l’école** : une autre direction de tout l’établissement ouvre le compte dans Personnel et l’enregistre (il couvre alors tout l’établissement), ou lui donne un autre rôle.
+- **Correction par l’éditeur**, sur décision de l’école, quand personne d’autre ne peut le faire :
+  `docker compose exec api npm run directions:sites -- --ecole <identifiant> --compte <id> --tous-les-sites --operateur "Prénom Nom" --motif "Décision de l’école du 12/11"`
+  (ou `--retirer-direction` pour retirer seulement ce rôle). Les sessions du compte sont coupées et le changement est inscrit au journal de l’école avec l’opérateur et le motif.
+
 ## Essayer en ligne avec GitHub Codespaces (sans rien installer)
 
 Sur la page du dépôt : bouton vert **Code** → onglet **Codespaces** → **Create codespace on main**. Une fois le codespace ouvert, tapez `./demarrer.sh` dans son terminal (plusieurs minutes la première fois) ; quand il affiche « Site prêt », ouvrez l’onglet **Ports** et cliquez sur l’adresse du port 8080.

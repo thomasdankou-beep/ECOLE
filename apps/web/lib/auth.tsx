@@ -21,6 +21,10 @@ type Ctx = {
   ready: boolean;
   role: Role | null;
   roles: Role[];
+  /** Le rôle actif est limité à un ou plusieurs sites (sinon : tout l'établissement). */
+  siteLimited: boolean;
+  /** GRP-001 : rôle actif Direction limité à un site, refusé par l'API tant qu'il n'est pas régularisé. */
+  blockedDirection: boolean;
   switchRole: (r: Role) => void;
   /** Enfant suivi (parent) ou soi-même (élève). */
   child: Child | null;
@@ -31,6 +35,12 @@ type Ctx = {
 };
 
 const AuthCtx = React.createContext<Ctx | null>(null);
+
+/** Même règle que l'API : un rôle est limité à des sites quand aucune de ses lignes ne couvre tout l'établissement. */
+const limitedToSites = (me: Me, role: Role | null) => {
+  const rows = me.user.roles.filter((r) => r.role === role);
+  return rows.length > 0 && rows.every((r) => r.siteId);
+};
 const ROLE_KEY = 'erp.role';
 const CHILD_KEY = 'erp.child';
 
@@ -62,8 +72,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const m = await api.get<Me>('/auth/me');
       const roles = [...new Set(m.user.roles.map((r) => r.role))];
+      // Un ancien rôle Direction limité à un site est bloqué (GRP-001) : on ouvre plutôt un autre rôle du compte, s'il en a un.
+      const usable = roles.filter((x) => !(x === 'DIRECTION' && limitedToSites(m, x)));
       const saved = store.get(ROLE_KEY) as Role | null;
-      const r = saved && roles.includes(saved) ? saved : roles[0];
+      const r = saved && usable.includes(saved) ? saved : usable[0] ?? roles[0];
       setActiveRole(r);
       setRole(r);
       setCurrency(m.tenant.currency);
@@ -94,6 +106,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ready,
       role,
       roles,
+      siteLimited: !!me && limitedToSites(me, role),
+      blockedDirection: !!me && role === 'DIRECTION' && limitedToSites(me, role),
       kids,
       child: kids.find((k) => k.id === childId) ?? kids[0] ?? null,
       switchRole: (r) => {
