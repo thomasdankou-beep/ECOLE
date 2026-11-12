@@ -47,9 +47,12 @@ export async function notifyInApp(tx: Db, tenantId: string, userIds: string[], t
   await tx.notification.createMany({ data: ids.map((userId) => ({ tenantId, userId, channel: 'IN_APP' as const, kind: 'securite', title, body, status: 'SENT' as const, sentAt: new Date() })) });
 }
 
-/** Comptes Direction actifs de l'école (destinataires des alertes, validateurs possibles). */
+/**
+ * Comptes Direction actifs de l'école (destinataires des alertes, validateurs possibles). Un ancien rôle Direction
+ * limité à un site n'en fait pas partie : il est refusé partout (GRP-001) et ne pourrait pas valider.
+ */
 export async function directionIds(tx: Db) {
-  const rows = await tx.user.findMany({ where: { status: 'ACTIVE', roles: { some: { role: 'DIRECTION' } } }, select: { id: true } });
+  const rows = await tx.user.findMany({ where: { status: 'ACTIVE', roles: { some: { role: 'DIRECTION', siteId: null } } }, select: { id: true } });
   return rows.map((r) => r.id);
 }
 

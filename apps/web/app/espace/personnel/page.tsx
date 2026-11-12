@@ -35,7 +35,7 @@ export default function Personnel() {
                 <tr key={s.id}>
                   <td className="font-bold">{s.lastName} {s.firstName}{s.teacherSubjects.length > 0 && <span className="block text-xs font-bold text-brand">{s.teacherSubjects.map((t) => t.subject.name).join(', ')}</span>}{s.assignments.length > 0 && <span className="block text-xs font-normal text-muted">{s.assignments.slice(0, 3).map((a) => `${a.classSubject.subject.name} ${a.classSubject.class.name}`).join(' · ')}{s.assignments.length > 3 ? '…' : ''}</span>}</td>
                   <td className="whitespace-nowrap">{s.phone}</td>
-                  <td>{s.roles.map((r) => `${ROLE_LABEL[r.role]}${site(r.siteId) ? ` (${site(r.siteId)})` : ''}`).join(', ')}</td>
+                  <td>{s.roles.map((r) => `${ROLE_LABEL[r.role]}${site(r.siteId) ? ` (${site(r.siteId)}${r.role === 'DIRECTION' ? ', à corriger' : ''})` : ''}`).join(', ')}</td>
                   <td className="whitespace-nowrap text-sm">{s.lastLoginAt ? dateTime(s.lastLoginAt) : 'Jamais'}</td>
                   <td><StatusBadge status={s.status} /></td>
                   <td className="whitespace-nowrap text-right">
@@ -49,11 +49,15 @@ export default function Personnel() {
         </Loader>
       </Card>
       <Dialog open={!!edit} onOpenChange={(o) => !o && setEdit(null)}>
-        {edit && (() => { const isTeacher = edit.roles.some((r) => r.role === 'ENSEIGNANT'); return (
+        {edit && (() => {
+          const isTeacher = edit.roles.some((r) => r.role === 'ENSEIGNANT');
+          // GRP-001 : une direction couvre tout l'établissement ; un ancien rôle Direction limité à un site est signalé.
+          const oldLimitedDirection = edit.roles.find((r) => r.role === 'DIRECTION' && r.siteId);
+          return (
           <DialogContent title={edit.id ? 'Modifier le compte' : 'Nouveau compte'}>
             <form className="grid gap-3" onSubmit={async (e) => {
               e.preventDefault();
-              const body = { firstName: edit.firstName, lastName: edit.lastName, phone: edit.phone, email: edit.email || undefined, roles: edit.roles.map((r) => ({ role: r.role, siteId: r.siteId || null })), subjectIds: isTeacher ? edit.subjectIds : [] };
+              const body = { firstName: edit.firstName, lastName: edit.lastName, phone: edit.phone, email: edit.email || undefined, roles: edit.roles.map((r) => ({ role: r.role, siteId: r.role === 'DIRECTION' ? null : r.siteId || null })), subjectIds: isTeacher ? edit.subjectIds : [] };
               if (edit.id) {
                 if (await run(() => api.patch(`/staff/${edit.id}`, { ...body, active: edit.status !== 'DISABLED' }), toast, 'Compte modifié')) { setEdit(null); q.reload(); }
               } else {
@@ -70,11 +74,14 @@ export default function Personnel() {
               <p className="text-[13px] font-bold text-muted">Rôles</p>
               {edit.roles.map((r, i) => (
                 <div key={i} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2">
-                  <Select aria-label="Rôle" value={r.role} onChange={(e) => setEdit({ ...edit, roles: edit.roles.map((x, j) => (j === i ? { ...x, role: e.target.value } : x)) })}>{STAFF_ROLES.map((x) => <option key={x} value={x}>{ROLE_LABEL[x]}</option>)}</Select>
-                  <Select aria-label="Site" value={r.siteId ?? ''} onChange={(e) => setEdit({ ...edit, roles: edit.roles.map((x, j) => (j === i ? { ...x, siteId: e.target.value || null } : x)) })}><option value="">Tous les sites</option>{me?.sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</Select>
+                  <Select aria-label="Rôle" value={r.role} onChange={(e) => setEdit({ ...edit, roles: edit.roles.map((x, j) => (j === i ? { ...x, role: e.target.value, siteId: e.target.value === 'DIRECTION' ? null : x.siteId } : x)) })}>{STAFF_ROLES.map((x) => <option key={x} value={x}>{ROLE_LABEL[x]}</option>)}</Select>
+                  {r.role === 'DIRECTION'
+                    ? <p className="text-sm text-muted">Tout l’établissement</p>
+                    : <Select aria-label="Site" value={r.siteId ?? ''} onChange={(e) => setEdit({ ...edit, roles: edit.roles.map((x, j) => (j === i ? { ...x, siteId: e.target.value || null } : x)) })}><option value="">Tous les sites</option>{me?.sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</Select>}
                   <Button type="button" variant="ghost" size="icon" aria-label="Retirer ce rôle" disabled={edit.roles.length === 1} onClick={() => setEdit({ ...edit, roles: edit.roles.filter((_, j) => j !== i) })}><Trash2 className="size-4" /></Button>
                 </div>
               ))}
+              {oldLimitedDirection && <p className="rounded-lg bg-sunk p-3 text-sm">Ce compte Direction est limité au site {site(oldLimitedDirection.siteId) ?? 'choisi'}, ce qui n’est plus possible : il reste bloqué tant qu’il n’est pas corrigé. En enregistrant, il couvrira tout l’établissement ; sinon, donnez-lui un autre rôle.</p>}
               <Button type="button" variant="ghost" onClick={() => setEdit({ ...edit, roles: [...edit.roles, { role: 'ENSEIGNANT', siteId: null }] })}><Plus className="size-4" /> Ajouter un rôle</Button>
               {isTeacher && (
                 <fieldset className="grid gap-2">

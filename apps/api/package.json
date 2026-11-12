@@ -13,6 +13,7 @@
     "db:seed:if-empty": "SEED_IF_EMPTY=1 ts-node --transpile-only prisma/seed.ts",
     "school:import": "ts-node --transpile-only prisma/school-import.ts",
     "platform:admin": "ts-node --transpile-only prisma/platform-admin.ts",
+    "directions:sites": "ts-node --transpile-only prisma/directions-par-site.ts",
     "test": "jest --runInBand",
     "test:unit": "jest --runInBand src",
     "test:e2e": "jest --runInBand test"

@@ -96,6 +96,14 @@ export const REQUIRED_PERMISSIONS = 'permissions';
 /** Exige au moins une des permissions listées pour le rôle actif. */
 export const Can = (...perms: Permission[]) => SetMetadata(REQUIRED_PERMISSIONS, perms);
 
+/**
+ * GRP-002 : route qui modifie un réglage commun à tous les sites de l'établissement (la grille des frais, par exemple).
+ * Un rôle limité à un site la consulte peut-être, mais ne la modifie jamais : le refus est tracé dans le journal.
+ */
+export const WHOLE_SCHOOL = 'wholeSchool';
+export const WholeSchool = (message = 'Ce réglage est commun à tous les sites : seul un compte de tous les sites peut le modifier') =>
+  SetMetadata(WHOLE_SCHOOL, message);
+
 export const CurrentActor = createParamDecorator((_: unknown, ctx: ExecutionContext): Actor => {
   return ctx.switchToHttp().getRequest().actor;
 });
@@ -178,14 +186,26 @@ export class AuthGuard implements CanActivate {
       ip: req.ip,
     };
     req.actor = actor;
-    if (session.pendingPassword && !this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, handlers)) {
+    const accountRoute = this.reflector.getAllAndOverride<boolean>(ALLOW_PENDING_PASSWORD, handlers);
+    if (session.pendingPassword && !accountRoute) {
       throw new ForbiddenException('Choisissez d’abord un nouveau mot de passe dans « Mon compte »');
+    }
+    // GRP-001 : une direction couvre toujours tout l'établissement. Un ancien rôle Direction limité à un site
+    // est refusé partout, sauf sur son propre compte, au lieu de voir et de gérer tout l'établissement.
+    if (actor.role === 'DIRECTION' && actor.siteIds.length && !accountRoute) {
+      await this.denied(req, actor, 'direction limitée à un site (GRP-001)', actor.role);
+      throw new ForbiddenException("Un compte Direction couvre tout l'établissement et ne peut pas être limité à un site : un autre directeur doit le passer sur « Tout l'établissement » dans Personnel");
     }
 
     const perms = this.reflector.getAllAndOverride<Permission[]>(REQUIRED_PERMISSIONS, handlers);
     if (perms?.length && !perms.some((p) => can(actor.role, p))) {
       await this.denied(req, actor, `droit manquant : ${perms.join(' ou ')}`, actor.role);
       throw new ForbiddenException("Votre rôle ne permet pas cette action");
+    }
+    const wholeSchool = this.reflector.getAllAndOverride<string>(WHOLE_SCHOOL, handlers);
+    if (wholeSchool && actor.siteIds.length) {
+      await this.denied(req, actor, 'réglage commun à tous les sites (GRP-002)', actor.role);
+      throw new ForbiddenException(wholeSchool);
     }
     return true;
   }

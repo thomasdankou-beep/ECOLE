@@ -1,8 +1,11 @@
 import { Body, Controller, Get, Header, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Actor, Can, CurrentActor } from '../../common/auth';
+import { Actor, Can, CurrentActor, WholeSchool } from '../../common/auth';
 import { BatchInvoiceDto, CancelReceiptDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto, CancelDecisionDto } from './finance.dto';
 import { FinanceService } from './finance.service';
+
+/** GRP-002 : la grille des frais sert à tous les sites ; un comptable limité à un site la consulte sans la modifier. */
+const FEE_GRID_SHARED = 'La grille des frais est commune à tous les sites : seuls la direction et un comptable de tous les sites peuvent la modifier';
 
 @ApiTags('Finances')
 @ApiBearerAuth()
@@ -16,13 +19,13 @@ export class FinanceController {
   @Get('fee-types') @Can('finance.write', 'settings.manage')
   feeTypes(@CurrentActor() a: Actor) { return this.s.feeTypes(a); }
 
-  @Post('fee-types') @Can('finance.write', 'settings.manage')
+  @Post('fee-types') @Can('finance.write', 'settings.manage') @WholeSchool(FEE_GRID_SHARED)
   createFeeType(@CurrentActor() a: Actor, @Body() dto: FeeTypeDto) { return this.s.createFeeType(a, dto); }
 
-  @Put('fee-types/grid') @Can('finance.write', 'settings.manage')
+  @Put('fee-types/grid') @Can('finance.write', 'settings.manage') @WholeSchool(FEE_GRID_SHARED)
   saveFeeGrid(@CurrentActor() a: Actor, @Body() dto: FeeGridDto) { return this.s.saveFeeGrid(a, dto); }
 
-  @Patch('fee-types/:id') @Can('finance.write', 'settings.manage')
+  @Patch('fee-types/:id') @Can('finance.write', 'settings.manage') @WholeSchool(FEE_GRID_SHARED)
   updateFeeType(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: FeeTypeDto) { return this.s.updateFeeType(a, id, dto); }
 
   /** Parents : factures de leurs enfants seulement (périmètre appliqué par le service). */
