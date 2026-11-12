@@ -24,6 +24,13 @@ export class SettingsController {
     return this.s.overview(a);
   }
 
+  /** Groupe scolaire de l'école (lot G1) : son nom, sa date de rattachement et ce que le groupe reçoit. Direction seulement. */
+  @Get('settings/group')
+  @Can('settings.manage')
+  group(@CurrentActor() a: Actor) {
+    return this.s.group(a);
+  }
+
   @Patch('settings')
   @Can('settings.manage')
   updateSettings(@CurrentActor() a: Actor, @Body() dto: TenantSettingsDto) {

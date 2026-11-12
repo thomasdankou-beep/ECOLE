@@ -28,6 +28,7 @@ import { LessonsController, LessonsService } from './modules/lessons/lessons';
 import { NotificationsController } from './modules/notifications/notifications.controller';
 import { NotificationsService } from './modules/notifications/notifications.service';
 import { PlatformController, PlatformDb, PlatformGuard, PlatformService } from './modules/platform/platform';
+import { PlatformGroupsController, PlatformGroupsService } from './modules/platform/groups';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReportCardsController } from './modules/report-cards/report-cards.controller';
@@ -63,14 +64,14 @@ class CoreModule {}
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
-    InternshipsController, PlatformController, HonorsController,
+    InternshipsController, PlatformController, PlatformGroupsController, HonorsController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
-    PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, HonorsService,
+    PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,
   ],
 })
 export class AppModule {}

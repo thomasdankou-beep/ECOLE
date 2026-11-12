@@ -1,25 +1,8 @@
 import { expect, Page, test } from '@playwright/test';
-import { COMPTES, MOT_DE_PASSE, PROVISOIRE, SUPER_ADMIN } from './comptes';
+import { COMPTES, PROVISOIRE, SUPER_ADMIN } from './comptes';
+import { connexion } from './connexion';
 
 /** SEC-043 : les protections visibles à l'écran, vérifiées dans un vrai navigateur, au bureau et au téléphone. */
-
-/**
- * Connexion par le formulaire. L'API limite à 10 connexions par minute et par adresse : si la limite est
- * atteinte (ce qui prouve au passage qu'elle fonctionne), on attend la minute suivante.
- */
-async function connexion(page: Page, identifiant: string, motDePasse = MOT_DE_PASSE) {
-  for (let essai = 0; essai < 3; essai++) {
-    await page.goto('/connexion');
-    await page.getByLabel('Téléphone, e-mail ou matricule').fill(identifiant);
-    await page.getByLabel('Mot de passe', { exact: true }).fill(motDePasse);
-    await page.getByRole('button', { name: 'Se connecter' }).click();
-    const limite = page.getByRole('alert').filter({ hasText: /Too Many Requests|Trop de/ });
-    await Promise.race([page.waitForURL((u) => u.pathname.startsWith('/espace')), limite.waitFor()]);
-    if (new URL(page.url()).pathname.startsWith('/espace')) return;
-    await page.waitForTimeout(61_000);
-  }
-  throw new Error('Connexion impossible après 3 essais');
-}
 
 /** Liens du menu, ouvert si besoin (au téléphone il est replié). */
 async function liensDuMenu(page: Page) {
@@ -30,11 +13,20 @@ async function liensDuMenu(page: Page) {
 }
 
 test('la page de connexion refuse un mauvais mot de passe sans dire si le compte existe', async ({ page }) => {
-  await page.goto('/connexion');
-  await page.getByLabel('Téléphone, e-mail ou matricule').fill(COMPTES.comptable);
-  await page.getByLabel('Mot de passe', { exact: true }).fill('mauvais-mot-de-passe');
-  await page.getByRole('button', { name: 'Se connecter' }).click();
-  await expect(page.getByRole('alert')).toBeVisible();
+  // Le message du formulaire (l'annonceur de pages de Next.js est une alerte vide). Si la limite de 10 connexions
+  // par minute est atteinte par les tests précédents, on attend la minute suivante, comme dans connexion().
+  const alerte = page.getByRole('alert').filter({ hasText: /\S/ });
+  const limite = /Too Many Requests|Trop de/;
+  for (let essai = 0; essai < 2; essai++) {
+    await page.goto('/connexion');
+    await page.getByLabel('Téléphone, e-mail ou matricule').fill(COMPTES.comptable);
+    await page.getByLabel('Mot de passe', { exact: true }).fill('mauvais-mot-de-passe');
+    await page.getByRole('button', { name: 'Se connecter' }).click();
+    await expect(alerte).toBeVisible();
+    if (!limite.test(await alerte.innerText())) break;
+    await page.waitForTimeout(61_000);
+  }
+  await expect(alerte).not.toHaveText(limite);
   await expect(page).toHaveURL(/\/connexion/);
 });
 

@@ -60,7 +60,11 @@ jobs:
           CREATE ROLE erp_owner LOGIN PASSWORD 'erp_owner_dev';
           CREATE ROLE erp_app LOGIN PASSWORD 'erp_app_dev' NOSUPERUSER NOBYPASSRLS;
           CREATE ROLE erp_platform LOGIN PASSWORD 'erp_platform_dev' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          CREATE ROLE erp_group LOGIN PASSWORD 'erp_group_dev' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          CREATE ROLE erp_stats LOGIN PASSWORD 'erp_stats_dev' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
           CREATE DATABASE erp_test OWNER erp_owner;
+          -- Base jetable du test de la migration des groupes (lot G1), vidée par le test lui-même.
+          CREATE DATABASE erp_migration_test OWNER erp_owner;
           SQL
           cd apps/api
           npx prisma generate

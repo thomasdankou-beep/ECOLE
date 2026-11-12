@@ -46,7 +46,11 @@ async function main() {
   const tenant = existing
     ? await db.tenant.update({ where: { id: existing.id }, data: { settings: settings() } })
     : await db.tenant.create({
-        data: { slug: SLUG, name: 'Lycée privé Saint Kisito-GESA', shortName: 'Saint Kisito-GESA', country: 'BJ', currency: 'XOF', timezone: 'Africa/Porto-Novo', settings: settings() },
+        data: {
+          slug: SLUG, name: 'Lycée privé Saint Kisito-GESA', shortName: 'Saint Kisito-GESA', country: 'BJ', currency: 'XOF', timezone: 'Africa/Porto-Novo', settings: settings(),
+          // D-G1 : une école indépendante forme un groupe à elle seule, à son nom (lot G1).
+          group: { create: { name: 'Lycée privé Saint Kisito-GESA', country: 'BJ' } },
+        },
       });
   const T = tenant.id;
   const hash = await argon2.hash(DEMO_PASSWORD, { type: argon2.argon2id });

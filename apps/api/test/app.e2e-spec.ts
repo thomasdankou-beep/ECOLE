@@ -51,8 +51,9 @@ const as = (who: string) => ({
 /** Second établissement, pour vérifier l'étanchéité entre clients. */
 async function createOtherTenant() {
   await admin.$executeRaw`DELETE FROM tenants WHERE slug = 'autre-ecole' AND NOT EXISTS (SELECT 1 FROM students s WHERE s.tenant_id = tenants.id)`;
+  await admin.$executeRaw`DELETE FROM school_groups g WHERE g.name = 'Autre école' AND NOT EXISTS (SELECT 1 FROM tenants t WHERE t.group_id = g.id)`;
   let t = await admin.tenant.findUnique({ where: { slug: 'autre-ecole' } });
-  if (!t) t = await admin.tenant.create({ data: { slug: 'autre-ecole', name: 'Autre école' } });
+  if (!t) t = await admin.tenant.create({ data: { slug: 'autre-ecole', name: 'Autre école', group: { create: { name: 'Autre école' } } } });
   const tid = t.id;
   return admin.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tid}, true)`;
@@ -845,7 +846,7 @@ describe('Étanchéité entre écoles : références, blocages et sessions (SEC-
 
   beforeAll(async () => {
     const argon2 = await import('argon2');
-    const t = await admin.tenant.create({ data: { slug: slugB, name: 'École B (test)', settings: { matriculePrefix: 'ETB' } } });
+    const t = await admin.tenant.create({ data: { slug: slugB, name: 'École B (test)', settings: { matriculePrefix: 'ETB' }, group: { create: { name: 'École B (test)' } } } });
     tidB = t.id;
     const ids = await inTenant(tidB, async (tx) => {
       const site = await tx.site.create({ data: { tenantId: tidB, name: 'Site B' } });
@@ -2768,6 +2769,302 @@ describe('Lot G0 · régularisation des anciens comptes Direction limités à un
     expect(await g0Roles(G0.scriptB)).toEqual(['SECRETARIAT']);
     expect(fails(`--ecole saint-kisito --compte ${b} --retirer-direction --operateur "Opérateur fictif" --motif "Test G0 du 12/11"`)).toContain('rien à régulariser');
     expect(run()).toMatch(/saint-kisito \(.*\) : aucun compte Direction limité à un site/);
+  });
+});
+
+describe('Lot G1 · groupes scolaires : rattachement des écoles et rôles de base dédiés (T-03, T-04, T-11, T-14)', () => {
+  const email = 'groupes-g1@test.local';
+  const stamp = Date.now().toString(36);
+  const groupDb = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_GROUP_URL } } });
+  const statsDb = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_STATS_URL } } });
+  const NAME_A = `Groupe A (test G1 ${stamp})`;
+  const NAME_B = `Groupe B (test G1 ${stamp})`;
+  const school = (k: string) => `École ${k.toUpperCase()} (test G1 ${stamp})`;
+  const ids = { groupA: '', groupB: '', a1: '', a2: '', b1: '' };
+  let cookie = '';
+  let directorA1 = { identifier: '', temporaryPassword: '' };
+  const pf = (method: 'get' | 'post' | 'patch' | 'delete', url: string, body?: object) =>
+    (http as any)[method](`/api/v1/platform${url}`).set('Cookie', cookie).send(body ?? {});
+  const newSchool = async (k: string, extra: object = {}) => {
+    const r = await pf('post', '/tenants', {
+      slug: `g1-${k}-${stamp}`, name: school(k), matriculePrefix: 'GUN', siteName: 'Centre', director: { firstName: 'Test', lastName: 'Groupes', phone: '0190002222' }, ...extra,
+    });
+    expect([k, r.status]).toEqual([k, 201]);
+    return r.body as { tenant: { id: string; group: { id: string; name: string } }; director: { identifier: string; temporaryPassword: string } };
+  };
+  const groupOf = async (tenantId: string) => (await admin.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { groupId: true } })).groupId;
+  /** Lecture avec le rôle du groupe et le groupe de session donné, comme le fera la console du groupe (lot G2). */
+  const asGroup = <T>(groupId: string | null, fn: (tx: Prisma.TransactionClient) => Promise<T>) =>
+    groupDb.$transaction(async (tx) => {
+      if (groupId) await tx.$executeRaw`SELECT set_config('app.group_id', ${groupId}, true)`;
+      return fn(tx);
+    });
+  const schoolJournal = (tenantId: string, action: string) =>
+    admin.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      return tx.auditLog.findMany({ where: { action }, orderBy: { createdAt: 'asc' } });
+    });
+  const ALL = 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER';
+  /** Tables (et vues) sur lesquelles un rôle a le moindre droit, sur la table ou sur une colonne. */
+  const tablesOpenTo = async (role: string) =>
+    (await admin.$queryRaw<{ table: string }[]>`
+      SELECT c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
+        AND (has_table_privilege(${role}, c.oid, ${ALL}) OR has_any_column_privilege(${role}, c.oid, 'SELECT, INSERT, UPDATE, REFERENCES'))
+      ORDER BY 1`).map((r) => r.table);
+
+  beforeAll(async () => {
+    execSync(`npx ts-node --transpile-only prisma/platform-admin.ts ${email} "Super Admin Groupes" --operateur "Tests automatiques" --motif "Remise à zéro du compte de test"`, { env: process.env, cwd: `${__dirname}/..` });
+    const argon2 = await import('argon2');
+    await admin.platformAdmin.update({ where: { email }, data: { passwordHash: await argon2.hash('Plateforme-Test-2026'), mustChangePassword: false, mustSetupTwoFactor: false } });
+    const r = await http.post('/api/v1/platform/auth/login').send({ email, password: 'Plateforme-Test-2026' });
+    expect(r.status).toBe(201);
+    cookie = (r.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('erp_pt='))!.split(';')[0];
+  });
+
+  afterAll(async () => {
+    await groupDb.$disconnect();
+    await statsDb.$disconnect();
+  });
+
+  it("D-G1 : le Super Admin crée des groupes ; une école créée sans groupe en forme un à son nom", async () => {
+    expect((await pf('post', '/groups', { name: 'AB' })).status).toBe(400);
+    expect((await pf('post', '/groups', { name: 'Groupe valide', email: 'pas-une-adresse' })).status).toBe(400);
+    const a = await pf('post', '/groups', { name: NAME_A, promoter: 'Promoteur fictif A', phone: '0190000000', email: 'GroupeA@Test.local', country: 'BJ', notes: 'Note interne fictive G1' });
+    expect(a.status).toBe(201);
+    expect(a.body).toMatchObject({ name: NAME_A, email: 'groupea@test.local', status: 'ACTIVE', schools: [] });
+    ids.groupA = a.body.id;
+    ids.groupB = (await pf('post', '/groups', { name: NAME_B })).body.id;
+    // École créée directement dans un groupe existant.
+    const a1 = await newSchool('a1', { groupId: ids.groupA });
+    expect(a1.tenant.group).toEqual({ id: ids.groupA, name: NAME_A });
+    ids.a1 = a1.tenant.id;
+    directorA1 = a1.director;
+    // Sans groupe choisi : un groupe d'un seul établissement, à son nom.
+    const a2 = await newSchool('a2');
+    expect(a2.tenant.group.name).toBe(school('a2'));
+    expect(a2.tenant.group.id).not.toBe(ids.groupA);
+    ids.a2 = a2.tenant.id;
+    ids.b1 = (await newSchool('b1', { groupId: ids.groupB })).tenant.id;
+    expect((await pf('post', '/tenants', { slug: `g1-x-${stamp}`, name: school('x'), matriculePrefix: 'GUN', siteName: 'Centre', director: { firstName: 'T', lastName: 'G', phone: '0190002222' }, groupId: '00000000-0000-4000-8000-000000000000' })).status).toBe(404);
+    // Une facture de groupe est dans une seule monnaie.
+    const xaf = await pf('post', '/tenants', { slug: `g1-y-${stamp}`, name: school('y'), matriculePrefix: 'GUN', siteName: 'Centre', director: { firstName: 'T', lastName: 'G', phone: '0190002222' }, groupId: ids.groupA, country: 'CM' });
+    expect(xaf.status).toBe(400);
+    expect(xaf.body.message).toContain('une seule monnaie');
+    expect(await admin.tenant.findUnique({ where: { slug: `g1-y-${stamp}` } })).toBeNull();
+    const groups = (await pf('get', '/groups')).body as any[];
+    expect(groups.find((g) => g.id === ids.groupA).schools.map((s: any) => s.id)).toEqual([ids.a1]);
+    const tenants = (await pf('get', '/tenants')).body as any[];
+    expect(tenants.find((t) => t.id === ids.a2).group).toEqual({ id: a2.tenant.group.id, name: school('a2') });
+    // Toute école de la base appartient à un groupe (colonne obligatoire, clé étrangère).
+    const [{ n }] = await admin.$queryRaw<{ n: number }[]>`SELECT count(*)::int AS n FROM tenants WHERE group_id IS NULL OR NOT EXISTS (SELECT 1 FROM school_groups g WHERE g.id = tenants.group_id)`;
+    expect(n).toBe(0);
+    // Création tracée dans le journal du groupe et dans celui de la plateforme.
+    const journal = (await pf('get', `/groups/${ids.groupA}/audit`)).body as any[];
+    expect(journal.map((l) => l.action).sort()).toEqual(['group.created', 'group.school_created']);
+    expect(journal.every((l) => l.actorName === 'Super Admin Cahiora (Super Admin Groupes)' && l.ip === null)).toBe(true);
+  });
+
+  it('T-14 : seul le Super Admin rattache une école à un groupe, avec un motif, tracé dans les trois journaux', async () => {
+    const motif = 'Demande écrite fictive du promoteur A';
+    // Sans connexion Super Admin, ou avec le jeton d'une école : refusé.
+    expect((await http.post(`/api/v1/platform/tenants/${ids.a2}/attach`).send({ groupId: ids.groupA, motif })).status).toBe(401);
+    expect((await http.post(`/api/v1/platform/tenants/${ids.a2}/attach`).set('Authorization', `Bearer ${tokens.direction}`).send({ groupId: ids.groupA, motif })).status).toBe(401);
+    // La direction ne peut pas changer de groupe par ses paramètres.
+    expect((await as('direction').patch('/settings', { groupId: ids.groupA })).status).toBe(400);
+    // Même en base : ni le rôle des écoles ni celui du groupe ne peuvent changer le groupe d'une école.
+    await expect(app_.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${ids.a2}, true)`;
+      await tx.$executeRaw`UPDATE tenants SET group_id = ${ids.groupA}::uuid WHERE id = ${ids.a2}::uuid`;
+    })).rejects.toThrow(/permission denied/);
+    await expect(asGroup(ids.groupA, (tx) => tx.$executeRaw`UPDATE tenants SET group_id = ${ids.groupA}::uuid WHERE id = ${ids.a2}::uuid`)).rejects.toThrow(/permission denied/);
+    // Motif obligatoire, groupe existant, pas de rattachement au groupe actuel.
+    expect((await pf('post', `/tenants/${ids.a2}/attach`, { groupId: ids.groupA })).status).toBe(400);
+    expect((await pf('post', `/tenants/${ids.a2}/attach`, { groupId: ids.groupA, motif: 'abc' })).status).toBe(400);
+    expect((await pf('post', `/tenants/${ids.a2}/attach`, { groupId: '00000000-0000-4000-8000-000000000000', motif })).status).toBe(404);
+    expect((await pf('post', `/tenants/${ids.a1}/attach`, { groupId: ids.groupA, motif })).status).toBe(400);
+    const before = await groupOf(ids.a2);
+    const r = await pf('post', `/tenants/${ids.a2}/attach`, { groupId: ids.groupA, motif });
+    expect(r.status).toBe(201);
+    expect(r.body.group).toEqual({ id: ids.groupA, name: NAME_A });
+    expect(await groupOf(ids.a2)).toBe(ids.groupA);
+    // 1. Journal de la plateforme : qui, d'où vers où, et pourquoi.
+    const pl = await admin.platformAuditLog.findFirst({ where: { action: 'platform.group.school_attached', tenantId: ids.a2 }, orderBy: { createdAt: 'desc' } });
+    expect(pl?.data).toEqual({ fromGroupId: before, fromGroupName: school('a2'), toGroupId: ids.groupA, toGroupName: NAME_A, motif });
+    expect(pl?.adminId).toBeTruthy();
+    // 2. Journaux des deux groupes : l'école qui part ou arrive, sans le motif.
+    const gl = await admin.groupAuditLog.findMany({ where: { groupId: { in: [before, ids.groupA] }, action: { in: ['group.school_left', 'group.school_joined'] } } });
+    expect(gl.map((l) => `${l.groupId === before ? 'ancien' : 'nouveau'} ${l.action} ${(l.data as any).tenantId === ids.a2}`).sort())
+      .toEqual(['ancien group.school_left true', 'nouveau group.school_joined true']);
+    expect(JSON.stringify(gl)).not.toContain(motif);
+    // 3. Journal de l'école, lisible par sa direction.
+    const sl = await schoolJournal(ids.a2, 'platform.group.attached');
+    expect(sl).toHaveLength(1);
+    expect(sl[0]).toMatchObject({ userName: 'Super Admin de la plateforme (Super Admin Groupes)', entity: 'Tenant', data: { from: school('a2'), to: NAME_A } });
+  });
+
+  it('T-14 : une école détachée forme un groupe à son nom et disparaît aussitôt du groupe', async () => {
+    const seen = () => asGroup(ids.groupA, async (tx) => (await tx.$queryRaw<{ id: string }[]>`SELECT id FROM tenants`).map((x) => x.id).sort());
+    expect(await seen()).toEqual([ids.a1, ids.a2].sort());
+    expect((await pf('post', `/tenants/${ids.a2}/detach`, {})).status).toBe(400);
+    expect((await http.post(`/api/v1/platform/tenants/${ids.a2}/detach`).set('Authorization', `Bearer ${tokens.direction}`).send({ motif: 'Essai avec une école' })).status).toBe(401);
+    const d = await pf('post', `/tenants/${ids.a2}/detach`, { motif: 'Fin du rattachement fictif' });
+    expect(d.status).toBe(201);
+    expect(d.body.group.name).toBe(school('a2'));
+    // Le groupe A ne la voit plus, dès la transaction suivante.
+    expect(await seen()).toEqual([ids.a1]);
+    const own = await groupOf(ids.a2);
+    expect(own).toBe(d.body.group.id);
+    expect(await asGroup(own, async (tx) => (await tx.$queryRaw<{ id: string }[]>`SELECT id FROM tenants`).map((x) => x.id))).toEqual([ids.a2]);
+    // Déjà seule dans son groupe : rien à détacher.
+    expect((await pf('post', `/tenants/${ids.a2}/detach`, { motif: 'Encore une fois' })).status).toBe(400);
+    // Les trois journaux.
+    expect(await admin.platformAuditLog.count({ where: { action: 'platform.group.school_detached', tenantId: ids.a2 } })).toBe(1);
+    expect((await admin.groupAuditLog.findMany({ where: { groupId: own } })).map((l) => l.action).sort()).toEqual(['group.created_for_school', 'group.school_joined']);
+    expect(await admin.groupAuditLog.count({ where: { groupId: ids.groupA, action: 'group.school_left' } })).toBe(1);
+    expect((await schoolJournal(ids.a2, 'platform.group.detached'))[0]).toMatchObject({ data: { from: NAME_A, to: school('a2') } });
+  });
+
+  it("T-03 : le rôle du groupe ne lit aucune ligne d'un autre groupe, même par requête directe", async () => {
+    // Sans groupe de session : rien du tout.
+    const none = await asGroup(null, async (tx) => {
+      const n: number[] = [];
+      for (const t of ['school_groups', 'tenants', 'group_audit_logs']) n.push((await tx.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${t}`))[0].n);
+      return n;
+    });
+    expect(none).toEqual([0, 0, 0]);
+    // Groupe A : sa fiche, ses écoles et son journal ; rien du groupe B, même demandé par identifiant et avec l'école de B fixée en session.
+    const seen = await asGroup(ids.groupA, async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${ids.b1}, true)`;
+      return {
+        groups: (await tx.$queryRaw<{ id: string }[]>`SELECT id FROM school_groups`).map((x) => x.id),
+        groupB: await tx.$queryRaw`SELECT id FROM school_groups WHERE id = ${ids.groupB}::uuid`,
+        schools: (await tx.$queryRaw<{ id: string }[]>`SELECT id FROM tenants`).map((x) => x.id),
+        schoolB: await tx.$queryRaw`SELECT id FROM tenants WHERE id = ${ids.b1}::uuid OR slug = ${`g1-b1-${stamp}`}`,
+        journals: (await tx.$queryRaw<{ g: string }[]>`SELECT DISTINCT group_id AS g FROM group_audit_logs`).map((x) => x.g),
+      };
+    });
+    expect(seen).toEqual({ groups: [ids.groupA], groupB: [], schools: [ids.a1], schoolB: [], journals: [ids.groupA] });
+    // Ni les notes internes de la plateforme, ni les réglages ou notes des écoles.
+    for (const sql of ['SELECT notes FROM school_groups', 'SELECT settings FROM tenants', 'SELECT "platformNotes" FROM tenants', 'SELECT domain FROM tenants']) {
+      await expect(asGroup(ids.groupA, (tx) => tx.$queryRawUnsafe(sql))).rejects.toThrow(/permission denied/);
+    }
+    // Aucune écriture, même dans son propre groupe.
+    for (const sql of [
+      `UPDATE school_groups SET name = 'Piraté'`, `DELETE FROM school_groups`,
+      `INSERT INTO group_audit_logs (id, group_id, "actorKind", action) VALUES (gen_random_uuid(), '${ids.groupA}', 'group', 'x')`,
+      `INSERT INTO school_groups (id, name, "updatedAt") VALUES (gen_random_uuid(), 'Faux groupe', now())`,
+    ]) await expect(asGroup(ids.groupA, (tx) => tx.$executeRawUnsafe(sql))).rejects.toThrow(/permission denied/);
+  });
+
+  it("T-04 : les rôles erp_group et erp_stats n'ont aucun droit sur aucune table d'école, ni sur les comptes", async () => {
+    const schoolTables = (await admin.$queryRaw<{ table: string }[]>`
+      SELECT c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
+        AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname IN ('tenant_id', 'tenantId') AND NOT a.attisdropped)`).map((r) => r.table);
+    expect(schoolTables.length).toBeGreaterThanOrEqual(50);
+    expect(schoolTables).toEqual(expect.arrayContaining(['students', 'users', 'grades', 'payments', 'sessions', 'audit_logs']));
+    // Contrôle automatique : toute table qui porte une école, présente ou future.
+    const group = await tablesOpenTo('erp_group');
+    const stats = await tablesOpenTo('erp_stats');
+    expect(group.filter((t) => schoolTables.includes(t))).toEqual([]);
+    expect(stats.filter((t) => schoolTables.includes(t))).toEqual([]);
+    // Le rôle du groupe ne voit que trois tables (lecture seule, colonnes choisies) ; celui des statistiques, aucune pour l'instant.
+    expect(group).toEqual(['group_audit_logs', 'school_groups', 'tenants']);
+    expect(stats).toEqual([]);
+    const cols = await admin.$queryRaw<{ table: string; column: string; privilege: string }[]>`
+      SELECT table_name AS table, column_name AS column, privilege_type AS privilege FROM information_schema.column_privileges
+      WHERE grantee = 'erp_group' AND table_name IN ('tenants', 'school_groups') ORDER BY 1, 2`;
+    expect(cols.every((c) => c.privilege === 'SELECT')).toBe(true);
+    expect(cols.filter((c) => c.table === 'tenants').map((c) => c.column).sort()).toEqual(['country', 'currency', 'groupJoinedAt', 'group_id', 'id', 'name', 'shortName', 'slug', 'status']);
+    expect(cols.filter((c) => c.table === 'school_groups').map((c) => c.column)).not.toContain('notes');
+    // Ni super-utilisateur, ni exemption de la Row Level Security, ni propriétaire, ni création de rôle ou de base.
+    const roles = await admin.$queryRaw<{ name: string; flags: string; owns: number }[]>`
+      SELECT rolname AS name, concat_ws(',', NULLIF(rolsuper, false)::text, NULLIF(rolbypassrls, false)::text, NULLIF(rolcreaterole, false)::text, NULLIF(rolcreatedb, false)::text) AS flags,
+             (SELECT count(*)::int FROM pg_class c WHERE c.relowner = r.oid) AS owns
+      FROM pg_roles r WHERE rolname IN ('erp_group', 'erp_stats') ORDER BY 1`;
+    expect(roles).toEqual([{ name: 'erp_group', flags: '', owns: 0 }, { name: 'erp_stats', flags: '', owns: 0 }]);
+    // Par requête directe : élèves, comptes, mots de passe, comptes Super Admin.
+    for (const db of [groupDb, statsDb]) {
+      for (const t of ['students', 'users', 'sessions', 'recovery_codes', 'platform_admins', 'platform_recovery_codes', 'platform_audit_logs']) {
+        await expect(db.$queryRawUnsafe(`SELECT count(*) FROM ${t}`)).rejects.toThrow(/permission denied/);
+      }
+    }
+    await expect(statsDb.$queryRaw`SELECT count(*) FROM tenants`).rejects.toThrow(/permission denied/);
+  });
+
+  it("T-11 : le rôle des écoles ne lit aucune table du groupe ; la direction voit seulement le nom de son groupe", async () => {
+    // Hors tables d'école, l'application n'a droit qu'à la fiche des écoles, sans les colonnes du groupe.
+    const open = await tablesOpenTo('erp_app');
+    const outside = (await admin.$queryRaw<{ table: string }[]>`
+      SELECT c.relname AS table FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
+        AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname IN ('tenant_id', 'tenantId') AND NOT a.attisdropped)`).map((r) => r.table);
+    expect(open.filter((t) => outside.includes(t))).toEqual(['tenants']);
+    const cols = (await admin.$queryRaw<{ column: string }[]>`
+      SELECT column_name AS column FROM information_schema.column_privileges WHERE grantee = 'erp_app' AND table_name = 'tenants'`).map((c) => c.column);
+    expect(cols).not.toContain('group_id');
+    expect(cols).not.toContain('groupJoinedAt');
+    for (const sql of ['SELECT count(*) FROM school_groups', 'SELECT count(*) FROM group_audit_logs', 'SELECT group_id FROM tenants']) {
+      await expect(app_.$queryRawUnsafe(sql)).rejects.toThrow(/permission denied/);
+    }
+    // La seule porte : current_tenant_group(), qui ne renvoie rien hors d'une école et seulement son propre groupe dans une école.
+    expect(await app_.$queryRaw`SELECT * FROM current_tenant_group()`).toEqual([]);
+    const own = await app_.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.tenant_id', ${ids.a1}, true)`;
+      return tx.$queryRaw<{ name: string }[]>`SELECT name FROM current_tenant_group()`;
+    });
+    expect(own).toEqual([{ name: NAME_A }]);
+    // Écran Paramètres : Direction seulement ; le groupe ne reçoit encore aucune donnée de l'école.
+    const g = await as('direction').get('/settings/group');
+    expect(g.status).toBe(200);
+    expect(g.body).toMatchObject({ name: 'Lycée privé Saint Kisito-GESA', sharedWithGroup: [] });
+    expect(Object.keys(g.body).sort()).toEqual(['joinedAt', 'name', 'sharedWithGroup']);
+    for (const who of ['secretariat', 'comptable', 'teacher', 'parent', 'student']) expect([who, (await as(who).get('/settings/group')).status]).toEqual([who, 403]);
+    // La direction d'une école d'un groupe voit le nom du groupe, jamais les autres écoles.
+    const login = await http.post('/api/v1/auth/login').send({ tenant: `g1-a1-${stamp}`, identifier: directorA1.identifier, password: directorA1.temporaryPassword });
+    expect(login.status).toBe(200);
+    await http.post('/api/v1/auth/change-password').set('Authorization', `Bearer ${login.body.accessToken}`).send({ current: directorA1.temporaryPassword, next: 'Groupes2026x' }).expect(200);
+    const relog = await http.post('/api/v1/auth/login').send({ tenant: `g1-a1-${stamp}`, identifier: directorA1.identifier, password: 'Groupes2026x' });
+    const mine = await http.get('/api/v1/settings/group').set('Authorization', `Bearer ${relog.body.accessToken}`);
+    expect(mine.status).toBe(200);
+    expect(mine.body).toEqual({ name: NAME_A, joinedAt: expect.any(String), sharedWithGroup: [] });
+    expect(JSON.stringify(mine.body)).not.toContain(school('a2'));
+    // Le journal de l'école montre sa création dans le groupe.
+    const log = await http.get('/api/v1/audit?action=platform').set('Authorization', `Bearer ${relog.body.accessToken}`);
+    expect(log.body.find((e: any) => e.action === 'platform.tenant.created')?.data).toMatchObject({ group: NAME_A });
+  });
+
+  it("un groupe qui a des écoles ne peut pas être supprimé ; un groupe vide oui, et son journal reste", async () => {
+    expect((await pf('delete', `/groups/${ids.groupB}`)).status).toBe(409);
+    // La base le refuse aussi, même au rôle de la plateforme.
+    await expect(app.get(PlatformDb).schoolGroup.delete({ where: { id: ids.groupB } })).rejects.toThrow();
+    // Fiche du groupe : les notes internes ne vont jamais dans le journal du groupe.
+    const u = await pf('patch', `/groups/${ids.groupA}`, { promoter: 'Nouveau promoteur fictif', notes: 'Autre note interne fictive', email: '' });
+    expect(u.status).toBe(200);
+    expect(u.body).toMatchObject({ promoter: 'Nouveau promoteur fictif', email: null, notes: 'Autre note interne fictive' });
+    expect((await pf('patch', `/groups/${ids.groupA}`, { name: '' })).status).toBe(400);
+    // B1 rejoint le groupe A : aucun des deux groupes n'apprend le nom de l'autre, ni le motif, ni les notes.
+    expect((await pf('post', `/tenants/${ids.b1}/attach`, { groupId: ids.groupA, motif: 'Regroupement fictif B vers A' })).status).toBe(201);
+    const logs = await admin.groupAuditLog.findMany({ where: { groupId: { in: [ids.groupA, ids.groupB] } } });
+    const ofA = JSON.stringify(logs.filter((l) => l.groupId === ids.groupA));
+    const ofB = JSON.stringify(logs.filter((l) => l.groupId === ids.groupB));
+    expect(ofA).not.toContain(NAME_B);
+    expect(ofB).not.toContain(NAME_A);
+    for (const secret of ['Regroupement fictif', 'Note interne fictive', 'Autre note interne fictive']) expect(ofA + ofB).not.toContain(secret);
+    expect(ofA).toContain('Nouveau promoteur fictif');
+    const pl = await admin.platformAuditLog.findFirst({ where: { action: 'platform.group.updated' }, orderBy: { createdAt: 'desc' } });
+    expect(pl?.data).toMatchObject({ groupId: ids.groupA, promoter: 'Nouveau promoteur fictif', notes: 'modifiées' });
+    // Groupe B vide : suppression permise, journal conservé et toujours en ajout seul.
+    expect((await pf('delete', `/groups/${ids.groupB}`)).status).toBe(200);
+    expect(await admin.schoolGroup.findUnique({ where: { id: ids.groupB } })).toBeNull();
+    expect((await pf('get', `/groups/${ids.groupB}/audit`)).status).toBe(404);
+    const kept = (await admin.groupAuditLog.findMany({ where: { groupId: ids.groupB }, orderBy: { createdAt: 'asc' } })).map((l) => l.action);
+    expect(kept).toEqual(['group.created', 'group.school_created', 'group.school_left', 'group.deleted']);
+    await expect(admin.$executeRaw`DELETE FROM group_audit_logs WHERE group_id = ${ids.groupB}::uuid`).rejects.toThrow(/ajout seul/);
+    await expect(admin.$executeRaw`UPDATE group_audit_logs SET action = 'x' WHERE group_id = ${ids.groupB}::uuid`).rejects.toThrow(/ajout seul/);
+    const actions = ((await pf('get', '/audit')).body as any[]).map((a) => a.action);
+    expect(actions).toEqual(expect.arrayContaining(['platform.group.created', 'platform.group.updated', 'platform.group.deleted', 'platform.group.school_attached', 'platform.group.school_detached']));
   });
 });
 

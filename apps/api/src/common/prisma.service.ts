@@ -12,9 +12,10 @@ export type Tx = Prisma.TransactionClient;
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   constructor() {
-    // Les notes internes de la plateforme ne sont pas lisibles par le rôle des écoles (SEC-006) :
-    // elles ne sont jamais demandées par ce client (la plateforme utilise PlatformDb).
-    super({ omit: { tenant: { platformNotes: true } } });
+    // Les notes internes de la plateforme ne sont pas lisibles par le rôle des écoles (SEC-006), ni le groupe
+    // scolaire de l'école (lot G1, la direction le lit par current_tenant_group()) : ces colonnes ne sont
+    // jamais demandées par ce client (la plateforme utilise PlatformDb).
+    super({ omit: { tenant: { platformNotes: true, groupId: true, groupJoinedAt: true } } });
   }
 
   async onModuleInit() {

@@ -3,6 +3,7 @@
 # - erp_owner : propriétaire du schéma, utilisé pour les migrations et le jeu de démonstration ;
 # - erp_app : rôle de l'application, sans contournement de la Row Level Security ;
 # - erp_platform : rôle du Super Admin (voir role-plateforme.sh, qui le crée aussi sur une base existante).
+# Les rôles des groupes scolaires (erp_group, erp_stats) sont créés ensuite par roles-groupes.sh.
 set -e
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<SQL
 CREATE ROLE erp_owner LOGIN PASSWORD '${ERP_OWNER_PASSWORD}';

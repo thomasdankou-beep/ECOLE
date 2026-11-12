@@ -148,6 +148,9 @@ export const AUDIT_LABELS: Record<string, string> = {
   'platform.recovery.requested': 'Demande de récupération ouverte',
   'platform.recovery.approved': 'Récupération de compte validée',
   'platform.recovery.rejected': 'Demande de récupération refusée',
+  'platform.group.initial': 'Groupe scolaire créé au nom de l’école (mise à jour de Cahiora)',
+  'platform.group.attached': 'Super Admin : rattachement à un groupe scolaire',
+  'platform.group.detached': 'Super Admin : détachement du groupe scolaire (établissement indépendant)',
 };
 
 export const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action;
