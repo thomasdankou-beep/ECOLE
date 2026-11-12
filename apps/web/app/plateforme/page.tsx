@@ -2,16 +2,18 @@
 
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { KeyRound, LifeBuoy, LogOut, Pencil, Plus, ShieldCheck } from 'lucide-react';
+import { KeyRound, LifeBuoy, LogOut, Network, Pencil, Plus, ShieldCheck } from 'lucide-react';
 import { RecoveryCodesPanel } from '@/components/recovery-codes';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, PageHeader, Select, Table, Textarea, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 import { pf } from '@/lib/platform';
+import { GroupDialog, Groups, MoveDialog, PLATFORM_GROUP_ACTIONS, platformGroupDetail, type Group, type GroupRef } from './groupes';
 
 type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; mustSetupTwoFactor?: boolean; platformDomain: string | null };
 type Tenant = {
   id: string; slug: string; name: string; shortName: string | null; country: string; currency: string; timezone: string; status: 'ACTIVE' | 'SUSPENDED'; domain: string | null;
   platformNotes: string | null; smsSender: string | null; createdAt: string; demo: boolean; students: number; staff: number; sites: number; lastActivityAt: string | null;
+  group: GroupRef; groupJoinedAt: string;
 };
 type Audit = { id: string; action: string; tenantId: string | null; createdAt: string; data: unknown; adminName: string | null; ip: string | null };
 type Secret = { title: string; school: string; identifier: string; password: string };
@@ -27,6 +29,7 @@ const ACTIONS: Record<string, string> = {
   'platform.auth.logout': 'Déconnexion', 'platform.auth.2fa_failed': 'Code de double authentification incorrect',
   'platform.auth.2fa_enabled': 'Double authentification activée', 'platform.auth.2fa_reset': 'Double authentification reconfigurée',
   'platform.auth.refused': 'Connexion refusée (compte bloqué ou désactivé)', 'platform.auth.unknown_identifier': 'Connexion avec un e-mail inconnu',
+  ...PLATFORM_GROUP_ACTIONS,
 };
 type Country = { code: string; name: string; dial: string; currency: string; timezone: string; einvoice: string | null };
 type Locale = { country: string; currency: string; timezone: string };
@@ -172,20 +175,27 @@ function ChangePassword({ done }: { done: () => void }) {
 
 function Schools({ admin }: { admin: Admin }) {
   const toast = useToast();
-  const [tab, setTab] = useState<'ecoles' | 'recuperation' | 'journal'>('ecoles');
+  const [tab, setTab] = useState<'ecoles' | 'groupes' | 'recuperation' | 'journal'>('ecoles');
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
+  const [groups, setGroups] = useState<Group[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
   const [error, setError] = useState<unknown>(null);
   const [creating, setCreating] = useState(false);
+  const [newGroup, setNewGroup] = useState(false);
   const [edit, setEdit] = useState<Tenant | null>(null);
+  const [move, setMove] = useState<Tenant | null>(null);
   const [secret, setSecret] = useState<Secret | null>(null);
+  const countries = useCountries();
   const load = useCallback(() => {
     pf<Tenant[]>('GET', '/tenants').then(setTenants).catch(setError);
+    pf<Group[]>('GET', '/groups').then(setGroups).catch(setError);
     pf<Audit[]>('GET', '/audit').then(setAudit).catch(() => {});
   }, []);
   useEffect(load, [load]);
   const address = (t: Tenant) => t.domain ?? (admin.platformDomain ? `${t.slug}.${admin.platformDomain}` : `${t.slug} (domaine de la plateforme à configurer)`);
   const names = new Map((tenants ?? []).map((t) => [t.id, t.name]));
+  const members = new Map<string, number>();
+  for (const t of tenants ?? []) members.set(t.group.id, (members.get(t.group.id) ?? 0) + 1);
 
   async function toggle(t: Tenant) {
     const status = t.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
@@ -209,18 +219,23 @@ function Schools({ admin }: { admin: Admin }) {
 
   return (
     <>
-      <PageHeader title="Écoles clientes" subtitle="Chaque école a sa propre adresse, ses données séparées et son compte Direction." actions={<Button onClick={() => setCreating(true)}><Plus className="size-4" /> Nouvelle école</Button>} />
+      {tab === 'groupes' ? (
+        <PageHeader title="Groupes scolaires" subtitle="Le compte client : une ou plusieurs écoles, une seule facture plus tard." actions={<Button onClick={() => setNewGroup(true)}><Plus className="size-4" /> Nouveau groupe</Button>} />
+      ) : (
+        <PageHeader title="Écoles clientes" subtitle="Chaque école a sa propre adresse, ses données séparées et son compte Direction." actions={<Button onClick={() => setCreating(true)}><Plus className="size-4" /> Nouvelle école</Button>} />
+      )}
       {secret && <SecretCard s={secret} close={() => setSecret(null)} />}
-      <Chips label="Rubrique" value={tab} onChange={setTab} options={[{ value: 'ecoles', label: 'Écoles' }, { value: 'recuperation', label: 'Récupération des comptes' }, { value: 'journal', label: 'Journal' }]} />
+      <Chips label="Rubrique" value={tab} onChange={setTab} options={[{ value: 'ecoles', label: 'Écoles' }, { value: 'groupes', label: 'Groupes' }, { value: 'recuperation', label: 'Récupération des comptes' }, { value: 'journal', label: 'Journal' }]} />
       <ErrorNote error={error} />
       {tab === 'ecoles' && tenants && (tenants.length === 0 ? <Empty title="Aucune école">Créez la première école cliente.</Empty> : (
         <Card className="overflow-x-auto p-0">
           <Table>
-            <thead><tr><th>École</th><th>Adresse</th><th>Pays</th><th>État</th><th className="text-right">Élèves</th><th className="text-right">Personnel</th><th className="text-right">Sites</th><th>Dernière connexion</th><th /></tr></thead>
+            <thead><tr><th>École</th><th>Groupe</th><th>Adresse</th><th>Pays</th><th>État</th><th className="text-right">Élèves</th><th className="text-right">Personnel</th><th className="text-right">Sites</th><th>Dernière connexion</th><th /></tr></thead>
             <tbody>
               {tenants.map((t) => (
                 <tr key={t.id}>
                   <td className="font-bold">{t.name}{t.demo && <Badge tone="info" className="ml-2">Démo</Badge>}</td>
+                  <td className="text-sm">{t.group.name}{(members.get(t.group.id) ?? 0) <= 1 && <span className="block text-xs text-muted">indépendante</span>}</td>
                   <td className="text-sm">{address(t)}</td>
                   <td className="text-sm">{t.country}</td>
                   <td>{t.status === 'ACTIVE' ? <Badge tone="good">Active</Badge> : <Badge tone="bad">Suspendue</Badge>}</td>
@@ -231,6 +246,7 @@ function Schools({ admin }: { admin: Admin }) {
                   <td>
                     <div className="flex justify-end gap-1">
                       <Button variant="ghost" size="icon" aria-label={`Modifier ${t.name}`} onClick={() => setEdit(t)}><Pencil className="size-4" /></Button>
+                      <Button variant="ghost" size="icon" aria-label={`Changer le groupe de ${t.name}`} onClick={() => setMove(t)}><Network className="size-4" /></Button>
                       <Button variant="ghost" size="icon" aria-label={`Nouveau mot de passe Direction pour ${t.name}`} onClick={() => reset(t)}><KeyRound className="size-4" /></Button>
                       <Button variant="outline" size="sm" onClick={() => toggle(t)}>{t.status === 'ACTIVE' ? 'Suspendre' : 'Réactiver'}</Button>
                     </div>
@@ -241,17 +257,33 @@ function Schools({ admin }: { admin: Admin }) {
           </Table>
         </Card>
       ))}
+      {tab === 'groupes' && <Groups groups={groups} countries={countries} reload={load} />}
       {tab === 'recuperation' && tenants && <Recoveries tenants={tenants} reload={load} />}
       {tab === 'journal' && (
         <Card className="overflow-x-auto p-0">
           <Table>
             <thead><tr><th>Date</th><th>Administrateur</th><th>Action</th><th>École</th><th>Adresse IP</th></tr></thead>
-            <tbody>{audit.map((a) => <tr key={a.id}><td className="text-sm">{when(a.createdAt)}</td><td className="font-bold">{a.adminName ?? '—'}</td><td>{ACTIONS[a.action] ?? a.action}</td><td>{a.tenantId ? names.get(a.tenantId) ?? '—' : '—'}</td><td className="font-mono text-xs">{a.ip ?? ''}</td></tr>)}</tbody>
+            <tbody>{audit.map((a) => {
+              const detail = platformGroupDetail(a.action, a.data);
+              return (
+                <tr key={a.id}>
+                  <td className="text-sm">{when(a.createdAt)}</td><td className="font-bold">{a.adminName ?? '—'}</td>
+                  <td>{ACTIONS[a.action] ?? a.action}{detail && <span className="block text-xs text-muted">{detail}</span>}</td>
+                  <td>{a.tenantId ? names.get(a.tenantId) ?? '—' : '—'}</td><td className="font-mono text-xs">{a.ip ?? ''}</td>
+                </tr>
+              );
+            })}</tbody>
           </Table>
         </Card>
       )}
       <Dialog open={creating} onOpenChange={setCreating}>
-        {creating && <CreateDialog platformDomain={admin.platformDomain} done={(s) => { setCreating(false); setSecret(s); load(); }} />}
+        {creating && <CreateDialog platformDomain={admin.platformDomain} groups={groups} done={(s) => { setCreating(false); setSecret(s); load(); }} />}
+      </Dialog>
+      <Dialog open={newGroup} onOpenChange={setNewGroup}>
+        {newGroup && <GroupDialog g={null} countries={countries} done={() => { setNewGroup(false); toast('Groupe créé'); load(); }} />}
+      </Dialog>
+      <Dialog open={!!move} onOpenChange={(o) => !o && setMove(null)}>
+        {move && <MoveDialog t={move} groups={groups} done={(message) => { setMove(null); toast(message); load(); }} />}
       </Dialog>
       <Dialog open={!!edit} onOpenChange={(o) => !o && setEdit(null)}>
         {edit && <EditDialog t={edit} done={() => { setEdit(null); load(); }} />}
@@ -272,8 +304,8 @@ function SecretCard({ s, close }: { s: Secret; close: () => void }) {
   );
 }
 
-function CreateDialog({ platformDomain, done }: { platformDomain: string | null; done: (s: Secret) => void }) {
-  const [f, setF] = useState({ name: '', shortName: '', slug: '', matriculePrefix: '', domain: '', siteName: '', firstName: '', lastName: '', phone: '', email: '' });
+function CreateDialog({ platformDomain, groups, done }: { platformDomain: string | null; groups: Group[]; done: (s: Secret) => void }) {
+  const [f, setF] = useState({ name: '', shortName: '', slug: '', matriculePrefix: '', domain: '', siteName: '', firstName: '', lastName: '', phone: '', email: '', groupId: '' });
   const countries = useCountries();
   const [loc, setLoc] = useState<Locale>({ country: 'BJ', currency: 'XOF', timezone: 'Africa/Porto-Novo' });
   const [error, setError] = useState<unknown>(null);
@@ -288,6 +320,7 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
         try {
           const r = await pf<{ tenant: { name: string }; director: { identifier: string; temporaryPassword: string } }>('POST', '/tenants', {
             name: f.name, shortName: f.shortName || undefined, slug: f.slug, matriculePrefix: f.matriculePrefix, domain: f.domain || undefined, siteName: f.siteName, ...loc,
+            groupId: f.groupId || undefined,
             director: { firstName: f.firstName, lastName: f.lastName, phone: f.phone, email: f.email || undefined },
           });
           done({ title: 'École créée. Compte Direction', school: r.tenant.name, identifier: r.director.identifier, password: r.director.temporaryPassword });
@@ -298,6 +331,12 @@ function CreateDialog({ platformDomain, done }: { platformDomain: string | null;
         }
       }}>
         <Field label="Nom complet"><Input value={f.name} onChange={set('name')} required minLength={3} maxLength={160} /></Field>
+        <Field label="Groupe scolaire" hint="Une école indépendante forme un groupe à elle seule, à son nom. Toutes les écoles d’un groupe comptent dans la même monnaie.">
+          <Select value={f.groupId} onChange={(e) => setF({ ...f, groupId: e.target.value })}>
+            <option value="">Nouveau groupe à son nom (école indépendante)</option>
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </Select>
+        </Field>
         <LocaleFields value={loc} onChange={setLoc} countries={countries} />
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Nom court"><Input value={f.shortName} onChange={set('shortName')} maxLength={60} /></Field>

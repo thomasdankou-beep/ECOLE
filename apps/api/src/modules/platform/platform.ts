@@ -11,7 +11,7 @@ import * as QRCode from 'qrcode';
 import { Prisma, PrismaClient, TenantStatus } from '@prisma/client';
 import * as argon2 from 'argon2';
 import { Type } from 'class-transformer';
-import { IsEmail, IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, Length, Matches, MaxLength, MinLength, ValidateIf, ValidateNested } from 'class-validator';
+import { IsEmail, IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID, Length, Matches, MaxLength, MinLength, ValidateIf, ValidateNested } from 'class-validator';
 import type { Request, Response } from 'express';
 import { ALLOW_PENDING_PASSWORD, AllowPendingPassword, forgetSessions, Public, RESERVED_SUBDOMAINS as RESERVED } from '../../common/auth';
 import { maskIdentifier } from '../../common/audit.service';
@@ -26,6 +26,8 @@ import {
 } from '../auth/recovery';
 import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { temporaryPassword } from '../settings/settings.service';
+import { groupLog, PlatformActor } from './group-journal';
+import { checkSameCurrency } from './group-rules';
 
 const COOKIE = 'erp_pt';
 const SESSION_HOURS = 8;
@@ -56,6 +58,8 @@ export class CreateTenantDto {
   @IsOptional() @Matches(/^[a-z0-9.-]+\.[a-z]{2,}$/, { message: 'Nom de domaine invalide' }) domain?: string;
   @IsString() @MaxLength(120) siteName: string;
   @ValidateNested() @Type(() => DirectorInput) director: DirectorInput;
+  /** Groupe scolaire existant (lot G1). Absent : l'école forme un groupe à elle seule, à son nom (D-G1). */
+  @IsOptional() @IsUUID('all', { message: 'Groupe invalide' }) groupId?: string;
 }
 
 export class UpdateTenantDto {
@@ -104,8 +108,6 @@ export class PlatformPasswordDto {
   @IsString() current: string;
   @IsString() @MinLength(12, { message: 'Au moins 12 caractères' }) @MaxLength(200) password: string;
 }
-
-type PlatformActor = { id: string; name: string; ip?: string | null };
 
 /**
  * Accès à la base pour la plateforme : création des écoles et comptage de leur activité.
@@ -367,9 +369,9 @@ export class PlatformService {
     return { token: this.sign(a) };
   }
 
-  /** Écoles clientes avec leur activité (effectifs, comptes, sites). */
+  /** Écoles clientes avec leur groupe et leur activité (effectifs, comptes, sites). */
   async tenants() {
-    const tenants = await this.db.tenant.findMany({ orderBy: { createdAt: 'asc' } });
+    const tenants = await this.db.tenant.findMany({ orderBy: { createdAt: 'asc' }, include: { group: { select: { id: true, name: true } } } });
     return Promise.all(tenants.map(async (t) => {
       const stats = await this.db.inTenant(t.id, async (tx) => {
         const [students, staff, sites, lastSession] = await Promise.all([
@@ -382,7 +384,8 @@ export class PlatformService {
       });
       return {
         id: t.id, slug: t.slug, name: t.name, shortName: t.shortName, country: t.country, currency: t.currency, timezone: t.timezone, status: t.status, domain: t.domain,
-        platformNotes: t.platformNotes, smsSender: (t.settings as any)?.smsSender ?? null, createdAt: t.createdAt, demo: !!(t.settings as any)?.demo, ...stats,
+        platformNotes: t.platformNotes, smsSender: (t.settings as any)?.smsSender ?? null, createdAt: t.createdAt, demo: !!(t.settings as any)?.demo,
+        group: t.group, groupJoinedAt: t.groupJoinedAt, ...stats,
       };
     }));
   }
@@ -396,11 +399,27 @@ export class PlatformService {
     if (!validTimezone(timezone)) throw new BadRequestException('Fuseau horaire inconnu');
     const password = temporaryPassword();
     const phone = normalizePhone(dto.director.phone, c.dial);
-    const tenant = await this.db.tenant.create({
-      data: {
-        slug: dto.slug, name: dto.name.trim(), shortName: dto.shortName?.trim() || null, country: c.code, currency: dto.currency || c.currency, timezone, domain: dto.domain ?? null,
-        settings: { matriculePrefix: dto.matriculePrefix },
-      },
+    const currency = dto.currency || c.currency;
+    // D-G1 : toute école appartient à un groupe. Sans groupe choisi, elle en forme un à elle seule, à son nom.
+    const { tenant, group } = await this.db.$transaction(async (tx) => {
+      let group: { id: string; name: string };
+      if (dto.groupId) {
+        const g = await tx.schoolGroup.findUnique({ where: { id: dto.groupId }, select: { id: true, name: true, tenants: { select: { currency: true } } } });
+        if (!g) throw new NotFoundException('Groupe introuvable');
+        checkSameCurrency(g.tenants, currency);
+        group = { id: g.id, name: g.name };
+      } else {
+        group = await tx.schoolGroup.create({ data: { name: dto.name.trim(), country: c.code }, select: { id: true, name: true } });
+        await groupLog(tx, actor, [{ groupId: group.id, action: 'group.created_for_school', data: { tenantName: dto.name.trim() } }]);
+      }
+      const tenant = await tx.tenant.create({
+        data: {
+          slug: dto.slug, name: dto.name.trim(), shortName: dto.shortName?.trim() || null, country: c.code, currency, timezone, domain: dto.domain ?? null,
+          settings: { matriculePrefix: dto.matriculePrefix }, groupId: group.id,
+        },
+      });
+      await groupLog(tx, actor, [{ groupId: group.id, action: 'group.school_created', data: { tenantId: tenant.id, tenantName: tenant.name } }]);
+      return { tenant, group };
     });
     const director = await this.db.inTenant(tenant.id, async (tx) => {
       await tx.site.create({ data: { tenantId: tenant.id, name: dto.siteName.trim() } });
@@ -411,12 +430,12 @@ export class PlatformService {
           roles: { create: [{ tenantId: tenant.id, role: 'DIRECTION' }] },
         },
       });
-      await this.schoolLog(tx, actor, tenant.id, 'platform.tenant.created', 'User', u.id, { slug: dto.slug });
+      await this.schoolLog(tx, actor, tenant.id, 'platform.tenant.created', 'User', u.id, { slug: dto.slug, group: group.name });
       return u;
     });
-    await this.log(actor, 'platform.tenant.created', tenant.id, { slug: dto.slug, name: dto.name, directorId: director.id });
+    await this.log(actor, 'platform.tenant.created', tenant.id, { slug: dto.slug, name: dto.name, directorId: director.id, groupId: group.id, groupName: group.name });
     await sendQuietly(this.sms, phone, `Votre espace ${tenant.shortName ?? tenant.name} est prêt : ${tenantOrigin(tenant)}/connexion. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Changez-le à la première connexion.`, tenant.settings);
-    return { tenant: { id: tenant.id, slug: tenant.slug, name: tenant.name }, director: { identifier: phone, temporaryPassword: password } };
+    return { tenant: { id: tenant.id, slug: tenant.slug, name: tenant.name, group }, director: { identifier: phone, temporaryPassword: password } };
   }
 
   async updateTenant(actor: PlatformActor, id: string, dto: UpdateTenantDto) {

@@ -60,7 +60,7 @@ if [ ! -f .env ]; then
   setkv SMS_CONSOLE_SHOW_TEXT false
   echo "Fichier .env de production créé pour http://$ip"
 fi
-for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
+for k in POSTGRES_PASSWORD ERP_OWNER_PASSWORD ERP_APP_PASSWORD ERP_PLATFORM_PASSWORD ERP_GROUP_PASSWORD ERP_STATS_PASSWORD JWT_ACCESS_SECRET JWT_REFRESH_SECRET APP_ENCRYPTION_KEY; do
   if grep -q "^$k=." .env; then continue; fi
   # La clé de chiffrement est lue en base64 (32 octets) ; les autres secrets en hexadécimal.
   if [ "$k" = APP_ENCRYPTION_KEY ]; then v=$(head -c 32 /dev/urandom | base64 | tr -d '\n'); else v=$(secret); fi
@@ -84,6 +84,7 @@ fi
 echo "Construction et démarrage des services (10 à 15 minutes la première fois)..."
 docker compose up -d postgres
 ./infra/postgres/role-plateforme.sh
+./infra/postgres/roles-groupes.sh
 docker compose up -d --build
 
 port=$(grep '^HTTP_PORT=' .env | cut -d= -f2-); port=${port:-80}

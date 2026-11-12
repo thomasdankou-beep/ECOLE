@@ -187,6 +187,19 @@ export class SettingsService {
     });
   }
 
+  /**
+   * Groupe scolaire de l'école (lot G1, D-G1). Le rôle des écoles n'a aucun droit sur les tables du groupe : la
+   * fonction current_tenant_group() ne renvoie que le groupe de l'école courante, jamais les autres écoles du
+   * groupe ni ses chiffres. Le groupe ne reçoit encore aucune donnée de l'école (console prévue au lot G3).
+   */
+  group(actor: Actor) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const [g] = await tx.$queryRaw<{ name: string; joined_at: Date }[]>`SELECT name, joined_at FROM current_tenant_group()`;
+      if (!g) throw new NotFoundException('Groupe introuvable');
+      return { name: g.name, joinedAt: g.joined_at, sharedWithGroup: [] as string[] };
+    });
+  }
+
   updateTenantSettings(actor: Actor, settings: Record<string, unknown>, names: { name?: string; shortName?: string } = {}) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const t = await tx.tenant.findUniqueOrThrow({ where: { id: actor.tenantId } });

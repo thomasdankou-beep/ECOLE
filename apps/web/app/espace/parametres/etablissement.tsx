@@ -6,7 +6,7 @@ import { Section } from '@/components/espace/bits';
 import { Letterhead, Signatory, type SchoolIdentity } from '@/components/print/letterhead';
 import { Button, Field, Input, Textarea, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
-import { useAction } from '@/lib/use-api';
+import { useAction, useApi } from '@/lib/use-api';
 
 export type IdentitySettings = { authorization: string; legalMentions: string; headName: string; headTitle: string; phone: string; email: string; address: string };
 
@@ -56,6 +56,7 @@ export function Etablissement({ settings, identity, locale, reload }: { settings
           </div>
         </Section>
         <PaysPaiements locale={locale} reload={reload} />
+        <GroupeScolaire />
         <Section title="Aperçu sur un document">
           <div className="grid gap-4 rounded-lg bg-white p-4 text-black">
             <Letterhead identity={preview} />
@@ -88,6 +89,30 @@ function PaysPaiements({ locale, reload }: { locale: SchoolLocale; reload: () =>
         </Field>
         <Button type="submit" loading={busy}>Enregistrer</Button>
       </form>
+    </Section>
+  );
+}
+
+/**
+ * Groupe scolaire de l'école (lot G1) : choisi par l'éditeur de Cahiora. La direction voit seulement le nom de son
+ * groupe et la date du rattachement, jamais les autres écoles du groupe ni leurs chiffres.
+ */
+function GroupeScolaire() {
+  const q = useApi<{ name: string; joinedAt: string; sharedWithGroup: string[] }>('/settings/group');
+  if (!q.data) return null;
+  const g = q.data;
+  return (
+    <Section title="Groupe scolaire">
+      <div className="grid gap-2 text-sm text-muted">
+        <p>
+          Votre établissement appartient au groupe <b className="text-ink">{g.name}</b> depuis le {new Date(g.joinedAt).toLocaleDateString('fr-FR')}.
+          {' '}Une école indépendante forme un groupe à elle seule, à son nom. Pour changer de groupe, contactez l’éditeur de Cahiora.
+        </p>
+        <p>
+          <b className="text-ink">Ce que le groupe reçoit de votre établissement :</b>{' '}
+          {g.sharedWithGroup.length ? g.sharedWithGroup.join(', ') : 'rien pour l’instant. Il ne recevra jamais de nom d’élève ni de liste nominative : seulement des chiffres d’ensemble, quand sa console sera ouverte.'}
+        </p>
+      </div>
     </Section>
   );
 }

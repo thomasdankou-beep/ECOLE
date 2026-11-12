@@ -42,6 +42,15 @@ Un seul serveur sert toutes les écoles clientes. Chaque école a sa propre adre
 
 Sans `PLATFORM_DOMAIN`, l’installation sert une seule école (`TENANT_SLUG`), comme avant. Le domaine de la plateforme et la tarification des abonnements restent à décider (voir INFORMATION MANQUANTE).
 
+### Groupes scolaires (lot G1)
+
+Toute école appartient à un groupe scolaire, le compte client : une école indépendante forme un groupe d’un seul établissement, à son nom. La mise à jour du lot G1 rattache ainsi chaque école existante à un groupe créé à son nom, sans rien changer d’autre.
+
+- **Super Admin, rubrique « Groupes »** : créer un groupe (nom, raison sociale, promoteur, coordonnées, notes internes), le modifier, supprimer un groupe vide. Un groupe qui a des écoles ne peut pas être supprimé (la base le refuse aussi).
+- **Rattacher ou détacher une école** (icône de groupe sur la ligne de l’école) : seul le Super Admin le fait, avec un motif obligatoire. Une école détachée forme de nouveau un groupe à son nom. Chaque changement est inscrit dans le journal de la plateforme (avec le motif), dans celui de chaque groupe concerné (sans le motif ni le nom de l’autre groupe) et dans celui de l’école. Toutes les écoles d’un groupe comptent dans la même monnaie.
+- **Direction de l’école** : Paramètres > Établissement affiche le nom de son groupe et la date du rattachement ; le groupe ne reçoit encore aucune donnée de l’école.
+- **Base de données** : deux rôles dédiés, créés par `infra/postgres/roles-groupes.sh` (appelé par `installer-serveur.sh` et `demarrer.sh`, mots de passe `ERP_GROUP_PASSWORD` et `ERP_STATS_PASSWORD` générés dans `.env`). `erp_group` (future console du groupe) ne lit que son propre groupe, sans les notes internes, et aucune table d’école ; `erp_stats` (futurs chiffres agrégés) n’a encore aucun droit. Le rôle des écoles (`erp_app`) n’a aucun droit sur les tables des groupes.
+
 ## Mettre en ligne sur un serveur (VPS Ubuntu)
 
 En root sur le serveur :
@@ -124,17 +133,17 @@ Prérequis : Node 22, PostgreSQL 16, Redis 7 (facultatif : sans Redis, les relan
 
 ```bash
 npm install
-# Rôles et base (une fois) : voir infra/postgres/init-roles.sh (erp_owner, erp_app, erp_platform), avec les mots de passe de apps/api/.env
+# Rôles et base (une fois) : voir infra/postgres/init-roles.sh (erp_owner, erp_app, erp_platform) et roles-groupes.sh (erp_group, erp_stats), avec les mots de passe de apps/api/.env
 cp apps/api/.env.example apps/api/.env      # puis générer les secrets
 cp apps/web/.env.example apps/web/.env.local
 npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 115 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme)
+npm test            # 181 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme, groupes scolaires et leur migration)
 ```
 
-Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`).
+Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`), et le test de la migration des groupes une base jetable `erp_migration_test` qu’il vide à chaque lancement.
 
 Contrôle automatique (SEC-039, SEC-043) : à chaque envoi sur GitHub, le workflow `.github/workflows/tests.yml` crée une base PostgreSQL neuve, applique toutes les migrations, lance ESLint, les tests de l’API, construit l’API et le site, puis lance les tests de navigateur (bureau et téléphone). Le résultat s’affiche sur GitHub (onglet « Actions »). Ne mettez en ligne qu’une version au résultat vert. En local :
 
@@ -155,6 +164,7 @@ infra      Caddy (point d’entrée HTTPS), script des rôles PostgreSQL
 ```
 
 - **Une école = un établissement (tenant)** avec ses sites. Chaque table métier porte `tenant_id` ; l’application se connecte avec un rôle sans privilège (`erp_app`) soumis à la Row Level Security, la variable `app.tenant_id` étant fixée à chaque transaction. Les migrations utilisent le rôle propriétaire `erp_owner`.
+- **Un groupe scolaire = le compte client**, qui regroupe une ou plusieurs écoles (tables `school_groups` et `group_audit_logs`, hors des écoles). Le Super Admin passe par le rôle `erp_platform` ; la future console du groupe passera par `erp_group`, cloisonné par `app.group_id`.
 - **Le navigateur ne parle qu’à une seule origine** : Caddy envoie `/api/*` à l’API et le reste au site. En développement, Next.js relaie `/api/v1` vers l’API.
 - **Paiement** : couche d’abstraction des prestataires (`apps/api/src/modules/payments/providers.ts`) avec un bac à sable signé HMAC, un adaptateur CinetPay à valider et un emplacement PayDunya. Le rapprochement est idempotent. En production, le bac à sable est fermé (paiement en ligne indisponible, encaissement au guichet seulement) sauf si `ALLOW_SANDBOX_PAYMENTS=true` ; la page de simulation est réservée au parent connecté.
 - **Notifications** : dans l’application d’abord ; SMS si non lu après 10 minutes (ou immédiatement pour une alerte urgente).

@@ -16,7 +16,7 @@ datasource db {
 
 // ---------------------------------------------------------------- Organisation
 
-/// Groupe scolaire client (décision D1 : un tenant = un groupe avec ses sites).
+/// École cliente (établissement) avec ses sites. Elle appartient toujours à un groupe scolaire (lot G1, D-G1).
 model Tenant {
   id            String       @id @default(uuid()) @db.Uuid
   slug          String       @unique
@@ -33,15 +33,74 @@ model Tenant {
   domain        String?      @unique
   /// Notes internes de la plateforme (contrat, contact), jamais visibles par l'école.
   platformNotes String?
+  /// Groupe scolaire de l'école (D-G1) : une école indépendante forme un groupe à elle seule, à son nom.
+  /// Seul le Super Admin le change (rattacher, détacher). Jamais lu par le rôle des écoles (voir PrismaService).
+  groupId       String       @map("group_id") @db.Uuid
+  group         SchoolGroup  @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  /// Date du rattachement à ce groupe.
+  groupJoinedAt DateTime     @default(now())
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
+  @@index([groupId])
   @@map("tenants")
 }
 
 enum TenantStatus {
   ACTIVE
   SUSPENDED
+}
+
+/// Groupe scolaire, ou compte client (lot G1) : regroupe une ou plusieurs écoles.
+/// Zone de la plateforme : aucun droit pour le rôle des écoles ; le rôle du groupe (erp_group) ne lit que sa
+/// propre fiche, sans les notes internes (Row Level Security sur app.group_id, migration groupes_g1).
+/// Un groupe qui a des écoles ne peut pas être supprimé.
+model SchoolGroup {
+  id        String      @id @default(uuid()) @db.Uuid
+  name      String
+  /// Raison sociale du promoteur (facultative).
+  legalName String?
+  promoter  String?
+  phone     String?
+  email     String?
+  address   String?
+  country   String      @default("BJ")
+  /// Identifiant fiscal (facultatif).
+  taxId     String?
+  /// Suspendu : servira au lot G2 (le groupe perd l'accès à sa console). Sans effet sur les écoles.
+  status    GroupStatus @default(ACTIVE)
+  /// Notes internes de la plateforme, jamais visibles par le groupe ni par les écoles.
+  notes     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  tenants   Tenant[]
+
+  @@map("school_groups")
+}
+
+enum GroupStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+/// Journal du groupe, en ajout seul (déclencheur forbid_change). Sans clé étrangère : il survit à la
+/// suppression d'un groupe vide. Les écoles y figurent par leur nom dans « data », jamais par une colonne
+/// tenant_id (le rôle du groupe n'a aucun droit sur les tables qui portent une école).
+model GroupAuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  groupId   String   @map("group_id") @db.Uuid
+  /// platform (Super Admin), system (mise à jour de Cahiora) ; group (comptes du groupe, lot G2).
+  actorKind String
+  actorId   String?  @db.Uuid
+  actorName String?
+  action    String
+  data      Json?
+  /// Adresse IP des actions des comptes du groupe (lot G2) ; jamais celle du Super Admin.
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([groupId, createdAt])
+  @@map("group_audit_logs")
 }
 
 // ---------------------------------------------------------------- Plateforme (éditeur du logiciel)
