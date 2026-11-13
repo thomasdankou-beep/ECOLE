@@ -70,8 +70,9 @@ export function tenantOrigin(tenant: { slug: string; domain?: string | null }) {
 
 /**
  * Clé propre à un usage, dérivée du secret de signature (SEC-012) : une signature de lien de fichier
- * ne peut pas servir pour un autre usage, et inversement.
+ * ne peut pas servir pour un autre usage, et inversement. Les jetons de la console des groupes (lot G2)
+ * ont leur propre clé : aucun jeton d'école ou du Super Admin ne peut s'y faire passer pour un jeton de groupe.
  */
-export function derivedKey(purpose: 'files' | 'sandbox-payments') {
+export function derivedKey(purpose: 'files' | 'sandbox-payments' | 'group-tokens') {
   return createHmac('sha256', config.jwt.refreshSecret).update(`cahiora:${purpose}`).digest();
 }
