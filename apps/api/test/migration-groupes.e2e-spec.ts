@@ -1,7 +1,8 @@
 /**
  * Lot G1 : la migration des groupes jouée sur une base qui a déjà des écoles, comme le serait la production,
  * avec des données entièrement fictives. Base jetable erp_migration_test, vidée à chaque lancement ;
- * le test refuse toute autre base.
+ * le test refuse toute autre base. Les migrations suivantes (lot G2 : comptes de la console) sont jouées
+ * ensuite, et ne doivent rien changer aux écoles ni aux groupes déjà en place.
  */
 import { PrismaClient } from '@prisma/client';
 import { execSync } from 'child_process';
@@ -12,6 +13,8 @@ import { join } from 'path';
 const URL = process.env.DATABASE_MIGRATION_URL ?? '';
 const G1 = '20261112220000_groupes_g1';
 const PRISMA = join(__dirname, '..', 'prisma');
+/** Migrations datées (dossiers AAAAMMJJHHMMSS_nom), dans l'ordre où Prisma les joue. */
+const MIGRATIONS = readdirSync(join(PRISMA, 'migrations')).filter((m) => /^\d{14}_/.test(m)).sort();
 const SCHOOLS = [
   { id: '11111111-1111-4111-8111-111111111111', slug: 'ecole-alpha', name: 'École Alpha (fictive)', country: 'BJ', notes: 'Note interne fictive', phone: '+2290190009901' },
   { id: '22222222-2222-4222-8222-222222222222', slug: 'ecole-beta', name: 'Collège Bêta (fictif)', country: 'CI', notes: null, phone: '+2250700009902' },
@@ -38,7 +41,11 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
       }
       return out;
     });
+  /** Groupes et journaux des groupes, tels que les laisse la migration du lot G1. */
+  const groupsSnapshot = () =>
+    db.$queryRaw<Record<string, unknown>[]>`SELECT to_jsonb(g) AS g, (SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id) FROM group_audit_logs l WHERE l.group_id = g.id) AS logs FROM school_groups g ORDER BY g.id`;
   let before: Record<string, any> = {};
+  let afterG1: { schools: Record<string, any>; groups: Record<string, unknown>[] } | null = null;
 
   beforeAll(async () => {
     if (!/\/erp_migration_test(\?|$)/.test(URL)) throw new Error('Base refusée pour le test de migration : seule erp_migration_test peut être vidée');
@@ -48,7 +55,7 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
     mkdirSync(join(dir, 'migrations'));
     cpSync(join(PRISMA, 'schema.prisma'), join(dir, 'schema.prisma'));
     for (const m of readdirSync(join(PRISMA, 'migrations'))) {
-      if (m !== G1) cpSync(join(PRISMA, 'migrations', m), join(dir, 'migrations', m), { recursive: true });
+      if (!MIGRATIONS.includes(m) || m < G1) cpSync(join(PRISMA, 'migrations', m), join(dir, 'migrations', m), { recursive: true });
     }
     deploy();
     // Trois écoles fictives avec un site, une direction, un élève et une ligne de journal chacune.
@@ -69,7 +76,11 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
     // Puis la migration du lot G1, seule.
     cpSync(join(PRISMA, 'migrations', G1), join(dir, 'migrations', G1), { recursive: true });
     deploy();
-  }, 240000);
+    afterG1 = { schools: await snapshot(), groups: await groupsSnapshot() };
+    // Enfin les migrations des lots suivants.
+    for (const m of MIGRATIONS.filter((x) => x > G1)) cpSync(join(PRISMA, 'migrations', m), join(dir, 'migrations', m), { recursive: true });
+    deploy();
+  }, 300000);
 
   afterAll(async () => {
     await db.$disconnect();
@@ -120,5 +131,24 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
     expect(rls).toEqual([{ table: 'group_audit_logs', rls: true, forced: true }, { table: 'school_groups', rls: true, forced: true }]);
     // Aucune école fixée ne reste dans la session après la migration.
     expect((await db.$queryRaw<{ v: string | null }[]>`SELECT NULLIF(current_setting('app.tenant_id', true), '') AS v`)[0].v).toBeNull();
+  });
+
+  it('lot G2 : les comptes de la console arrivent vides, cloisonnés, sans rien changer aux écoles ni aux groupes', async () => {
+    expect(MIGRATIONS.filter((m) => m > G1)).toContain('20261113100000_groupes_g2_comptes');
+    expect(await snapshot()).toEqual(afterG1!.schools);
+    expect(await groupsSnapshot()).toEqual(afterG1!.groups);
+    const tables = ['group_accounts', 'group_recovery_codes', 'group_sessions'];
+    for (const t of tables) expect([t, (await db.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${t}`))[0].n]).toEqual([t, 0]);
+    const rls = await db.$queryRaw<{ table: string; rls: boolean; forced: boolean }[]>`
+      SELECT relname AS table, relrowsecurity AS rls, relforcerowsecurity AS forced FROM pg_class WHERE relname IN ('group_accounts', 'group_recovery_codes', 'group_sessions') ORDER BY 1`;
+    expect(rls).toEqual(tables.map((table) => ({ table, rls: true, forced: true })));
+    // Le rôle des écoles n'a aucun droit sur ces tables, malgré les droits par défaut donnés aux nouvelles tables.
+    const app = await db.$queryRaw<{ table: string; any: boolean }[]>`
+      SELECT c.relname AS table, has_table_privilege('erp_app', c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER') AS any
+      FROM pg_class c WHERE c.relname IN ('group_accounts', 'group_recovery_codes', 'group_sessions') ORDER BY 1`;
+    expect(app.every((r) => !r.any)).toBe(true);
+    const [fn] = await db.$queryRaw<{ app: boolean; group: boolean }[]>`
+      SELECT has_function_privilege('erp_app', 'group_login_lookup(text, text[])', 'EXECUTE') AS app, has_function_privilege('erp_group', 'group_login_lookup(text, text[])', 'EXECUTE') AS group`;
+    expect(fn).toEqual({ app: false, group: true });
   });
 });

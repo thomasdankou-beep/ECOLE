@@ -2929,10 +2929,12 @@ describe('Lot G1 · groupes scolaires : rattachement des écoles et rôles de ba
     // Sans groupe de session : rien du tout.
     const none = await asGroup(null, async (tx) => {
       const n: number[] = [];
-      for (const t of ['school_groups', 'tenants', 'group_audit_logs']) n.push((await tx.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${t}`))[0].n);
+      for (const t of ['school_groups', 'tenants', 'group_audit_logs', 'group_accounts', 'group_sessions', 'group_recovery_codes']) {
+        n.push((await tx.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${t}`))[0].n);
+      }
       return n;
     });
-    expect(none).toEqual([0, 0, 0]);
+    expect(none).toEqual([0, 0, 0, 0, 0, 0]);
     // Groupe A : sa fiche, ses écoles et son journal ; rien du groupe B, même demandé par identifiant et avec l'école de B fixée en session.
     const seen = await asGroup(ids.groupA, async (tx) => {
       await tx.$executeRaw`SELECT set_config('app.tenant_id', ${ids.b1}, true)`;
@@ -2945,16 +2947,22 @@ describe('Lot G1 · groupes scolaires : rattachement des écoles et rôles de ba
       };
     });
     expect(seen).toEqual({ groups: [ids.groupA], groupB: [], schools: [ids.a1], schoolB: [], journals: [ids.groupA] });
-    // Ni les notes internes de la plateforme, ni les réglages ou notes des écoles.
-    for (const sql of ['SELECT notes FROM school_groups', 'SELECT settings FROM tenants', 'SELECT "platformNotes" FROM tenants', 'SELECT domain FROM tenants']) {
+    // Ni les notes internes de la plateforme, ni les réglages ou notes des écoles (l'adresse d'une école, publique, est lisible depuis le lot G2).
+    for (const sql of ['SELECT notes FROM school_groups', 'SELECT settings FROM tenants', 'SELECT "platformNotes" FROM tenants', 'SELECT timezone FROM tenants']) {
       await expect(asGroup(ids.groupA, (tx) => tx.$queryRawUnsafe(sql))).rejects.toThrow(/permission denied/);
     }
-    // Aucune écriture, même dans son propre groupe.
+    // Aucune écriture sur la fiche du groupe ni sur ses écoles, même dans son propre groupe.
     for (const sql of [
-      `UPDATE school_groups SET name = 'Piraté'`, `DELETE FROM school_groups`,
-      `INSERT INTO group_audit_logs (id, group_id, "actorKind", action) VALUES (gen_random_uuid(), '${ids.groupA}', 'group', 'x')`,
+      `UPDATE school_groups SET name = 'Piraté'`, `DELETE FROM school_groups`, `UPDATE tenants SET name = 'Piraté'`,
       `INSERT INTO school_groups (id, name, "updatedAt") VALUES (gen_random_uuid(), 'Faux groupe', now())`,
+      `UPDATE group_audit_logs SET action = 'x'`, `DELETE FROM group_audit_logs`,
     ]) await expect(asGroup(ids.groupA, (tx) => tx.$executeRawUnsafe(sql))).rejects.toThrow(/permission denied/);
+    // Journal : ajout seul (lot G2), dans son propre groupe et sous l'étiquette « group » seulement.
+    for (const [gid, kind] of [[ids.groupB, 'group'], [ids.groupA, 'platform'], [ids.groupA, 'system']]) {
+      await expect(asGroup(ids.groupA, (tx) => tx.$executeRawUnsafe(
+        `INSERT INTO group_audit_logs (id, group_id, "actorKind", action) VALUES (gen_random_uuid(), '${gid}', '${kind}', 'x')`,
+      ))).rejects.toThrow(/row-level security/);
+    }
   });
 
   it("T-04 : les rôles erp_group et erp_stats n'ont aucun droit sur aucune table d'école, ni sur les comptes", async () => {
@@ -2969,14 +2977,15 @@ describe('Lot G1 · groupes scolaires : rattachement des écoles et rôles de ba
     const stats = await tablesOpenTo('erp_stats');
     expect(group.filter((t) => schoolTables.includes(t))).toEqual([]);
     expect(stats.filter((t) => schoolTables.includes(t))).toEqual([]);
-    // Le rôle du groupe ne voit que trois tables (lecture seule, colonnes choisies) ; celui des statistiques, aucune pour l'instant.
-    expect(group).toEqual(['group_audit_logs', 'school_groups', 'tenants']);
+    // Le rôle du groupe : la fiche du groupe et de ses écoles (lecture seule, colonnes choisies), son journal (lecture et
+    // ajout) et, depuis le lot G2, les comptes, sessions et codes de la console ; celui des statistiques, aucune pour l'instant.
+    expect(group).toEqual(['group_accounts', 'group_audit_logs', 'group_recovery_codes', 'group_sessions', 'school_groups', 'tenants']);
     expect(stats).toEqual([]);
     const cols = await admin.$queryRaw<{ table: string; column: string; privilege: string }[]>`
       SELECT table_name AS table, column_name AS column, privilege_type AS privilege FROM information_schema.column_privileges
       WHERE grantee = 'erp_group' AND table_name IN ('tenants', 'school_groups') ORDER BY 1, 2`;
     expect(cols.every((c) => c.privilege === 'SELECT')).toBe(true);
-    expect(cols.filter((c) => c.table === 'tenants').map((c) => c.column).sort()).toEqual(['country', 'currency', 'groupJoinedAt', 'group_id', 'id', 'name', 'shortName', 'slug', 'status']);
+    expect(cols.filter((c) => c.table === 'tenants').map((c) => c.column).sort()).toEqual(['country', 'currency', 'domain', 'groupJoinedAt', 'group_id', 'id', 'name', 'shortName', 'slug', 'status']);
     expect(cols.filter((c) => c.table === 'school_groups').map((c) => c.column)).not.toContain('notes');
     // Ni super-utilisateur, ni exemption de la Row Level Security, ni propriétaire, ni création de rôle ou de base.
     const roles = await admin.$queryRaw<{ name: string; flags: string; owns: number }[]>`
@@ -3005,7 +3014,10 @@ describe('Lot G1 · groupes scolaires : rattachement des écoles et rôles de ba
       SELECT column_name AS column FROM information_schema.column_privileges WHERE grantee = 'erp_app' AND table_name = 'tenants'`).map((c) => c.column);
     expect(cols).not.toContain('group_id');
     expect(cols).not.toContain('groupJoinedAt');
-    for (const sql of ['SELECT count(*) FROM school_groups', 'SELECT count(*) FROM group_audit_logs', 'SELECT group_id FROM tenants']) {
+    for (const sql of [
+      'SELECT count(*) FROM school_groups', 'SELECT count(*) FROM group_audit_logs', 'SELECT group_id FROM tenants',
+      'SELECT count(*) FROM group_accounts', 'SELECT count(*) FROM group_sessions', 'SELECT count(*) FROM group_recovery_codes',
+    ]) {
       await expect(app_.$queryRawUnsafe(sql)).rejects.toThrow(/permission denied/);
     }
     // La seule porte : current_tenant_group(), qui ne renvoie rien hors d'une école et seulement son propre groupe dans une école.

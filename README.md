@@ -49,7 +49,19 @@ Toute école appartient à un groupe scolaire, le compte client : une école ind
 - **Super Admin, rubrique « Groupes »** : créer un groupe (nom, raison sociale, promoteur, coordonnées, notes internes), le modifier, supprimer un groupe vide. Un groupe qui a des écoles ne peut pas être supprimé (la base le refuse aussi).
 - **Rattacher ou détacher une école** (icône de groupe sur la ligne de l’école) : seul le Super Admin le fait, avec un motif obligatoire. Une école détachée forme de nouveau un groupe à son nom. Chaque changement est inscrit dans le journal de la plateforme (avec le motif), dans celui de chaque groupe concerné (sans le motif ni le nom de l’autre groupe) et dans celui de l’école. Toutes les écoles d’un groupe comptent dans la même monnaie.
 - **Direction de l’école** : Paramètres > Établissement affiche le nom de son groupe et la date du rattachement ; le groupe ne reçoit encore aucune donnée de l’école.
-- **Base de données** : deux rôles dédiés, créés par `infra/postgres/roles-groupes.sh` (appelé par `installer-serveur.sh` et `demarrer.sh`, mots de passe `ERP_GROUP_PASSWORD` et `ERP_STATS_PASSWORD` générés dans `.env`). `erp_group` (future console du groupe) ne lit que son propre groupe, sans les notes internes, et aucune table d’école ; `erp_stats` (futurs chiffres agrégés) n’a encore aucun droit. Le rôle des écoles (`erp_app`) n’a aucun droit sur les tables des groupes.
+- **Base de données** : deux rôles dédiés, créés par `infra/postgres/roles-groupes.sh` (appelé par `installer-serveur.sh` et `demarrer.sh`, mots de passe `ERP_GROUP_PASSWORD` et `ERP_STATS_PASSWORD` générés dans `.env`). `erp_group` (console du groupe, lot G2) ne voit que son propre groupe, sans les notes internes, et aucune table d’école ; `erp_stats` (futurs chiffres agrégés) n’a encore aucun droit. Le rôle des écoles (`erp_app`) n’a aucun droit sur les tables des groupes.
+
+### Console du promoteur (lot G2)
+
+Adresse : `https://<domaine de la plateforme>/groupe/connexion`, jamais l’adresse d’une école (la console n’y répond pas).
+
+- **Comptes** : le Super Admin crée le premier compte du groupe (rubrique Groupes, icône « Console du groupe ») ; le responsable général du groupe crée ensuite les autres comptes depuis sa console. Trois rôles : responsable général (tout ce que voit le groupe, plus ses comptes et son journal), responsable financier, responsable pédagogique. L’identifiant (téléphone ou e-mail) est unique sur toute la plateforme. Un mot de passe provisoire est affiché une seule fois et envoyé par SMS.
+- **Double authentification obligatoire** : à la première connexion, le compte choisit son mot de passe (au moins 12 caractères, lettres et chiffres), configure son application d’authentification et note ses 10 codes de récupération ; la console ne s’ouvre qu’ensuite. Puis un code de l’application à chaque connexion. Blocage 15 minutes après 5 erreurs (mot de passe, code ou code de récupération), sessions fermées comprises.
+- **Sessions** : cookie protégé réservé à la console, 8 heures au plus, fermée après 30 minutes sans activité, vérifiée en base à chaque appel. Changer son mot de passe ferme ses autres sessions ; la désactivation d’un compte ou la suspension du groupe ferment tout aussitôt. « Mon compte » liste les appareils connectés.
+- **Actions sensibles** : créer un compte ou remettre l’accès d’un compte demande au responsable général le code actuel de son application. Il reste toujours au moins un responsable général actif.
+- **Ce que voit la console** : la fiche du groupe et la liste de ses établissements (nom, adresse, état). Aucune donnée d’élève, de note, de paiement ni de compte d’école : le rôle `erp_group` n’a aucun droit sur ces tables. Les chiffres agrégés arriveront au lot G3.
+- **Super Admin** : suspendre ou rétablir l’accès d’un groupe à sa console (motif obligatoire, les écoles ne sont pas touchées), désactiver un compte, remettre l’accès d’un compte (téléphone et codes perdus, identité vérifiée hors de Cahiora, motif obligatoire). Les motifs restent dans le journal de la plateforme ; le groupe voit l’action dans son propre journal.
+- **Mise à jour** : la migration `20261113100000_groupes_g2_comptes` crée les tables des comptes, codes et sessions, vides. L’API se connecte avec `erp_group` (`DATABASE_GROUP_URL` dans `docker-compose.yml`, mot de passe `ERP_GROUP_PASSWORD` du fichier `.env`).
 
 ## Mettre en ligne sur un serveur (VPS Ubuntu)
 
@@ -140,7 +152,7 @@ npm run db:migrate
 npm run db:seed
 npm run dev:api     # http://localhost:4000/api/v1
 npm run dev:web     # http://localhost:3000
-npm test            # 181 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme, groupes scolaires et leur migration)
+npm test            # 207 tests (calcul des moyennes, sécurité, isolation des écoles, droits par rôle et par site, paiements, bulletins, plateforme, groupes scolaires, console du groupe et migrations)
 ```
 
 Les tests de bout en bout utilisent une base séparée `erp_test` (voir `apps/api/test/setup-env.ts`), et le test de la migration des groupes une base jetable `erp_migration_test` qu’il vide à chaque lancement.
@@ -164,7 +176,7 @@ infra      Caddy (point d’entrée HTTPS), script des rôles PostgreSQL
 ```
 
 - **Une école = un établissement (tenant)** avec ses sites. Chaque table métier porte `tenant_id` ; l’application se connecte avec un rôle sans privilège (`erp_app`) soumis à la Row Level Security, la variable `app.tenant_id` étant fixée à chaque transaction. Les migrations utilisent le rôle propriétaire `erp_owner`.
-- **Un groupe scolaire = le compte client**, qui regroupe une ou plusieurs écoles (tables `school_groups` et `group_audit_logs`, hors des écoles). Le Super Admin passe par le rôle `erp_platform` ; la future console du groupe passera par `erp_group`, cloisonné par `app.group_id`.
+- **Un groupe scolaire = le compte client**, qui regroupe une ou plusieurs écoles (tables `school_groups` et `group_audit_logs`, hors des écoles). Le Super Admin passe par le rôle `erp_platform` ; la console du groupe passe par `erp_group`, cloisonné par `app.group_id` (comptes, sessions et codes de la console dans `group_accounts`, `group_sessions` et `group_recovery_codes`).
 - **Le navigateur ne parle qu’à une seule origine** : Caddy envoie `/api/*` à l’API et le reste au site. En développement, Next.js relaie `/api/v1` vers l’API.
 - **Paiement** : couche d’abstraction des prestataires (`apps/api/src/modules/payments/providers.ts`) avec un bac à sable signé HMAC, un adaptateur CinetPay à valider et un emplacement PayDunya. Le rapprochement est idempotent. En production, le bac à sable est fermé (paiement en ligne indisponible, encaissement au guichet seulement) sauf si `ALLOW_SANDBOX_PAYMENTS=true` ; la page de simulation est réservée au parent connecté.
 - **Notifications** : dans l’application d’abord ; SMS si non lu après 10 minutes (ou immédiatement pour une alerte urgente).

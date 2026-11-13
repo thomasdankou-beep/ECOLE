@@ -21,6 +21,7 @@ env:
   DB_OWNER: postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test
   DB_APP: postgresql://erp_app:erp_app_dev@localhost:5432/erp_test
   DB_PLATFORM: postgresql://erp_platform:erp_platform_dev@localhost:5432/erp_test
+  DB_GROUP: postgresql://erp_group:erp_group_dev@localhost:5432/erp_test
 
 jobs:
   tests:
@@ -102,7 +103,7 @@ jobs:
           (cd apps/api && DATABASE_ADMIN_URL=$DB_OWNER NODE_ENV=development npx ts-node --transpile-only prisma/seed.ts)
           export JWT_ACCESS_SECRET=$(openssl rand -hex 32) JWT_REFRESH_SECRET=$(openssl rand -hex 32) APP_ENCRYPTION_KEY=$(openssl rand -base64 32)
           export STORAGE_DIR=$RUNNER_TEMP/stockage
-          (cd apps/api && DATABASE_URL=$DB_APP DATABASE_PLATFORM_URL=$DB_PLATFORM nohup node dist/main.js > $RUNNER_TEMP/api.log 2>&1 &)
+          (cd apps/api && DATABASE_URL=$DB_APP DATABASE_PLATFORM_URL=$DB_PLATFORM DATABASE_GROUP_URL=$DB_GROUP nohup node dist/main.js > $RUNNER_TEMP/api.log 2>&1 &)
           (cd apps/web && API_URL=http://localhost:4000 nohup npx next start -p 3000 > $RUNNER_TEMP/web.log 2>&1 &)
           for i in $(seq 1 60); do
             curl -fs http://localhost:4000/api/v1/public/saint-kisito > /dev/null && curl -fs http://localhost:3000/connexion > /dev/null && exit 0

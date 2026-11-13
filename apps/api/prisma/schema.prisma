@@ -56,7 +56,7 @@ enum TenantStatus {
 /// propre fiche, sans les notes internes (Row Level Security sur app.group_id, migration groupes_g1).
 /// Un groupe qui a des écoles ne peut pas être supprimé.
 model SchoolGroup {
-  id        String      @id @default(uuid()) @db.Uuid
+  id        String         @id @default(uuid()) @db.Uuid
   name      String
   /// Raison sociale du promoteur (facultative).
   legalName String?
@@ -64,16 +64,18 @@ model SchoolGroup {
   phone     String?
   email     String?
   address   String?
-  country   String      @default("BJ")
+  country   String         @default("BJ")
   /// Identifiant fiscal (facultatif).
   taxId     String?
-  /// Suspendu : servira au lot G2 (le groupe perd l'accès à sa console). Sans effet sur les écoles.
-  status    GroupStatus @default(ACTIVE)
+  /// Suspendu par le Super Admin : les comptes du groupe perdent aussitôt l'accès à leur console (lot G2).
+  /// Sans effet sur les écoles.
+  status    GroupStatus    @default(ACTIVE)
   /// Notes internes de la plateforme, jamais visibles par le groupe ni par les écoles.
   notes     String?
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
   tenants   Tenant[]
+  accounts  GroupAccount[]
 
   @@map("school_groups")
 }
@@ -101,6 +103,89 @@ model GroupAuditLog {
 
   @@index([groupId, createdAt])
   @@map("group_audit_logs")
+}
+
+/// Rôle d'un compte de la console du groupe (lot G2, décision D-G4).
+enum GroupRole {
+  /// Responsable général : tout ce que voit le groupe, plus les comptes du groupe et son journal.
+  GENERAL
+  /// Responsable financier : chiffres financiers et factures Cahiora (lots G3 et G5).
+  FINANCIER
+  /// Responsable pédagogique (facultatif) : effectifs, assiduité et résultats (lot G3).
+  PEDAGOGIQUE
+}
+
+/// Compte de la console du groupe (lot G2) : le promoteur et les personnes qu'il désigne. Séparé des comptes
+/// d'école et du Super Admin : ses jetons sont refusés par les deux autres espaces. Zone du rôle erp_group
+/// (Row Level Security sur app.group_id) ; jamais supprimé, seulement désactivé.
+/// Double authentification obligatoire (D-G5) : aucune session n'est ouverte tant qu'elle n'est pas active.
+model GroupAccount {
+  id                 String      @id @default(uuid()) @db.Uuid
+  groupId            String      @map("group_id") @db.Uuid
+  group              SchoolGroup @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  firstName          String
+  lastName           String
+  /// Identifiant de connexion : téléphone (format international) ou e-mail, uniques entre tous les groupes.
+  phone              String?     @unique
+  email              String?     @unique
+  passwordHash       String
+  role               GroupRole
+  /// Désactivé : plus aucune connexion, sessions refusées dès l'appel suivant.
+  active             Boolean     @default(true)
+  /// Mot de passe provisoire remis par le Super Admin ou le responsable général : à changer à la première connexion.
+  mustChangePassword Boolean     @default(true)
+  passwordChangedAt  DateTime?
+  failedLogins       Int         @default(0)
+  lockedUntil        DateTime?
+  /// Secret de l'application d'authentification, chiffré (AES-256-GCM).
+  totpSecret         String?
+  totpEnabled        Boolean     @default(false)
+  /// Pas de temps (30 s) du dernier code accepté : un code ne sert qu'une fois.
+  totpLastStep       Int?
+  lastLoginAt        DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  recoveryCodes GroupRecoveryCode[]
+  sessions      GroupSession[]
+
+  @@unique([id, groupId])
+  @@index([groupId])
+  @@map("group_accounts")
+}
+
+/// Code de récupération d'un compte de groupe : seule son empreinte est gardée, il ne sert qu'une fois.
+model GroupRecoveryCode {
+  id        String       @id @default(uuid()) @db.Uuid
+  accountId String       @map("account_id") @db.Uuid
+  /// Groupe du compte (clé étrangère composée) : la Row Level Security filtre sans jointure.
+  groupId   String       @map("group_id") @db.Uuid
+  account   GroupAccount @relation(fields: [accountId, groupId], references: [id, groupId], onDelete: Cascade)
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime     @default(now())
+
+  @@unique([accountId, codeHash])
+  @@map("group_recovery_codes")
+}
+
+/// Session de la console du groupe, vérifiée en base à chaque appel : 8 heures au plus, 30 minutes sans activité,
+/// révocable une à une (déconnexion, appareil perdu, compte désactivé, mot de passe changé).
+model GroupSession {
+  id            String       @id @default(uuid()) @db.Uuid
+  accountId     String       @map("account_id") @db.Uuid
+  groupId       String       @map("group_id") @db.Uuid
+  account       GroupAccount @relation(fields: [accountId, groupId], references: [id, groupId], onDelete: Cascade)
+  ip            String?
+  userAgent     String?
+  createdAt     DateTime     @default(now())
+  lastUsedAt    DateTime     @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+
+  @@index([accountId])
+  @@map("group_sessions")
 }
 
 // ---------------------------------------------------------------- Plateforme (éditeur du logiciel)
