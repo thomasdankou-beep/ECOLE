@@ -12,6 +12,8 @@ import { join } from 'path';
 const URL = process.env.DATABASE_MIGRATION_URL ?? '';
 const G1 = '20261112220000_groupes_g1';
 const PRISMA = join(__dirname, '..', 'prisma');
+/** Migrations datées (dossiers AAAAMMJJHHMMSS_nom), dans l'ordre où Prisma les joue. */
+const MIGRATIONS = readdirSync(join(PRISMA, 'migrations')).filter((m) => /^\d{14}_/.test(m)).sort();
 const SCHOOLS = [
   { id: '11111111-1111-4111-8111-111111111111', slug: 'ecole-alpha', name: 'École Alpha (fictive)', country: 'BJ', notes: 'Note interne fictive', phone: '+2290190009901' },
   { id: '22222222-2222-4222-8222-222222222222', slug: 'ecole-beta', name: 'Collège Bêta (fictif)', country: 'CI', notes: null, phone: '+2250700009902' },
@@ -48,7 +50,7 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
     mkdirSync(join(dir, 'migrations'));
     cpSync(join(PRISMA, 'schema.prisma'), join(dir, 'schema.prisma'));
     for (const m of readdirSync(join(PRISMA, 'migrations'))) {
-      if (m !== G1) cpSync(join(PRISMA, 'migrations', m), join(dir, 'migrations', m), { recursive: true });
+      if (!MIGRATIONS.includes(m) || m < G1) cpSync(join(PRISMA, 'migrations', m), join(dir, 'migrations', m), { recursive: true });
     }
     deploy();
     // Trois écoles fictives avec un site, une direction, un élève et une ligne de journal chacune.

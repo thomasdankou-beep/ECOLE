@@ -10,7 +10,8 @@ let refreshing: Promise<boolean> | null = null;
 const listeners = new Set<() => void>();
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  /** `code` et `body` : erreur métier qui porte des données (ex. DOUBLON_POSSIBLE et les dossiers qui ressemblent). */
+  constructor(public status: number, message: string, public code?: string, public body?: any) {
     super(message);
   }
 }
@@ -65,7 +66,10 @@ async function call<T>(method: string, path: string, body?: unknown, retry = tru
   if (res.status === 204) return undefined as T;
   const type = res.headers.get('content-type') ?? '';
   const data = type.includes('application/json') ? await res.json() : await res.text();
-  if (!res.ok) throw new ApiError(res.status, typeof data === 'object' && data?.message ? data.message : 'Une erreur est survenue');
+  if (!res.ok) {
+    const obj = typeof data === 'object' && data ? data : null;
+    throw new ApiError(res.status, obj?.message ?? 'Une erreur est survenue', typeof obj?.code === 'string' ? obj.code : undefined, obj ?? undefined);
+  }
   return data as T;
 }
 

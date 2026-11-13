@@ -173,8 +173,9 @@ model Site {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  classes Class[]
-  rooms   Room[]
+  classes      Class[]
+  rooms        Room[]
+  applications Application[]
 
   @@unique([tenantId, name])
   @@map("sites")
@@ -500,19 +501,22 @@ model Student {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
-  guardians       StudentGuardian[]
-  enrollments     Enrollment[]
-  attendance      AttendanceRecord[]
-  grades          Grade[]
-  reportCards     ReportCard[]
-  invoices        Invoice[]
-  payments        Payment[]
-  documents       Document[]
-  sanctions       Sanction[]
-  internships     InternshipPlacement[]
-  annualDecisions AnnualDecision[]
-  honors          PublicHonor[]
-  files           StudentFile[]
+  guardians         StudentGuardian[]
+  enrollments       Enrollment[]
+  attendance        AttendanceRecord[]
+  grades            Grade[]
+  reportCards       ReportCard[]
+  invoices          Invoice[]
+  payments          Payment[]
+  documents         Document[]
+  sanctions         Sanction[]
+  internships       InternshipPlacement[]
+  annualDecisions   AnnualDecision[]
+  honors            PublicHonor[]
+  files             StudentFile[]
+  /// Doublons possibles (lot G4) : ce dossier, créé malgré l'alerte, ou le dossier existant qui lui ressemble.
+  duplicatesAsNew   DuplicateReview[]     @relation("DuplicateNew")
+  duplicatesAsOther DuplicateReview[]     @relation("DuplicateOther")
 
   @@unique([tenantId, matricule])
   @@index([tenantId, lastName, firstName])
@@ -555,24 +559,103 @@ enum EnrollmentStatus {
   ACTIVE
   TRANSFERRED
   WITHDRAWN
+  /// Annulée par la direction (saisie par erreur, doublon) : jamais supprimée, motif obligatoire (lot G4).
+  CANCELLED
 }
 
-/// Inscription : élève × classe × année.
+/// Inscription d'un nouvel élève, ou réinscription d'un élève qui a déjà un dossier dans l'école (lot G4).
+enum EnrollmentType {
+  NEW
+  RETURNING
+}
+
+/// Inscription : élève × classe × année. Une seule par élève et par année ; jamais supprimée (lot G4).
 model Enrollment {
-  id             String           @id @default(uuid()) @db.Uuid
-  tenantId       String           @map("tenant_id") @db.Uuid
-  studentId      String           @db.Uuid
-  student        Student          @relation(fields: [studentId], references: [id])
-  classId        String           @db.Uuid
-  class          Class            @relation(fields: [classId], references: [id])
-  academicYearId String           @db.Uuid
-  academicYear   AcademicYear     @relation(fields: [academicYearId], references: [id])
-  status         EnrollmentStatus @default(ACTIVE)
-  enrolledAt     DateTime         @default(now())
+  id             String            @id @default(uuid()) @db.Uuid
+  tenantId       String            @map("tenant_id") @db.Uuid
+  studentId      String            @db.Uuid
+  student        Student           @relation(fields: [studentId], references: [id])
+  classId        String            @db.Uuid
+  class          Class             @relation(fields: [classId], references: [id])
+  academicYearId String            @db.Uuid
+  academicYear   AcademicYear      @relation(fields: [academicYearId], references: [id])
+  status         EnrollmentStatus  @default(ACTIVE)
+  enrolledAt     DateTime          @default(now())
+  /// Inscription ou réinscription ; vide pour les inscriptions enregistrées avant le lot G4.
+  type           EnrollmentType?
+  /// Départ en cours d'année (transfert, abandon) : date de sortie et motif.
+  exitDate       DateTime?         @db.Date
+  exitReason     String?
+  /// Annulation par la direction : date, motif, auteur. Une inscription annulée ne compte plus à partir de cette date.
+  cancelledAt    DateTime?
+  cancelReason   String?
+  cancelledById  String?           @db.Uuid
+  events         EnrollmentEvent[]
 
   @@unique([studentId, academicYearId])
   @@index([classId])
+  @@index([tenantId, academicYearId])
   @@map("enrollments")
+}
+
+enum EnrollmentEventKind {
+  ENROLLED
+  REENROLLED
+  CLASS_CHANGED
+  TRANSFERRED
+  WITHDRAWN
+  CANCELLED
+  REINSTATED
+}
+
+/// Historique des inscriptions, en ajout seul (lot G4) : aucune ligne n'est modifiée ni supprimée, même par le propriétaire.
+model EnrollmentEvent {
+  id           String              @id @default(uuid()) @db.Uuid
+  tenantId     String              @map("tenant_id") @db.Uuid
+  enrollmentId String              @db.Uuid
+  enrollment   Enrollment          @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  kind         EnrollmentEventKind
+  /// Détail : classe d'avant et d'après, date et motif de sortie, motif d'annulation…
+  data         Json?
+  actorId      String?             @db.Uuid
+  actorName    String?
+  createdAt    DateTime            @default(now())
+
+  @@index([enrollmentId, createdAt])
+  @@map("enrollment_events")
+}
+
+enum DuplicateStatus {
+  /// Signalé, en attente de la décision de la direction.
+  PENDING
+  /// Deux élèves différents : l'alerte ne revient plus pour cette paire.
+  DIFFERENT
+  /// Même élève : la direction annule elle-même l'inscription en trop (jamais de fusion automatique).
+  SAME
+}
+
+/// Doublon possible entre deux dossiers d'élèves (lot G4). Le dossier le plus récent est `student`, l'ancien `other`.
+model DuplicateReview {
+  id           String          @id @default(uuid()) @db.Uuid
+  tenantId     String          @map("tenant_id") @db.Uuid
+  studentId    String          @db.Uuid
+  student      Student         @relation("DuplicateNew", fields: [studentId], references: [id], onDelete: Restrict)
+  otherId      String          @db.Uuid
+  other        Student         @relation("DuplicateOther", fields: [otherId], references: [id], onDelete: Restrict)
+  /// Ce qui rapproche les deux dossiers : NOM_NAISSANCE (même nom, même date de naissance) ou NOM_TELEPHONE (même nom, un responsable en commun).
+  reason       String
+  status       DuplicateStatus @default(PENDING)
+  /// Motif saisi par la personne qui a créé le dossier malgré l'alerte.
+  note         String?
+  createdById  String?         @db.Uuid
+  decidedById  String?         @db.Uuid
+  decidedAt    DateTime?
+  decisionNote String?
+  createdAt    DateTime        @default(now())
+
+  @@unique([studentId, otherId])
+  @@index([tenantId, status])
+  @@map("duplicate_reviews")
 }
 
 enum ApplicationStatus {
@@ -598,6 +681,9 @@ model Application {
   wantedLevel      String
   wantedTrack      String?
   wantedSite       String?
+  /// Site choisi par la famille (GRP-003) : un personnel limité à un site ne voit que les demandes de son site.
+  siteId           String?           @db.Uuid
+  site             Site?             @relation(fields: [siteId], references: [id])
   guardianName     String
   guardianPhone    String
   guardianEmail    String?
@@ -610,6 +696,7 @@ model Application {
   updatedAt        DateTime          @updatedAt
 
   @@unique([tenantId, reference])
+  @@index([tenantId, siteId])
   @@map("applications")
 }
 

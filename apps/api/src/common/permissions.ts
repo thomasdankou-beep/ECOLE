@@ -13,6 +13,8 @@ export const PERMISSIONS = [
   'security.recovery',
   'students.read',
   'students.write',
+  /// Annuler une inscription, trancher un doublon possible (lot G4) : direction seulement.
+  'students.validate',
   'admissions.manage',
   'documents.issue',
   'documents.read',
@@ -48,7 +50,7 @@ export type Permission = (typeof PERMISSIONS)[number];
 
 export const ROLE_PERMISSIONS: Record<RoleCode, Permission[]> = {
   DIRECTION: [
-    'settings.manage', 'users.manage', 'security.recovery', 'students.read', 'students.write', 'admissions.manage',
+    'settings.manage', 'users.manage', 'security.recovery', 'students.read', 'students.write', 'students.validate', 'admissions.manage',
     'documents.issue', 'documents.read', 'timetable.read', 'timetable.manage', 'lessons.read',
     'attendance.read', 'sanctions.read', 'sanctions.validate', 'grades.read', 'reportcards.read',
     'reportcards.control', 'reportcards.validate', 'finance.read', 'finance.validate', 'announcements.read',

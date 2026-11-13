@@ -3,7 +3,7 @@ import type { Role } from './auth';
 
 export const ROLE_PERMISSIONS: Record<Role, string[]> = {
   DIRECTION: [
-    'settings.manage', 'users.manage', 'security.recovery', 'students.read', 'students.write', 'admissions.manage',
+    'settings.manage', 'users.manage', 'security.recovery', 'students.read', 'students.write', 'students.validate', 'admissions.manage',
     'documents.issue', 'documents.read', 'timetable.read', 'timetable.manage', 'lessons.read',
     'attendance.read', 'sanctions.read', 'sanctions.validate', 'grades.read', 'reportcards.read',
     'reportcards.control', 'reportcards.validate', 'finance.read', 'finance.validate', 'announcements.read',

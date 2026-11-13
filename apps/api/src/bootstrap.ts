@@ -16,7 +16,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (exception instanceof HttpException) {
       const body = exception.getResponse() as any;
       const message = Array.isArray(body?.message) ? body.message.join(' · ') : body?.message ?? exception.message;
-      return res.status(exception.getStatus()).json({ statusCode: exception.getStatus(), message });
+      // Seule donnée métier transmise en plus du message, posée volontairement par le code : la liste des dossiers qui
+      // ressemblent à un élève qu'on inscrit (lot G4, code DOUBLON_POSSIBLE). Rien d'autre ne sort de l'erreur.
+      const extra = body?.code === 'DOUBLON_POSSIBLE' && Array.isArray(body.candidates) ? { code: body.code, candidates: body.candidates } : {};
+      return res.status(exception.getStatus()).json({ statusCode: exception.getStatus(), message, ...extra });
     }
     if (exception instanceof Prisma.PrismaClientKnownRequestError) {
       if (exception.code === 'P2025') return res.status(404).json({ statusCode: 404, message: 'Élément introuvable' });
