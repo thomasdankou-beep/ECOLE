@@ -4,14 +4,43 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { Search, UserPlus } from 'lucide-react';
 import { Loader, StatusBadge } from '@/components/espace/bits';
-import { Button, Card, Empty, Input, PageHeader, Select, Table } from '@/components/ui';
+import { Doublons, Reinscriptions } from '@/components/espace/reinscription';
+import { Badge, Button, Card, Chips, Empty, Input, PageHeader, Select, Table } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
 import { fcfa } from '@/lib/format';
 import { can } from '@/lib/perm';
 import type { ClassRow, StudentRow } from '@/lib/types';
 import { qs, useApi } from '@/lib/use-api';
 
+type View = 'liste' | 'reinscriptions' | 'doublons';
+
 export default function Eleves() {
+  const { role } = useAuth();
+  // Lot G4 : réinscriptions (direction, secrétariat) et doublons possibles (direction) ; ?vue=… ouvre l'onglet voulu.
+  const views = [
+    { value: 'liste' as View, label: 'Élèves' },
+    ...(can(role, 'students.write') ? [{ value: 'reinscriptions' as View, label: 'Réinscriptions' }] : []),
+    ...(can(role, 'students.validate') ? [{ value: 'doublons' as View, label: 'Doublons possibles' }] : []),
+  ];
+  const [view, setView] = useState<View>('liste');
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get('vue');
+    if (wanted === 'reinscriptions' || wanted === 'doublons') setView(wanted);
+  }, []);
+  const shown = views.some((v) => v.value === view) ? view : 'liste';
+
+  return (
+    <>
+      <PageHeader title="Élèves" actions={can(role, 'students.write') && <Button asChild><Link href="/espace/inscription"><UserPlus className="size-4" /> Inscrire</Link></Button>} />
+      {views.length > 1 && <Chips label="Vue" value={shown} onChange={setView} options={views} />}
+      {shown === 'liste' && <Liste />}
+      {shown === 'reinscriptions' && <Reinscriptions />}
+      {shown === 'doublons' && <Doublons />}
+    </>
+  );
+}
+
+function Liste() {
   const { role } = useAuth();
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -26,7 +55,6 @@ export default function Eleves() {
 
   return (
     <>
-      <PageHeader title="Élèves" subtitle={list.data ? `${list.data.length} élève(s)` : undefined} actions={can(role, 'students.write') && <Button asChild><Link href="/espace/inscription"><UserPlus className="size-4" /> Inscrire</Link></Button>} />
       <Card className="grid gap-3 sm:grid-cols-[1fr_240px]">
         <label className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-5 -translate-y-1/2 text-muted" />
@@ -37,7 +65,8 @@ export default function Eleves() {
           {classes.data?.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.site.name}</option>)}
         </Select>
       </Card>
-      <Card>
+      <Card className="grid gap-2">
+        {list.data && <p className="text-sm font-bold text-muted">{list.data.length} élève(s)</p>}
         <Loader {...list}>
           {(rows) => rows.length === 0 ? <Empty title="Aucun élève trouvé" /> : (
             <Table>
@@ -48,7 +77,7 @@ export default function Eleves() {
                     <td><Link href={`/espace/eleves/${s.id}`} className="font-bold text-brand hover:underline">{s.lastName} {s.firstName}</Link></td>
                     <td className="font-mono text-sm">{s.matricule}</td>
                     <td>{s.class ? `${s.class.name} · ${s.class.site.name}` : '—'}</td>
-                    <td><StatusBadge status={s.status} /></td>
+                    <td>{s.enrollmentStatus === 'CANCELLED' ? <Badge tone="info">Inscription annulée</Badge> : <StatusBadge status={s.status} />}</td>
                     {showBalance && <td className={`text-right font-bold ${s.balance ? 'text-bad' : 'text-good'}`}>{fcfa(s.balance ?? 0)}</td>}
                   </tr>
                 ))}

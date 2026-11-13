@@ -1148,7 +1148,7 @@ describe('Rôles et périmètre (SEC-013 à SEC-018)', () => {
     expect((await s.patch(`/students/${outStudent}`, { birthPlace: 'Cotonou' })).status).toBe(403);
     expect((await s.post(`/students/${outStudent}/guardians`, { firstName: 'P', lastName: 'X', phone: '0197999990', relation: 'Oncle' })).status).toBe(403);
     expect((await s.post(`/students/${outStudent}/class`, { classId: outClass })).status).toBe(403);
-    expect((await s.post(`/students/${outStudent}/withdraw`, { status: 'WITHDRAWN', reason: 'test' })).status).toBe(403);
+    expect((await s.post(`/students/${outStudent}/withdraw`, { status: 'WITHDRAWN', reason: 'test', exitDate: new Date().toISOString().slice(0, 10) })).status).toBe(403);
     expect((await s.post(`/students/${inStudent}/class`, { classId: outClass })).status).toBe(403);
     expect((await s.post('/documents', { kind: 'CERTIFICAT_SCOLARITE', studentId: outStudent })).status).toBe(403);
     expect((await s.post('/documents/batch', { kind: 'CARTE_SCOLAIRE', classId: outClass })).status).toBe(403);

@@ -9,11 +9,11 @@ import { Button, Card, ErrorNote, Field, Input, Select, Textarea } from '@/compo
 import { publicGet, publicPost } from '@/lib/api';
 import { tenantOrThrow } from '@/lib/tenant';
 
-type School = { sites: { name: string }[]; tracks: { name: string; cycle: string }[]; levels: { name: string; cycle: string }[]; public?: { entranceTest?: string; requiredDocuments?: string[] } };
+type School = { sites: { id: string; name: string }[]; tracks: { name: string; cycle: string }[]; levels: { name: string; cycle: string }[]; public?: { entranceTest?: string; requiredDocuments?: string[] } };
 
 export default function Preinscription() {
   const [school, setSchool] = useState<School | null>(null);
-  const [f, setF] = useState({ studentFirstName: '', studentLastName: '', sex: '', birthDate: '', previousSchool: '', wantedLevel: '', wantedTrack: '', wantedSite: '', guardianName: '', guardianPhone: '', guardianEmail: '', message: '' });
+  const [f, setF] = useState({ studentFirstName: '', studentLastName: '', sex: '', birthDate: '', previousSchool: '', wantedLevel: '', wantedTrack: '', siteId: '', guardianName: '', guardianPhone: '', guardianEmail: '', message: '' });
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [reference, setReference] = useState<string | null>(null);
@@ -99,12 +99,14 @@ export default function Preinscription() {
                     {school?.tracks.map((t) => <option key={t.name}>{t.name}</option>)}
                   </Select>
                 </Field>
-                <Field label="Site">
-                  <Select value={f.wantedSite} onChange={set('wantedSite')}>
-                    <option value="">Indifférent</option>
-                    {school?.sites.map((s) => <option key={s.name}>{s.name}</option>)}
-                  </Select>
-                </Field>
+                {(school?.sites.length ?? 0) > 1 && (
+                  <Field label="Site">
+                    <Select value={f.siteId} onChange={set('siteId')}>
+                      <option value="">Indifférent (le secrétariat choisira)</option>
+                      {school?.sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </Select>
+                  </Field>
+                )}
               </div>
             </Card>
             <Card className="grid gap-4">

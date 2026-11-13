@@ -85,6 +85,9 @@ export class LevelUpdateDto {
   @IsOptional() @IsString() @MaxLength(60) name?: string;
   @IsOptional() @IsEnum(Cycle) cycle?: Cycle;
   @IsOptional() @IsInt() position?: number;
+  /// Niveau de l'année suivante pour un élève admis (5e → 4e), qui sert à proposer sa classe à la réinscription ;
+  /// null retire le lien (corrections du lot G4).
+  @IsOptional() @IsUUID() nextLevelId?: string | null;
 }
 
 export class TrackUpdateDto {

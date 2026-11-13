@@ -6,6 +6,7 @@ import { Phone } from 'lucide-react';
 import { Loader, StatusBadge } from '@/components/espace/bits';
 import { Button, Card, Chips, Dialog, DialogContent, Empty, Field, Input, PageHeader, Select, Textarea, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
 import { date, dateTime } from '@/lib/format';
 import { qs, useAction, useApi } from '@/lib/use-api';
 
@@ -19,6 +20,10 @@ export default function Preinscriptions() {
   const [edit, setEdit] = useState<any | null>(null);
   const toast = useToast();
   const { busy, run } = useAction();
+  // GRP-003 : un compte de tout l'établissement rattache une demande à un site ; un compte limité ne voit que son site.
+  const { me, siteLimited } = useAuth();
+  const sites = me?.sites ?? [];
+  const siteText = (a: any) => a.site?.name ?? (a.wantedSite ? `${a.wantedSite} (à confirmer)` : sites.length > 1 ? 'Site à choisir' : null);
 
   return (
     <>
@@ -36,7 +41,7 @@ export default function Preinscriptions() {
                   </div>
                   <StatusBadge status={a.status} />
                 </div>
-                <p className="text-sm"><b>{a.wantedLevel}</b>{a.wantedTrack ? ` · ${a.wantedTrack}` : ''}{a.wantedSite ? ` · ${a.wantedSite}` : ''}</p>
+                <p className="text-sm"><b>{a.wantedLevel}</b>{a.wantedTrack ? ` · ${a.wantedTrack}` : ''}{siteText(a) ? ` · ${siteText(a)}` : ''}</p>
                 <p className="text-sm">{a.guardianName} · <a className="font-bold text-brand" href={`tel:${a.guardianPhone}`}><Phone className="inline size-3.5" /> {a.guardianPhone}</a></p>
                 {a.birthDate && <p className="text-sm text-muted">Né(e) le {date(a.birthDate)}{a.previousSchool ? ` · ${a.previousSchool}` : ''}</p>}
                 {a.message && <p className="rounded-lg bg-sunk px-3 py-2 text-sm">{a.message}</p>}
@@ -55,8 +60,17 @@ export default function Preinscriptions() {
           <DialogContent title={`Dossier ${edit.reference}`} description={`${edit.studentFirstName} ${edit.studentLastName}`}>
             <form className="grid gap-3" onSubmit={async (e) => {
               e.preventDefault();
-              if (await run(() => api.patch(`/applications/${edit.id}`, { status: edit.status, testResult: edit.testResult || undefined, notes: edit.notes || undefined }), toast, 'Dossier mis à jour')) { setEdit(null); q.reload(); }
+              const body = { status: edit.status, testResult: edit.testResult || undefined, notes: edit.notes || undefined, ...(!siteLimited && edit.siteId ? { siteId: edit.siteId } : {}) };
+              if (await run(() => api.patch(`/applications/${edit.id}`, body), toast, 'Dossier mis à jour')) { setEdit(null); q.reload(); }
             }}>
+              {!siteLimited && sites.length > 1 && (
+                <Field label="Site" hint="Le secrétariat de ce site verra la demande">
+                  <Select value={edit.siteId ?? ''} onChange={(e) => setEdit({ ...edit, siteId: e.target.value || null })}>
+                    <option value="">À choisir</option>
+                    {sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+                  </Select>
+                </Field>
+              )}
               <Field label="Statut"><Select value={edit.status} onChange={(e) => setEdit({ ...edit, status: e.target.value })}>{STATUSES.filter(([v]) => v !== 'INSCRIT').map(([v, l]) => <option key={v} value={v}>{l}</option>)}</Select></Field>
               <Field label="Résultat du test"><Input value={edit.testResult ?? ''} onChange={(e) => setEdit({ ...edit, testResult: e.target.value })} /></Field>
               <Field label="Notes internes"><Textarea value={edit.notes ?? ''} onChange={(e) => setEdit({ ...edit, notes: e.target.value })} /></Field>

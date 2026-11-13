@@ -96,6 +96,16 @@ async function main() {
       };
       // Fiche de renseignement 2026-2027 de l'école : niveaux, filières, frais réels, coordonnées (données de l'école, pas du code).
       await applySchoolData(tx, T, SCHOOL_DATA);
+      // Passage en classe supérieure, pour proposer la classe à la réinscription (corrections du lot G4) : exemple de
+      // démonstration seulement ; chaque école définit le sien (Paramètres › Niveaux).
+      const passages: [string, string][] = [
+        ['Maternelle 1', 'Maternelle 2'], ['Maternelle 2', 'CI'], ['CI', 'CP'], ['CP', 'CE1'], ['CE1', 'CE2'], ['CE2', 'CM1'], ['CM1', 'CM2'], ['CM2', '6e'],
+        ['6e', '5e'], ['5e', '4e'], ['4e', '3e'], ['3e', '2nde'], ['2nde', '1re'], ['1re', 'Terminale'], ['1re année', '2e année'], ['2e année', '3e année'],
+      ];
+      const levelIds = new Map((await tx.level.findMany({ select: { id: true, name: true } })).map((l) => [l.name, l.id]));
+      for (const [from, to] of passages) {
+        if (levelIds.has(from) && levelIds.has(to)) await tx.level.update({ where: { id: levelIds.get(from)! }, data: { nextLevelId: levelIds.get(to)! } });
+      }
 
       const room = async (siteId: string, name: string) => tx.room.create({ data: { tenantId: T, siteId, name, kind: name.startsWith('Atelier') ? 'WORKSHOP' : 'CLASSROOM' } });
       const R = { at1: await room(hed.id, 'Atelier 1'), at2: await room(hed.id, 'Atelier 2'), s3: await room(hed.id, 'Salle 3'), s5: await room(hed.id, 'Salle 5'), s4: await room(tog.id, 'Salle 4'), s6: await room(tog.id, 'Salle 6'), cout: await room(tog.id, 'Atelier couture') };
@@ -266,8 +276,8 @@ async function main() {
       await tx.lesson.create({ data: { tenantId: T, classSubjectId: F3cs.elec.id, date: d('2026-10-14'), title: 'Loi d’Ohm, puissance électrique', content: 'Rappel de la loi d’Ohm, calcul de puissance, exercices guidés.', homework: 'Exercices 3 et 4 page 42', homeworkDue: addDays(3), authorId: zinsou.id } });
       await tx.announcement.create({ data: { tenantId: T, title: 'Réunion parents-professeurs', body: 'Les parents des élèves de 1re année sont invités à une réunion le samedi à 9 h sur le site de Hêdomey (exemple de démonstration).', audience: 'PARENTS', authorId: zinsou.id } });
 
-      await tx.application.create({ data: { tenantId: T, reference: 'PRE-2026-0001', studentFirstName: 'Aurel', studentLastName: 'HOUNKANRIN', wantedLevel: '1re année', wantedTrack: 'Électrotechnique (F3)', wantedSite: 'Hêdomey', guardianName: 'Didier Hounkanrin', guardianPhone: '+2290197000099', status: 'RECU' } });
-      await tx.application.create({ data: { tenantId: T, reference: 'PRE-2026-0002', studentFirstName: 'Grâce', studentLastName: 'AHOGNON', wantedLevel: '6e', wantedTrack: 'Enseignement général', wantedSite: 'Togbin', guardianName: 'Estelle Ahognon', guardianPhone: '+2290197000098', status: 'EN_TEST' } });
+      await tx.application.create({ data: { tenantId: T, reference: 'PRE-2026-0001', studentFirstName: 'Aurel', studentLastName: 'HOUNKANRIN', wantedLevel: '1re année', wantedTrack: 'Électrotechnique (F3)', wantedSite: 'Hêdomey', siteId: hed.id, guardianName: 'Didier Hounkanrin', guardianPhone: '+2290197000099', status: 'RECU' } });
+      await tx.application.create({ data: { tenantId: T, reference: 'PRE-2026-0002', studentFirstName: 'Grâce', studentLastName: 'AHOGNON', wantedLevel: '6e', wantedTrack: 'Enseignement général', wantedSite: 'Togbin', siteId: tog.id, guardianName: 'Estelle Ahognon', guardianPhone: '+2290197000098', status: 'EN_TEST' } });
       await tx.counter.create({ data: { tenantId: T, key: `application-${new Date().getUTCFullYear()}`, value: 2 } });
     },
     { timeout: 120000 },
@@ -303,14 +313,15 @@ async function wipe(tenantId: string) {
   if (!isDemoTenant(t)) throw new Error(`Effacement refusé : « ${t?.slug ?? tenantId} » n'est pas une école de démonstration (SEC-038).`);
   await db.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    // Les déclencheurs « ajout seul » protègent reçus, paiements, notes et audit : suspendus le temps du nettoyage de la démo seulement.
-    const guarded = ['audit_logs', 'receipts', 'payments', 'grades'];
+    // Les déclencheurs « ajout seul » protègent reçus, paiements, notes, audit, élèves, inscriptions et leur historique,
+    // factures, bulletins publiés et doublons (lot G4) : suspendus le temps du nettoyage de la démo seulement.
+    const guarded = ['audit_logs', 'receipts', 'payments', 'grades', 'invoices', 'report_cards', 'enrollment_events', 'enrollments', 'duplicate_reviews', 'students'];
     for (const t of guarded) await tx.$executeRawUnsafe(`ALTER TABLE ${t} DISABLE TRIGGER USER`);
     const tables = [
       'notifications', 'sms_messages', 'announcements', 'documents', 'receipts', 'payments', 'invoice_items', 'invoices', 'fee_types', 'cash_closings',
       'report_card_items', 'report_cards', 'report_card_runs', 'appreciations', 'grades', 'assessments', 'attendance_records', 'attendance_sessions',
-      'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'student_files', 'public_honors', 'annual_decisions', 'teacher_assignments', 'teacher_subjects', 'class_subjects', 'enrollments', 'student_guardians',
-      'applications', 'guardians', 'students', 'otp_codes', 'sessions', 'user_roles', 'classes', 'users', 'rooms', 'subjects', 'tracks', 'levels',
+      'sanctions', 'lessons', 'timetable_changes', 'timetable_slots', 'student_files', 'public_honors', 'annual_decisions', 'teacher_assignments', 'teacher_subjects', 'class_subjects', 'enrollment_events', 'enrollments', 'student_guardians',
+      'applications', 'duplicate_reviews', 'guardians', 'students', 'otp_codes', 'sessions', 'user_roles', 'classes', 'users', 'rooms', 'subjects', 'tracks', 'levels',
       'terms', 'academic_years', 'sites', 'counters', 'audit_logs',
     ];
     for (const t of ['internship_placements', 'internship_periods']) await tx.$executeRawUnsafe(`DELETE FROM ${t} WHERE tenant_id = $1::uuid`, tenantId);

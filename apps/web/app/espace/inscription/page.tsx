@@ -4,15 +4,30 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { CheckCircle2, Plus, Trash2 } from 'lucide-react';
-import { Button, Card, ErrorNote, Field, Input, PageHeader, Select, Table } from '@/components/ui';
-import { api } from '@/lib/api';
+import { Button, Card, Dialog, DialogContent, ErrorNote, Field, Input, PageHeader, Select, Table, Textarea } from '@/components/ui';
+import { api, ApiError } from '@/lib/api';
+import { date } from '@/lib/format';
 import type { ClassRow } from '@/lib/types';
 import { useApi } from '@/lib/use-api';
 import { ACCEPT_FILE, ACCEPT_PHOTO, useDocumentLabels } from '@/components/espace/student-files';
+import { ReenrollDialog, type Done, type Proposal, type Pupil } from '@/components/espace/reinscription';
 
 type Guardian = { firstName: string; lastName: string; phone: string; email: string; relation: string };
 type Result = { id: string; matricule: string; credentials: { name: string; identifier: string; temporaryPassword: string }[]; invoices: number; uploaded?: string[]; failed?: string[] };
 type Piece = { label: string; file: File };
+/** Dossier existant qui ressemble à l'élève saisi (lot G4). Sur un autre site : sans identifiant ni classe. */
+type Candidate = {
+  id: string | null; matricule: string; firstName: string; lastName: string; birthDate: string | null; reasonLabel: string;
+  lastClass: string | null; lastYear: string | null; lastSite: string | null; enrolledThisYear: boolean; otherSite: boolean;
+  /** Dernière inscription annulée : la classe affichée n'a jamais été suivie. */
+  lastCancelled?: boolean;
+};
+type Reenrolled = Done;
+/** Dossier retrouvé, tel que l'API le donne : de quoi proposer la classe et signaler les impayés (corrections du lot G4). */
+type Dossier = {
+  id: string; firstName: string; lastName: string; matricule: string; reenrollProposal?: Proposal | null;
+  unpaid?: boolean; balance?: number; overdue?: number; currentYear: { label: string };
+};
 
 const emptyGuardian = (): Guardian => ({ firstName: '', lastName: '', phone: '', email: '', relation: 'Mère' });
 
@@ -33,6 +48,11 @@ export default function Inscription() {
   const [pieces, setPieces] = useState<Piece[]>([]);
   const [pieceLabel, setPieceLabel] = useState('');
   const labels = useDocumentLabels();
+  const [candidates, setCandidates] = useState<Candidate[] | null>(null);
+  const [duplicateNote, setDuplicateNote] = useState('');
+  const [reenrolled, setReenrolled] = useState<Reenrolled | null>(null);
+  const [again, setAgain] = useState<{ pupil: Pupil; year: string } | null>(null);
+  const [dupError, setDupError] = useState<unknown>(null);
 
   // Pré-remplissage depuis une pré-inscription acceptée.
   useEffect(() => {
@@ -45,8 +65,14 @@ export default function Inscription() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    await save();
+  }
+
+  /** Lot G4 : un dossier qui ressemble arrête l'inscription (409) ; `confirm` = « ce n'est pas le même élève », avec un motif. */
+  async function save(confirm?: { duplicateNote: string }) {
     setBusy(true);
     setError(null);
+    setDupError(null);
     try {
       const clean = <T extends object>(o: T) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== ''));
       const r = await api.post<Result>('/students', {
@@ -56,7 +82,10 @@ export default function Inscription() {
         createInvoices,
         returning,
         ...(applicationId ? { applicationId } : {}),
+        ...(confirm ? { confirmNotDuplicate: true, duplicateNote: confirm.duplicateNote } : {}),
       });
+      setCandidates(null);
+      setDuplicateNote('');
       // Photo et pièces envoyées une fois le dossier créé ; un échec n'annule pas l'inscription.
       const uploaded: string[] = [];
       const failed: string[] = [];
@@ -73,11 +102,55 @@ export default function Inscription() {
       setPieces([]);
       window.scrollTo({ top: 0 });
     } catch (err) {
-      setError(err);
+      if (err instanceof ApiError && err.code === 'DOUBLON_POSSIBLE') setCandidates(err.body?.candidates ?? []);
+      else if (confirm) setDupError(err);
+      else setError(err);
     } finally {
       setBusy(false);
     }
   }
+
+  /**
+   * Réinscription sur le dossier existant (photo et pièces : depuis le dossier). Elle passe par la même fenêtre que
+   * l'onglet Réinscriptions : classe proposée, frais impayés signalés, classe à confirmer (corrections du lot G4).
+   * La classe choisie dans le formulaire reste choisie ; la classe proposée s'affiche à côté.
+   */
+  async function reenrollExisting(c: Candidate) {
+    if (!c.id) return;
+    setBusy(true);
+    setDupError(null);
+    try {
+      const d = await api.get<Dossier>(`/students/${c.id}`);
+      setAgain({
+        year: d.currentYear.label,
+        pupil: {
+          id: d.id, firstName: d.firstName, lastName: d.lastName, matricule: d.matricule, proposal: d.reenrollProposal,
+          unpaid: d.unpaid, balance: d.unpaid ? d.balance : undefined, overdue: d.overdue, chosenClassId: s.classId || undefined,
+        },
+      });
+    } catch (err) {
+      setDupError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (reenrolled)
+    return (
+      <Card className="grid gap-4">
+        <p className="flex items-center gap-2 text-2xl font-bold text-good"><CheckCircle2 className="size-8" /> Réinscription enregistrée</p>
+        <p>
+          {reenrolled.name} est réinscrit(e) en <b>{reenrolled.className}</b> pour {reenrolled.year}, sur son dossier : matricule inchangé
+          <span className="font-mono font-bold"> {reenrolled.matricule}</span>, historique conservé.
+          {reenrolled.invoices ? ` ${reenrolled.invoices} facture(s) créée(s).` : ''}{reenrolled.reinstated ? ' Son inscription de l’année a été rétablie (aucune nouvelle facture).' : ''}
+        </p>
+        {(photo || pieces.length > 0) && <p className="rounded-lg bg-warn-soft p-3 text-sm font-bold text-warn">La photo et les pièces choisies n’ont pas été envoyées : ajoutez-les depuis le dossier si besoin.</p>}
+        <div className="flex flex-wrap gap-2 no-print">
+          <Button asChild><Link href={`/espace/eleves/${reenrolled.id}`}>Ouvrir le dossier</Link></Button>
+          <Button variant="outline" onClick={() => { setReenrolled(null); setPhoto(null); setPieces([]); setS({ firstName: '', lastName: '', sex: '', birthDate: '', birthPlace: '', allergies: '', classId: '' }); setGuardians([emptyGuardian()]); }}>Nouvelle inscription</Button>
+        </div>
+      </Card>
+    );
 
   if (result)
     return (
@@ -177,10 +250,52 @@ export default function Inscription() {
           <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={createStudentAccount} onChange={(e) => setAccount(e.target.checked)} /> Créer le compte de l’élève (identifiant = matricule)</label>
           <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={createInvoices} onChange={(e) => setInvoices(e.target.checked)} /> Créer les factures selon les frais de la classe</label>
           {createInvoices && <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={returning} onChange={(e) => setReturning(e.target.checked)} /> Ancien élève : frais de réinscription au lieu de ceux d’inscription</label>}
+          <p className="text-sm text-muted">Un élève qui a déjà un dossier dans l’application se réinscrit depuis <Link href="/espace/eleves?vue=reinscriptions" className="font-bold text-brand">Élèves › Réinscriptions</Link> : il garde son matricule et son historique.</p>
         </Card>
         <ErrorNote error={error} />
         <Button type="submit" size="lg" loading={busy}>Enregistrer l’inscription</Button>
       </form>
+      <Dialog open={!!candidates && !again} onOpenChange={(o) => { if (!o) { setCandidates(null); setDupError(null); } }}>
+        {candidates && (
+          <DialogContent title="Un dossier ressemble à cet élève" description="Même nom, et même date de naissance ou un parent au même numéro. Un élève qui revient se réinscrit sur son dossier : il garde son matricule.">
+            <div className="grid gap-3">
+              {candidates.map((c) => (
+                <div key={c.matricule} className="grid gap-1.5 rounded-lg border border-line p-3 text-sm">
+                  <p><b className="text-base">{c.lastName} {c.firstName}</b> · <span className="font-mono">{c.matricule}</span></p>
+                  <p className="text-muted">{c.reasonLabel}{c.birthDate ? ` · né(e) le ${date(c.birthDate)}` : ''}</p>
+                  <p>{c.otherSite ? `Dossier du site ${c.lastSite ?? '—'}${c.lastYear ? ` (${c.lastYear})` : ''}` : c.lastClass ? `Dernière classe : ${c.lastClass} · ${c.lastSite} (${c.lastYear})${c.lastCancelled ? ', inscription annulée' : ''}` : 'Sans classe'}</p>
+                  {c.otherSite ? (
+                    <p className="font-bold text-warn">Ce dossier dépend d’un autre site : demandez à la direction de réinscrire l’élève.</p>
+                  ) : c.enrolledThisYear ? (
+                    <p className="flex flex-wrap items-center gap-2 font-bold text-warn">Déjà inscrit(e) cette année. <Link className="text-brand" href={`/espace/eleves/${c.id}`}>Ouvrir le dossier</Link></p>
+                  ) : (
+                    <Button size="sm" className="justify-self-start" loading={busy} onClick={() => reenrollExisting(c)}>Réinscrire sur ce dossier</Button>
+                  )}
+                </div>
+              ))}
+              <form className="grid gap-2 border-t border-line pt-3" onSubmit={(e) => { e.preventDefault(); save({ duplicateNote }); }}>
+                <p className="font-bold">Ce n’est pas le même élève ?</p>
+                <Field label="Pourquoi (la direction vérifiera)"><Textarea value={duplicateNote} onChange={(e) => setDuplicateNote(e.target.value)} minLength={5} maxLength={300} required /></Field>
+                <Button type="submit" variant="outline" loading={busy}>Inscrire comme nouvel élève</Button>
+              </form>
+              <ErrorNote error={dupError} />
+            </div>
+          </DialogContent>
+        )}
+      </Dialog>
+      {/* Fermée sans réinscrire : la liste des dossiers qui ressemblent revient. */}
+      <ReenrollDialog
+        pupils={again ? [again.pupil] : null}
+        year={again?.year ?? ''}
+        classes={classes.data ?? []}
+        applicationId={applicationId}
+        createInvoices={createInvoices}
+        closeOnSuccess
+        onClose={(done, ok) => {
+          setAgain(null);
+          if (done && ok?.[0]) { setCandidates(null); setReenrolled(ok[0]); window.scrollTo({ top: 0 }); }
+        }}
+      />
     </>
   );
 }

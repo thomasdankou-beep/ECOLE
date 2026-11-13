@@ -13,13 +13,24 @@ import { can } from '@/lib/perm';
 import { DOC_KINDS, type ClassRow } from '@/lib/types';
 import { useAction, useApi } from '@/lib/use-api';
 import { StudentFiles, StudentPhoto, type StudentFile } from '@/components/espace/student-files';
+import { ReenrollDialog, type Proposal } from '@/components/espace/reinscription';
 
 type Student = {
   id: string; matricule: string; firstName: string; lastName: string; sex: string | null; birthDate: string | null; birthPlace: string | null; allergies: string | null; status: string;
   guardians: { id: string; relation: string; isPrimary: boolean; guardian: { firstName: string; lastName: string; phone: string; email: string | null } }[];
-  enrollments: { id: string; status: string; class: { name: string; site: { name: string } }; academicYear: { label: string } }[];
+  enrollments: Enrollment[];
   currentClass: { id: string; name: string; site: { name: string } } | null; balance: number; hasAccount: boolean;
   photoUrl: string | null; files?: StudentFile[];
+  /** Lot G4 : réinscription possible (aucune inscription active cette année) et année en cours. */
+  reenrollable: boolean; currentYear: { id: string; label: string };
+  /** Corrections du lot G4 : frais impayés (le montant échu pour qui voit les finances) et classe proposée. */
+  unpaid?: boolean; overdue?: number; reenrollProposal?: Proposal | null;
+};
+type EnrollmentEvent = { id: string; kind: string; data: Record<string, any> | null; actorName: string | null; createdAt: string };
+type Enrollment = {
+  id: string; status: string; type: 'NEW' | 'RETURNING' | null; academicYearId: string; enrolledAt: string;
+  exitDate: string | null; exitReason?: string | null; cancelledAt: string | null; cancelReason?: string | null;
+  class: { name: string; site: { name: string } }; academicYear: { label: string }; events?: EnrollmentEvent[];
 };
 
 export default function EleveFiche() {
@@ -44,7 +55,7 @@ export default function EleveFiche() {
             <PageHeader
               title={`${s.lastName} ${s.firstName}`}
               subtitle={<>{s.matricule} · {s.currentClass ? `${s.currentClass.name} · ${s.currentClass.site.name}` : 'Sans classe'} · <StatusBadge status={s.status} /></>}
-              actions={can(role, 'students.write') && s.status === 'ACTIVE' && <StudentActions s={s} onDone={q.reload} />}
+              actions={can(role, 'students.write') && (!!s.currentClass || s.reenrollable) && <StudentActions s={s} onDone={q.reload} canCancel={can(role, 'students.validate')} />}
             />
             <Chips label="Rubrique" value={tab} onChange={setTab} options={tabs} />
             {tab === 'infos' && <Infos s={s} editable={can(role, 'students.write')} onChange={q.reload} />}
@@ -90,13 +101,52 @@ function Infos({ s, editable, onChange }: { s: Student; editable: boolean; onCha
         </Section>
       )}
       <Section title="Parcours" className="lg:col-span-2">
-        <ul className="grid gap-1 text-sm">
-          {s.enrollments.map((e) => <li key={e.id}>{e.academicYear.label} · {e.class.name} ({e.class.site.name}) · <StatusBadge status={e.status} /></li>)}
+        <ul className="grid gap-2 text-sm">
+          {s.enrollments.map((e) => (
+            <li key={e.id} className="rounded-lg bg-sunk px-3 py-2">
+              <span className="flex flex-wrap items-center gap-1.5">
+                <b>{e.academicYear.label}</b> · {e.class.name} ({e.class.site.name}) · {e.status === 'CANCELLED' ? <Badge tone="info">Inscription annulée</Badge>
+                  : e.status === 'ACTIVE' && e.academicYearId !== s.currentYear.id ? <Badge tone="info">Année terminée</Badge> : <StatusBadge status={e.status} />}
+                {e.type && <Badge tone="brand">{e.type === 'RETURNING' ? 'Réinscription' : 'Nouvel élève'}</Badge>}
+              </span>
+              {e.exitDate && <span className="block">Sortie le {date(e.exitDate)}{e.exitReason ? ` : ${e.exitReason}` : ''}</span>}
+              {e.cancelledAt && <span className="block">Annulée le {date(e.cancelledAt)}{e.cancelReason ? ` : ${e.cancelReason}` : ''}</span>}
+              {!!e.events?.length && (
+                <ol className="mt-1.5 grid gap-0.5 border-l-2 border-line pl-3 text-[13px] text-muted">
+                  {e.events.map((ev) => <li key={ev.id}>{date(ev.createdAt)} · {eventText(ev)}{ev.actorName ? ` · ${ev.actorName}` : ''}</li>)}
+                </ol>
+              )}
+            </li>
+          ))}
         </ul>
       </Section>
       <Internships id={s.id} />
     </div>
   );
+}
+
+/** Contrôles gardés avec une réinscription (corrections du lot G4) : classe proposée suivie ou changée, impayés signalés. */
+function checks(d: Record<string, any>) {
+  const parts = [
+    d.proposedClass ? (d.followedProposal ? 'classe proposée confirmée' : `classe proposée : ${d.proposedClass}, changée`) : null,
+    d.unpaid ? 'frais impayés signalés' : null,
+  ].filter(Boolean);
+  return parts.length ? ` · ${parts.join(' · ')}` : '';
+}
+
+/** Ligne d'historique d'une inscription (lot G4), en clair. */
+function eventText({ kind, data }: EnrollmentEvent) {
+  const d = data ?? {};
+  switch (kind) {
+    case 'ENROLLED': return `Inscription en ${d.className ?? '—'}${d.type === 'RETURNING' ? ' (ancien élève)' : ''}`;
+    case 'REENROLLED': return `Réinscription en ${d.className ?? '—'}${d.fromClass ? ` (venant de ${d.fromClass}, ${d.fromYear})` : ''}${checks(d)}`;
+    case 'CLASS_CHANGED': return `Changement de classe : de ${d.fromClass ?? '—'} à ${d.toClass ?? '—'}`;
+    case 'TRANSFERRED': return `Départ (transfert) le ${date(d.exitDate)}${d.reason ? ` : ${d.reason}` : ''}`;
+    case 'WITHDRAWN': return `Départ (abandon ou retrait) le ${date(d.exitDate)}${d.reason ? ` : ${d.reason}` : ''}`;
+    case 'CANCELLED': return `Inscription annulée${d.reason ? ` : ${d.reason}` : ''}`;
+    case 'REINSTATED': return `Inscription rétablie en ${d.className ?? '—'}${d.previousStatus === 'CANCELLED' ? ' (annulée auparavant)' : d.exitDate ? ` (sortie du ${date(d.exitDate)} levée)` : ''}${checks(d)}`;
+    default: return kind;
+  }
 }
 
 /** Mise à jour de l'identité de l'élève (nom, naissance, santé). */
@@ -252,16 +302,34 @@ function Documents({ id, canIssue }: { id: string; canIssue: boolean }) {
   );
 }
 
-function StudentActions({ s, onDone }: { s: Student; onDone: () => void }) {
+/** Jour local (AAAA-MM-JJ), pour la date de sortie proposée. */
+const today = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+
+function StudentActions({ s, onDone, canCancel }: { s: Student; onDone: () => void; canCancel: boolean }) {
   const classes = useApi<ClassRow[]>('/classes');
   const toast = useToast();
   const { busy, run } = useAction();
   const [classId, setClassId] = useState('');
-  const [withdraw, setWithdraw] = useState({ status: 'TRANSFERRED', reason: '' });
+  const [withdraw, setWithdraw] = useState({ status: 'TRANSFERRED', reason: '', exitDate: today() });
+  const [cancelReason, setCancelReason] = useState('');
+  const [reenroll, setReenroll] = useState(false);
+  const thisYear = s.enrollments.find((e) => e.academicYearId === s.currentYear.id);
   const [g, setG] = useState({ firstName: '', lastName: '', phone: '', relation: 'Père' });
   const [open, setOpen] = useState<string | null>(null);
   return (
     <>
+      {s.reenrollable && (
+        <>
+          <Button onClick={() => setReenroll(true)}>Réinscrire pour {s.currentYear.label}</Button>
+          <ReenrollDialog
+            pupils={reenroll ? [{ id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, proposal: s.reenrollProposal, unpaid: s.unpaid, balance: s.unpaid ? s.balance : undefined, overdue: s.overdue }] : null}
+            year={s.currentYear.label}
+            classes={classes.data ?? []}
+            onClose={(done) => { setReenroll(false); if (done) onDone(); }}
+          />
+        </>
+      )}
+      {s.currentClass && (
       <Dialog open={open === 'class'} onOpenChange={(o) => setOpen(o ? 'class' : null)}>
         <DialogTrigger asChild><Button variant="outline">Changer de classe</Button></DialogTrigger>
         <DialogContent title="Changer de classe">
@@ -271,6 +339,7 @@ function StudentActions({ s, onDone }: { s: Student; onDone: () => void }) {
           </form>
         </DialogContent>
       </Dialog>
+      )}
       <Dialog open={open === 'guardian'} onOpenChange={(o) => setOpen(o ? 'guardian' : null)}>
         <DialogTrigger asChild><Button variant="outline">Ajouter un parent</Button></DialogTrigger>
         <DialogContent title="Ajouter un parent ou tuteur" description="Un compte parent est créé si ce numéro n’en a pas encore.">
@@ -289,16 +358,36 @@ function StudentActions({ s, onDone }: { s: Student; onDone: () => void }) {
           </form>
         </DialogContent>
       </Dialog>
+      {s.currentClass && (
       <Dialog open={open === 'withdraw'} onOpenChange={(o) => setOpen(o ? 'withdraw' : null)}>
         <DialogTrigger asChild><Button variant="danger">Départ</Button></DialogTrigger>
-        <DialogContent title="Enregistrer un départ" description="L’élève est retiré de sa classe. Son dossier, ses notes et ses paiements sont conservés.">
+        <DialogContent title="Enregistrer un départ" description="L’élève est retiré de sa classe à cette date. Son dossier, ses notes et ses paiements sont conservés.">
           <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post(`/students/${s.id}/withdraw`, withdraw), toast, 'Départ enregistré')) { setOpen(null); onDone(); } }}>
             <Field label="Motif du départ"><Select value={withdraw.status} onChange={(e) => setWithdraw({ ...withdraw, status: e.target.value })}><option value="TRANSFERRED">Transfert vers une autre école</option><option value="WITHDRAWN">Abandon ou retrait</option></Select></Field>
-            <Field label="Précisions"><Textarea value={withdraw.reason} onChange={(e) => setWithdraw({ ...withdraw, reason: e.target.value })} required /></Field>
+            <Field label="Date de sortie" hint="Pas avant l’inscription (ou le retour) de l’élève, pas dans le futur. Il ne compte plus parmi les élèves à partir de ce jour."><Input type="date" value={withdraw.exitDate} max={today()} onChange={(e) => setWithdraw({ ...withdraw, exitDate: e.target.value })} required /></Field>
+            <Field label="Précisions"><Textarea value={withdraw.reason} onChange={(e) => setWithdraw({ ...withdraw, reason: e.target.value })} minLength={3} required /></Field>
             <Button type="submit" variant="danger" loading={busy}>Confirmer le départ</Button>
           </form>
         </DialogContent>
       </Dialog>
+      )}
+      {canCancel && thisYear && thisYear.status !== 'CANCELLED' && (
+        <Dialog open={open === 'cancel'} onOpenChange={(o) => setOpen(o ? 'cancel' : null)}>
+          <DialogTrigger asChild><Button variant="ghost" className="text-bad">Annuler l’inscription</Button></DialogTrigger>
+          <DialogContent
+            title={`Annuler l’inscription ${s.currentYear.label}`}
+            description="Pour une inscription saisie par erreur ou en double. Rien n’est supprimé : l’inscription reste dans l’historique, marquée annulée, et ne compte plus. Les factures déjà créées ne sont pas annulées automatiquement."
+          >
+            <form className="grid gap-3" onSubmit={async (e) => {
+              e.preventDefault();
+              if (await run(() => api.post(`/students/${s.id}/enrollment/cancel`, { reason: cancelReason }), toast, 'Inscription annulée')) { setOpen(null); setCancelReason(''); onDone(); }
+            }}>
+              <Field label="Motif de l’annulation"><Textarea value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} minLength={5} maxLength={300} required /></Field>
+              <Button type="submit" variant="danger" loading={busy}>Annuler l’inscription</Button>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }
