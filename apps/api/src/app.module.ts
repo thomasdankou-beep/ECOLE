@@ -60,8 +60,13 @@ class CoreModule {}
   imports: [
     CoreModule,
     JwtModule.register({}),
-    // Limitation des tentatives (CDC §6.1) ; désactivée seulement pour les tests automatisés.
-    ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 300 }], skipIf: () => process.env.NODE_ENV === 'test' }),
+    // Limitation des tentatives (CDC §6.1) ; désactivée seulement pour les tests automatisés. Message en français
+    // (il s'affiche tel quel sur les pages de connexion), au lieu de « ThrottlerException: Too Many Requests ».
+    ThrottlerModule.forRoot({
+      throttlers: [{ ttl: 60000, limit: 300 }],
+      skipIf: () => process.env.NODE_ENV === 'test',
+      errorMessage: 'Trop de demandes en peu de temps : patientez une minute, puis réessayez.',
+    }),
   ],
   controllers: [
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
