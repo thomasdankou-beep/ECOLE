@@ -20,7 +20,7 @@ type Settings = {
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean; photoUrl: string | null }[];
-  levels: { id: string; name: string; cycle: string; position: number }[];
+  levels: { id: string; name: string; cycle: string; position: number; nextLevelId: string | null }[];
   tracks: { id: string; code: string; name: string; cycle: string }[];
   rooms: { id: string; name: string; siteId: string; kind: RoomKind; capacity: number | null }[];
   subjects: { id: string; code: string; name: string; practical: boolean }[];
@@ -180,7 +180,7 @@ function ClassSubjects({ klass, subjects, teachers, onChange }: { klass: ClassRo
 
 type RefEdit =
   | { kind: 'site'; id: string; name: string; address: string; phone: string; active: boolean }
-  | { kind: 'level'; id: string; name: string; cycle: string; position: number }
+  | { kind: 'level'; id: string; name: string; cycle: string; position: number; nextLevelId: string }
   | { kind: 'track'; id: string; code: string; name: string; cycle: string }
   | { kind: 'room'; id: string; name: string; siteId: string; roomKind: RoomKind; capacity: number | string | null }
   | { kind: 'subject'; id: string; code: string; name: string; practical: boolean };
@@ -234,7 +234,13 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
         </form>
       </Section>
       <Section title="Niveaux">
-        <div className="mb-3 flex flex-wrap gap-1.5">{s.levels.map((x) => <Badge key={x.id} tone="brand">{x.name} · {CYCLES[x.cycle]}{editBtn(x.name, { kind: 'level', id: x.id, name: x.name, cycle: x.cycle, position: x.position })}</Badge>)}</div>
+        <p className="mb-2 text-sm text-muted">La flèche indique le niveau suivant d’un élève admis : il sert à proposer sa classe à la réinscription (crayon pour le définir).</p>
+        <div className="mb-3 flex flex-wrap gap-1.5">{s.levels.map((x) => (
+          <Badge key={x.id} tone="brand">
+            {x.name} · {CYCLES[x.cycle]}{x.nextLevelId ? ` → ${s.levels.find((l) => l.id === x.nextLevelId)?.name ?? '?'}` : ''}
+            {editBtn(x.name, { kind: 'level', id: x.id, name: x.name, cycle: x.cycle, position: x.position, nextLevelId: x.nextLevelId ?? '' })}
+          </Badge>
+        ))}</div>
         <form className="grid grid-cols-[1fr_1fr_70px_auto] gap-2" onSubmit={(e) => { e.preventDefault(); post('/levels', { name: level.name, cycle: level.cycle, position: Number(level.position) }, 'Niveau ajouté', () => setLevel({ ...level, name: '', position: String(Number(level.position) + 1) })); }}>
           <Input placeholder="Ex. 3e année" value={level.name} onChange={(e) => setLevel({ ...level, name: e.target.value })} required aria-label="Nom du niveau" />
           <Select value={level.cycle} onChange={(e) => setLevel({ ...level, cycle: e.target.value })} aria-label="Cycle">{Object.entries(CYCLES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select>
@@ -260,7 +266,7 @@ function Structure({ s, reload }: { s: Settings; reload: () => void }) {
         </form>
       </Section>
       <Dialog open={!!edit} onOpenChange={(o) => !o && setEdit(null)}>
-        {edit && <RefDialog edit={edit} setEdit={setEdit} sites={s.sites} done={() => { setEdit(null); reload(); }} />}
+        {edit && <RefDialog edit={edit} setEdit={setEdit} sites={s.sites} levels={s.levels} done={() => { setEdit(null); reload(); }} />}
       </Dialog>
     </div>
   );
@@ -290,14 +296,14 @@ function SitePhoto({ site, onChange }: { site: Settings['sites'][number]; onChan
   );
 }
 
-function RefDialog({ edit, setEdit, sites, done }: { edit: RefEdit; setEdit: (e: RefEdit) => void; sites: Settings['sites']; done: () => void }) {
+function RefDialog({ edit, setEdit, sites, levels, done }: { edit: RefEdit; setEdit: (e: RefEdit) => void; sites: Settings['sites']; levels: Settings['levels']; done: () => void }) {
   const toast = useToast();
   const { busy, run } = useAction();
   const titles = { site: 'Modifier le site', level: 'Modifier le niveau', track: 'Modifier la filière', room: 'Modifier la salle', subject: 'Modifier la matière' };
   const save = async () => {
     const body =
       edit.kind === 'site' ? { name: edit.name, address: edit.address || undefined, phone: edit.phone || undefined, active: edit.active }
-      : edit.kind === 'level' ? { name: edit.name, cycle: edit.cycle, position: Number(edit.position) }
+      : edit.kind === 'level' ? { name: edit.name, cycle: edit.cycle, position: Number(edit.position), nextLevelId: edit.nextLevelId || null }
       : edit.kind === 'track' ? { code: edit.code, name: edit.name, cycle: edit.cycle }
       : edit.kind === 'room' ? { name: edit.name, siteId: edit.siteId, kind: edit.roomKind, capacity: edit.capacity ? Number(edit.capacity) : null }
       : { code: edit.code, name: edit.name, practical: edit.practical };
@@ -320,6 +326,14 @@ function RefDialog({ edit, setEdit, sites, done }: { edit: RefEdit; setEdit: (e:
           <Field label="Cycle"><Select value={edit.cycle} onChange={(e) => setEdit({ ...edit, cycle: e.target.value })}>{Object.entries(CYCLES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</Select></Field>
         )}
         {edit.kind === 'level' && <Field label="Ordre d’affichage"><Input type="number" value={edit.position} onChange={(e) => setEdit({ ...edit, position: Number(e.target.value) })} /></Field>}
+        {edit.kind === 'level' && (
+          <Field label="Niveau suivant d’un élève admis" hint="Sert à proposer la classe à la réinscription ; la classe reste à confirmer.">
+            <Select value={edit.nextLevelId} onChange={(e) => setEdit({ ...edit, nextLevelId: e.target.value })}>
+              <option value="">Aucun (pas de proposition)</option>
+              {levels.filter((l) => l.id !== edit.id).map((l) => <option key={l.id} value={l.id}>{l.name} · {CYCLES[l.cycle]}</option>)}
+            </Select>
+          </Field>
+        )}
         {edit.kind === 'room' && (
           <div className="grid grid-cols-2 gap-3">
             <Field label="Site"><Select value={edit.siteId} onChange={(e) => setEdit({ ...edit, siteId: e.target.value })}>{sites.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>

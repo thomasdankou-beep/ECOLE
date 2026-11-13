@@ -96,6 +96,16 @@ async function main() {
       };
       // Fiche de renseignement 2026-2027 de l'école : niveaux, filières, frais réels, coordonnées (données de l'école, pas du code).
       await applySchoolData(tx, T, SCHOOL_DATA);
+      // Passage en classe supérieure, pour proposer la classe à la réinscription (corrections du lot G4) : exemple de
+      // démonstration seulement ; chaque école définit le sien (Paramètres › Niveaux).
+      const passages: [string, string][] = [
+        ['Maternelle 1', 'Maternelle 2'], ['Maternelle 2', 'CI'], ['CI', 'CP'], ['CP', 'CE1'], ['CE1', 'CE2'], ['CE2', 'CM1'], ['CM1', 'CM2'], ['CM2', '6e'],
+        ['6e', '5e'], ['5e', '4e'], ['4e', '3e'], ['3e', '2nde'], ['2nde', '1re'], ['1re', 'Terminale'], ['1re année', '2e année'], ['2e année', '3e année'],
+      ];
+      const levelIds = new Map((await tx.level.findMany({ select: { id: true, name: true } })).map((l) => [l.name, l.id]));
+      for (const [from, to] of passages) {
+        if (levelIds.has(from) && levelIds.has(to)) await tx.level.update({ where: { id: levelIds.get(from)! }, data: { nextLevelId: levelIds.get(to)! } });
+      }
 
       const room = async (siteId: string, name: string) => tx.room.create({ data: { tenantId: T, siteId, name, kind: name.startsWith('Atelier') ? 'WORKSHOP' : 'CLASSROOM' } });
       const R = { at1: await room(hed.id, 'Atelier 1'), at2: await room(hed.id, 'Atelier 2'), s3: await room(hed.id, 'Salle 3'), s5: await room(hed.id, 'Salle 5'), s4: await room(tog.id, 'Salle 4'), s6: await room(tog.id, 'Salle 6'), cout: await room(tog.id, 'Atelier couture') };

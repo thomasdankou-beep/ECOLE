@@ -14,7 +14,7 @@ import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { FilesService } from '../files/files.service';
 import { config, tenantOrigin } from '../../config';
 import {
-  AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, RoomDto, SiteDto, StaffDto,
+  AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, SiteDto, StaffDto,
   StaffUpdateDto, SubjectDto, TrackDto,
 } from './settings.dto';
 
@@ -375,7 +375,9 @@ export class SettingsService {
     return this.simpleCreate(actor, 'subject', dto, 'Ce code de matière existe déjà');
   }
 
-  updateLevel(actor: Actor, id: string, dto: Partial<LevelDto>) {
+  updateLevel(actor: Actor, id: string, dto: LevelUpdateDto) {
+    // Niveau suivant (corrections du lot G4) : un autre niveau de la même école (contrôlé aussi par la base).
+    if (dto.nextLevelId === id) throw new BadRequestException('Un niveau ne peut pas être son propre niveau suivant');
     return this.simpleUpdate(actor, 'level', id, dto, 'Ce niveau existe déjà');
   }
   updateTrack(actor: Actor, id: string, dto: Partial<TrackDto>) {
@@ -401,7 +403,7 @@ export class SettingsService {
 
   private simpleUpdate(actor: Actor, model: 'level' | 'track' | 'room' | 'subject', id: string, dto: object, conflict: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
-      await assertOwned(tx, { site: (dto as { siteId?: string }).siteId });
+      await assertOwned(tx, { site: (dto as { siteId?: string }).siteId, level: (dto as { nextLevelId?: string | null }).nextLevelId });
       const before = await (tx[model] as any).findUnique({ where: { id } });
       const row = await (tx[model] as any).update({ where: { id }, data: dto }).catch((e: unknown) => uniqueViolation(e, conflict));
       await this.audit.log(tx, actor, `${model}.updated`, model, id, auditChanges(before, row, Object.keys(dto)));

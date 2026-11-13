@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
-import { CheckCircle2, RotateCcw, Search } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, RotateCcw, Search } from 'lucide-react';
 import { Loader, StatusBadge } from '@/components/espace/bits';
 import { Badge, Button, Card, Dialog, DialogContent, Empty, Field, Input, Select, Table, Textarea, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
@@ -12,18 +12,47 @@ import { can } from '@/lib/perm';
 import type { ClassRow } from '@/lib/types';
 import { qs, useAction, useApi } from '@/lib/use-api';
 
+/** Classe proposée par le serveur (corrections du lot G4) : à confirmer ou changer avant de valider. */
+export type Proposal = { basis: 'ADMIS' | 'NON_ADMIS' | 'RETOUR' | 'SANS_DECISION'; levelName: string | null; classId: string | null; className: string | null; note: string };
 type Candidate = {
   id: string; matricule: string; firstName: string; lastName: string; status: string; outcome: 'ADMIS' | 'NON_ADMIS' | null;
-  fromClass: { id: string; name: string; level: string; site: { id: string; name: string } }; balance?: number;
+  fromClass: { id: string; name: string; level: string; site: { id: string; name: string } };
+  proposal: Proposal; unpaid: boolean; balance?: number; overdue?: number;
 };
 type Candidates = { toYear: { id: string; label: string }; fromYear: { id: string; label: string } | null; years: { id: string; label: string }[]; items: Candidate[] };
-type Pupil = { id: string; firstName: string; lastName: string; matricule: string };
+/**
+ * Élève à réinscrire : classe proposée et frais impayés (montants seulement pour qui voit les finances). `chosenClassId` :
+ * classe déjà choisie par la personne (formulaire d'inscription) ; elle reste choisie, la classe proposée s'affiche à côté.
+ */
+export type Pupil = {
+  id: string; firstName: string; lastName: string; matricule: string; proposal?: Proposal | null; unpaid?: boolean; balance?: number; overdue?: number;
+  chosenClassId?: string;
+};
+/** Réinscription faite. */
+export type Done = { id: string; matricule: string; name: string; className: string; year: string; reinstated: boolean; invoices: number };
 
 const OUTCOME: Record<string, [string, 'good' | 'warn']> = { ADMIS: ['Admis', 'good'], NON_ADMIS: ['Non admis', 'warn'] };
 
+/** Avertissement d'impayé : jamais bloquant ; le montant n'apparaît que pour qui voit les finances. */
+function Unpaid({ p, compact }: { p: Pupil; compact?: boolean }) {
+  if (!p.unpaid) return null;
+  const amount = p.balance !== undefined ? ` : ${fcfa(p.balance)}${p.overdue ? ` (dont ${fcfa(p.overdue)} échus)` : ''}` : '';
+  return compact
+    ? <Badge tone="bad"><AlertTriangle className="size-3.5" /> Impayé{amount}</Badge>
+    : <p className="flex items-start gap-1.5 text-sm font-bold text-bad"><AlertTriangle className="mt-0.5 size-4 flex-none" /> Frais impayés{amount}</p>;
+}
+
+/** Classe proposée, en clair. */
+function Proposed({ p }: { p: Proposal }) {
+  return p.classId
+    ? <span className="text-sm">Proposée : <b>{p.className}</b></span>
+    : <span className="text-sm text-muted">À choisir</span>;
+}
+
 /**
  * Réinscription pour l'année en cours (lot G4) : chaque élève garde son dossier et son matricule ; ses notes,
- * bulletins, paiements et absences des années passées ne changent pas.
+ * bulletins, paiements et absences des années passées ne changent pas. Au téléphone, une carte par élève (pas de
+ * tableau à faire défiler de côté).
  */
 export function Reinscriptions() {
   const { role } = useAuth();
@@ -43,6 +72,8 @@ export function Reinscriptions() {
   }, [q.data, fromClass, search]);
   const pastClasses = useMemo(() => [...new Map((q.data?.items ?? []).map((c) => [c.fromClass.id, c.fromClass])).values()].sort((a, b) => a.name.localeCompare(b.name)), [q.data]);
   const allChecked = rows.length > 0 && rows.every((r) => selected.includes(r.id));
+  const toggle = (id: string, on: boolean) => setSelected(on ? [...selected, id] : selected.filter((x) => x !== id));
+  const unpaidCount = rows.filter((r) => r.unpaid).length;
 
   return (
     <Loader {...q}>
@@ -81,33 +112,80 @@ export function Reinscriptions() {
             <Empty title={`Tous les élèves de ${d.fromYear.label} sont réinscrits ou partis`} />
           ) : (
             <Card className="grid gap-3">
+              {unpaidCount > 0 && (
+                <p className="flex items-start gap-2 rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">
+                  <AlertTriangle className="mt-0.5 size-4 flex-none" />
+                  <span><b>{unpaidCount} élève(s) ont des frais impayés.</b> La réinscription n’est pas bloquée : appliquez les règles financières de votre établissement.</span>
+                </p>
+              )}
               {selected.length > 0 && (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-brand-soft px-3 py-2">
                   <span className="font-bold">{selected.length} élève(s) sélectionné(s)</span>
                   <Button size="sm" onClick={() => setPupils(d.items.filter((c) => selected.includes(c.id)))}><RotateCcw className="size-4" /> Réinscrire la sélection</Button>
                 </div>
               )}
-              <Table>
-                <thead>
-                  <tr>
-                    <th className="w-10"><input type="checkbox" className="size-5" aria-label="Tout sélectionner" checked={allChecked} onChange={(e) => setSelected(e.target.checked ? rows.map((r) => r.id) : [])} /></th>
-                    <th>Élève</th><th>Classe {d.fromYear.label}</th><th>Résultat</th>{showBalance && <th className="text-right">Solde dû</th>}<th />
-                  </tr>
-                </thead>
-                <tbody>
+              {/* Téléphone : une carte par élève. */}
+              <div className="grid gap-2 sm:hidden">
+                <label className="flex min-h-11 items-center gap-3 text-sm font-bold">
+                  <input type="checkbox" className="size-5" checked={allChecked} onChange={(e) => setSelected(e.target.checked ? rows.map((r) => r.id) : [])} /> Tout sélectionner
+                </label>
+                <ul className="grid gap-2" aria-label="Élèves à réinscrire">
                   {rows.map((c) => (
-                    <tr key={c.id}>
-                      <td><input type="checkbox" className="size-5" aria-label={`Sélectionner ${c.lastName} ${c.firstName}`} checked={selected.includes(c.id)} onChange={(e) => setSelected(e.target.checked ? [...selected, c.id] : selected.filter((x) => x !== c.id))} /></td>
-                      <td><Link href={`/espace/eleves/${c.id}`} className="font-bold text-brand hover:underline">{c.lastName} {c.firstName}</Link><span className="block font-mono text-xs text-muted">{c.matricule}</span></td>
-                      <td>{c.fromClass.name} · {c.fromClass.site.name}</td>
-                      <td>{c.outcome ? <Badge tone={OUTCOME[c.outcome][1]}>{OUTCOME[c.outcome][0]}</Badge> : <span className="text-sm text-muted">Non saisi</span>}</td>
-                      {showBalance && <td className={`text-right font-bold ${c.balance ? 'text-bad' : 'text-good'}`}>{fcfa(c.balance ?? 0)}</td>}
-                      <td className="text-right"><Button size="sm" variant="outline" onClick={() => setPupils([c])}>Réinscrire</Button></td>
-                    </tr>
+                    <li key={c.id} className="rounded-lg border border-line p-3" data-matricule={c.matricule}>
+                      <div className="flex items-start gap-3">
+                        <input type="checkbox" className="mt-1 size-5 flex-none" aria-label={`Sélectionner ${c.lastName} ${c.firstName}`} checked={selected.includes(c.id)} onChange={(e) => toggle(c.id, e.target.checked)} />
+                        <div className="grid min-w-0 flex-1 gap-1">
+                          <p><Link href={`/espace/eleves/${c.id}`} className="font-bold text-brand hover:underline">{c.lastName} {c.firstName}</Link> <span className="font-mono text-xs text-muted">{c.matricule}</span></p>
+                          <p className="flex flex-wrap items-center gap-1.5 text-sm">
+                            {c.fromClass.name} · {c.fromClass.site.name}
+                            {c.outcome ? <Badge tone={OUTCOME[c.outcome][1]}>{OUTCOME[c.outcome][0]}</Badge> : <span className="text-muted">Résultat non saisi</span>}
+                          </p>
+                          <Proposed p={c.proposal} />
+                          <Unpaid p={c} />
+                        </div>
+                      </div>
+                      <Button size="sm" variant="outline" className="mt-2 w-full" onClick={() => setPupils([c])}>Réinscrire</Button>
+                    </li>
                   ))}
-                </tbody>
-              </Table>
-              {showBalance && <p className="text-xs text-muted">Le solde dû est affiché pour information : il ne bloque pas la réinscription.</p>}
+                </ul>
+              </div>
+              {/* Bureau et tablette : le tableau. */}
+              <div className="hidden sm:block">
+                <Table>
+                  <thead>
+                    <tr>
+                      <th className="w-10"><input type="checkbox" className="size-5" aria-label="Tout sélectionner" checked={allChecked} onChange={(e) => setSelected(e.target.checked ? rows.map((r) => r.id) : [])} /></th>
+                      <th>Élève</th><th>Classe {d.fromYear.label}</th><th>Résultat</th><th>Classe proposée</th>{showBalance && <th className="text-right">Reste à payer</th>}<th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((c) => (
+                      <tr key={c.id}>
+                        <td><input type="checkbox" className="size-5" aria-label={`Sélectionner ${c.lastName} ${c.firstName}`} checked={selected.includes(c.id)} onChange={(e) => toggle(c.id, e.target.checked)} /></td>
+                        <td>
+                          <Link href={`/espace/eleves/${c.id}`} className="font-bold text-brand hover:underline">{c.lastName} {c.firstName}</Link>
+                          <span className="block font-mono text-xs text-muted">{c.matricule}</span>
+                          {!showBalance && c.unpaid && <Unpaid p={c} compact />}
+                        </td>
+                        <td>{c.fromClass.name} · {c.fromClass.site.name}</td>
+                        <td>{c.outcome ? <Badge tone={OUTCOME[c.outcome][1]}>{OUTCOME[c.outcome][0]}</Badge> : <span className="text-sm text-muted">Non saisi</span>}</td>
+                        <td>{c.proposal.classId ? <b>{c.proposal.className}</b> : <span className="text-sm text-muted">À choisir</span>}</td>
+                        {showBalance && (
+                          <td className={`text-right font-bold ${c.unpaid ? 'text-bad' : 'text-good'}`}>
+                            {fcfa(c.balance ?? 0)}
+                            {!!c.overdue && <span className="block text-xs font-normal">dont {fcfa(c.overdue)} échus</span>}
+                          </td>
+                        )}
+                        <td className="text-right"><Button size="sm" variant="outline" onClick={() => setPupils([c])}>Réinscrire</Button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </div>
+              <p className="text-xs text-muted">
+                La classe proposée suit le résultat de fin d’année et le passage défini dans Paramètres › Niveaux ; vous la confirmez ou la changez avant de valider.
+                {showBalance ? ' Le reste à payer est affiché pour information : il ne bloque pas la réinscription.' : ''}
+              </p>
             </Card>
           )}
           <ReenrollDialog
@@ -122,49 +200,79 @@ export function Reinscriptions() {
   );
 }
 
-/** Choix de la classe de l'année en cours, puis réinscription élève par élève (un échec n'arrête pas les autres). */
-export function ReenrollDialog({ pupils, year, classes, onClose }: { pupils: Pupil[] | null; year: string; classes: ClassRow[]; onClose: (done: boolean) => void }) {
-  const [classId, setClassId] = useState('');
-  const [createInvoices, setInvoices] = useState(true);
+type Report = { ok: Done[]; failed: { name: string; message: string }[] };
+
+/**
+ * Confirmation des classes, puis réinscription élève par élève (un échec n'arrête pas les autres). Chaque élève part
+ * avec la classe proposée (ou celle que la personne a déjà choisie), qu'elle confirme ou change ; les impayés sont
+ * signalés sans bloquer. Toutes les réinscriptions passent par cette fenêtre : onglet Réinscriptions, dossier de
+ * l'élève, et dossier retrouvé pendant une inscription (`applicationId` : la pré-inscription d'où elle vient).
+ * `closeOnSuccess` : quand tout a réussi, la fenêtre se ferme et `onClose` reçoit les réinscriptions faites.
+ */
+export function ReenrollDialog({ pupils, year, classes, onClose, applicationId, createInvoices: invoicesByDefault = true, closeOnSuccess }: {
+  pupils: Pupil[] | null; year: string; classes: ClassRow[]; onClose: (done: boolean, ok?: Done[]) => void;
+  applicationId?: string | null; createInvoices?: boolean; closeOnSuccess?: boolean;
+}) {
+  const [choice, setChoice] = useState<Record<string, string>>({});
+  const [confirmed, setConfirmed] = useState(false);
+  const [createInvoices, setInvoices] = useState(invoicesByDefault);
   const [busy, setBusy] = useState(false);
-  const [report, setReport] = useState<{ ok: { name: string; reinstated: boolean; invoices: number }[]; failed: { name: string; message: string }[]; className: string } | null>(null);
-  const close = () => { const done = !!report?.ok.length; setReport(null); setClassId(''); onClose(done); };
+  const [report, setReport] = useState<Report | null>(null);
+  // Chaque élève part avec la classe proposée (s'il y en a une), à confirmer. Remis à zéro quand la liste change
+  // (et pas à chaque affichage : le dossier passe un nouveau tableau à chaque rendu).
+  const key = (pupils ?? []).map((p) => `${p.id}:${p.chosenClassId ?? ''}:${p.proposal?.classId ?? ''}`).join(',');
+  const [seen, setSeen] = useState('');
+  if (key !== seen) {
+    setSeen(key);
+    setChoice(Object.fromEntries((pupils ?? []).map((p) => [p.id, p.chosenClassId || p.proposal?.classId || ''])));
+    setConfirmed(false);
+    setInvoices(invoicesByDefault);
+  }
+  const close = () => { const ok = report?.ok ?? []; setReport(null); onClose(ok.length > 0, ok); };
+  const className = (id: string) => classes.find((c) => c.id === id)?.name ?? '';
+  const options = classes.map((c) => <option key={c.id} value={c.id} disabled={!!c.capacity && c.studentCount >= c.capacity}>{c.name} · {c.site.name} ({c.studentCount}{c.capacity ? `/${c.capacity}` : ''})</option>);
+  const owing = (pupils ?? []).filter((p) => p.unpaid);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!pupils) return;
     setBusy(true);
-    const ok: { name: string; reinstated: boolean; invoices: number }[] = [];
-    const failed: { name: string; message: string }[] = [];
+    const out: Report = { ok: [], failed: [] };
     for (const p of pupils) {
       const name = `${p.lastName} ${p.firstName}`;
       try {
-        const r = await api.post<{ reinstated: boolean; invoices: number }>(`/students/${p.id}/reenroll`, { classId, createInvoices });
-        ok.push({ name, reinstated: r.reinstated, invoices: r.invoices });
+        const r = await api.post<Omit<Done, 'name'>>(`/students/${p.id}/reenroll`, { classId: choice[p.id], createInvoices, ...(applicationId ? { applicationId } : {}) });
+        out.ok.push({ id: r.id, matricule: r.matricule, name, className: r.className, year: r.year, reinstated: r.reinstated, invoices: r.invoices });
       } catch (err) {
-        failed.push({ name, message: err instanceof Error ? err.message : 'Erreur' });
+        out.failed.push({ name, message: err instanceof Error ? err.message : 'Erreur' });
       }
     }
     setBusy(false);
-    setReport({ ok, failed, className: classes.find((c) => c.id === classId)?.name ?? '' });
+    if (closeOnSuccess && out.ok.length && !out.failed.length) onClose(true, out.ok);
+    else setReport(out);
   }
 
+  const same = report ? [...new Set(report.ok.map((r) => r.className))] : [];
   return (
     <Dialog open={!!pupils} onOpenChange={(o) => !o && close()}>
       {pupils && (
         <DialogContent
+          className="max-w-2xl"
           title={pupils.length === 1 ? `Réinscrire ${pupils[0].lastName} ${pupils[0].firstName}` : `Réinscrire ${pupils.length} élèves`}
           description={`Pour ${year}, sur le dossier existant : même matricule, historique conservé.`}
         >
           {report ? (
             <div className="grid gap-3">
               {report.ok.length > 0 && (
-                <p className="flex items-start gap-2 font-bold text-good">
-                  <CheckCircle2 className="mt-0.5 size-5 flex-none" />
-                  {report.ok.length} élève(s) réinscrit(s) en {report.className}.
-                  {report.ok.some((r) => r.reinstated) ? ' Une inscription annulée ou terminée a été rétablie (aucune nouvelle facture).' : ''}
-                  {report.ok.reduce((n, r) => n + r.invoices, 0) ? ` ${report.ok.reduce((n, r) => n + r.invoices, 0)} facture(s) créée(s).` : ''}
-                </p>
+                <div className="grid gap-1">
+                  <p className="flex items-start gap-2 font-bold text-good">
+                    <CheckCircle2 className="mt-0.5 size-5 flex-none" />
+                    {report.ok.length} élève(s) réinscrit(s){same.length === 1 ? ` en ${same[0]}` : ''}.
+                    {report.ok.some((r) => r.reinstated) ? ' Une inscription annulée ou terminée a été rétablie (aucune nouvelle facture).' : ''}
+                    {report.ok.reduce((n, r) => n + r.invoices, 0) ? ` ${report.ok.reduce((n, r) => n + r.invoices, 0)} facture(s) créée(s).` : ''}
+                  </p>
+                  {same.length > 1 && <ul className="text-sm">{report.ok.map((r) => <li key={r.name}>{r.name} : {r.className}</li>)}</ul>}
+                </div>
               )}
               {report.failed.length > 0 && (
                 <ul className="grid gap-1 rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">
@@ -175,15 +283,47 @@ export function ReenrollDialog({ pupils, year, classes, onClose }: { pupils: Pup
             </div>
           ) : (
             <form className="grid gap-3" onSubmit={submit}>
-              {pupils.length > 1 && <p className="text-sm">{pupils.map((p) => `${p.lastName} ${p.firstName}`).join(', ')}</p>}
-              <Field label={`Classe ${year}`}>
-                <Select value={classId} onChange={(e) => setClassId(e.target.value)} required>
-                  <option value="">Choisir la classe</option>
-                  {classes.map((c) => <option key={c.id} value={c.id} disabled={!!c.capacity && c.studentCount >= c.capacity}>{c.name} · {c.site.name} ({c.studentCount}{c.capacity ? `/${c.capacity}` : ''})</option>)}
-                </Select>
-              </Field>
+              {owing.length > 0 && (
+                <p className="flex items-start gap-2 rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">
+                  <AlertTriangle className="mt-0.5 size-4 flex-none" />
+                  <span>
+                    <b>{pupils.length === 1 ? 'Cet élève a des frais impayés.' : `${owing.length} élève(s) ont des frais impayés.`}</b> La réinscription n’est pas bloquée :
+                    appliquez les règles financières de votre établissement.
+                  </span>
+                </p>
+              )}
+              {pupils.length > 1 && (
+                <Field label="Même classe pour toute la sélection (facultatif)">
+                  <Select value="" onChange={(e) => e.target.value && setChoice(Object.fromEntries(pupils.map((p) => [p.id, e.target.value])))}>
+                    <option value="">Garder les classes proposées</option>
+                    {options}
+                  </Select>
+                </Field>
+              )}
+              <ul className="grid gap-2">
+                {pupils.map((p) => (
+                  <li key={p.id} className={`grid gap-1.5 ${pupils.length > 1 ? 'rounded-lg border border-line p-3' : ''}`}>
+                    {pupils.length > 1 && <p className="font-bold">{p.lastName} {p.firstName} <span className="font-mono text-xs font-normal text-muted">{p.matricule}</span></p>}
+                    {p.proposal && <p className={`text-sm ${p.proposal.classId ? 'text-brand' : 'text-muted'}`}>{p.proposal.note}</p>}
+                    <Unpaid p={p} />
+                    <Field label={pupils.length > 1 ? `Classe ${year} · ${p.lastName} ${p.firstName}` : `Classe ${year}`}>
+                      <Select value={choice[p.id] ?? ''} onChange={(e) => setChoice({ ...choice, [p.id]: e.target.value })} required>
+                        <option value="">Choisir la classe</option>
+                        {options}
+                      </Select>
+                    </Field>
+                    {p.proposal?.classId && choice[p.id] && choice[p.id] !== p.proposal.classId && (
+                      <p className="text-xs font-bold text-warn">Vous avez choisi {className(choice[p.id])} au lieu de la classe proposée ({p.proposal.className}).</p>
+                    )}
+                  </li>
+                ))}
+              </ul>
               <label className="flex min-h-11 items-center gap-3 font-bold"><input type="checkbox" className="size-5" checked={createInvoices} onChange={(e) => setInvoices(e.target.checked)} /> Créer les factures des frais « anciens élèves » de la classe</label>
-              <Button type="submit" loading={busy}>Réinscrire</Button>
+              <label className="flex min-h-11 items-center gap-3 rounded-lg bg-sunk px-3 font-bold">
+                <input type="checkbox" className="size-5" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} required />
+                {pupils.length === 1 ? 'Je confirme la classe choisie' : 'Je confirme la classe de chaque élève'}
+              </label>
+              <Button type="submit" loading={busy} disabled={!confirmed}>Réinscrire</Button>
             </form>
           )}
         </DialogContent>
@@ -236,19 +376,34 @@ export function Doublons() {
           {d.decided.length > 0 && (
             <Card>
               <p className="mb-2 font-bold">Dernières décisions</p>
-              <Table>
-                <thead><tr><th>Date</th><th>Dossiers</th><th>Décision</th><th>Note</th></tr></thead>
-                <tbody>
-                  {d.decided.map((p) => (
-                    <tr key={p.id}>
-                      <td>{date(p.decidedAt ?? null)}</td>
-                      <td className="text-sm">{p.student?.lastName} {p.student?.firstName} · <span className="font-mono">{p.student?.matricule}</span> et <span className="font-mono">{p.other?.matricule}</span></td>
-                      <td><Badge tone={p.status === 'SAME' ? 'warn' : 'good'}>{p.status === 'SAME' ? 'Même élève' : 'Élèves différents'}</Badge></td>
-                      <td className="text-sm">{p.decisionNote ?? '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
+              {/* Téléphone : une carte par décision. */}
+              <ul className="grid gap-2 sm:hidden">
+                {d.decided.map((p) => (
+                  <li key={p.id} className="grid gap-1 rounded-lg border border-line p-3 text-sm">
+                    <p className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-muted">{date(p.decidedAt ?? null)}</span>
+                      <Badge tone={p.status === 'SAME' ? 'warn' : 'good'}>{p.status === 'SAME' ? 'Même élève' : 'Élèves différents'}</Badge>
+                    </p>
+                    <p>{p.student?.lastName} {p.student?.firstName} · <span className="font-mono">{p.student?.matricule}</span> et <span className="font-mono">{p.other?.matricule}</span></p>
+                    {p.decisionNote && <p className="text-muted">{p.decisionNote}</p>}
+                  </li>
+                ))}
+              </ul>
+              <div className="hidden sm:block">
+                <Table>
+                  <thead><tr><th>Date</th><th>Dossiers</th><th>Décision</th><th>Note</th></tr></thead>
+                  <tbody>
+                    {d.decided.map((p) => (
+                      <tr key={p.id}>
+                        <td>{date(p.decidedAt ?? null)}</td>
+                        <td className="text-sm">{p.student?.lastName} {p.student?.firstName} · <span className="font-mono">{p.student?.matricule}</span> et <span className="font-mono">{p.other?.matricule}</span></td>
+                        <td><Badge tone={p.status === 'SAME' ? 'warn' : 'good'}>{p.status === 'SAME' ? 'Même élève' : 'Élèves différents'}</Badge></td>
+                        <td className="text-sm">{p.decisionNote ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </div>
             </Card>
           )}
           <Dialog open={!!decide} onOpenChange={(o) => !o && setDecide(null)}>

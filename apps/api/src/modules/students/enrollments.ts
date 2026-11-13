@@ -48,6 +48,8 @@ export type DuplicateCandidate = {
   lastSiteId: string | null; lastSite: string | null;
   /** Inscription active pour l'année en cours : l'élève n'est pas à réinscrire, il l'est déjà. */
   enrolledThisYear: boolean;
+  /** Dernière inscription annulée : sa classe n'a jamais été suivie, l'écran le dit (corrections du lot G4). */
+  lastCancelled: boolean;
 };
 
 /**
@@ -93,6 +95,7 @@ export async function findDuplicates(
       lastClass: last?.class.name ?? null, lastYear: last?.academicYear.label ?? null,
       lastSiteId: last?.class.siteId ?? null, lastSite: last?.class.site.name ?? null,
       enrolledThisYear: !!last && last.academicYear.isCurrent && last.status === 'ACTIVE',
+      lastCancelled: last?.status === 'CANCELLED',
     };
   });
 }
@@ -159,31 +162,135 @@ export function endOfSchoolDay(date: string, timeZone: string) {
   return new Date(next - (local - next) - 1);
 }
 
+type JournalLine = { kind: EnrollmentEventKind; data: Prisma.JsonValue | null; createdAt: Date };
+
+/**
+ * Une période d'activité d'une inscription, reconstruite depuis son historique : début (instant) et moment où ce
+ * début a été enregistré ; fin par une sortie datée (le jour de sortie n'est plus un jour d'activité), par une
+ * annulation (instant), ou fin inconnue (départ enregistré avant l'historique du lot G4, sans date).
+ */
+export type Episode = {
+  start: Date;
+  startRecorded: Date;
+  end: null | { kind: 'EXIT'; day: string; recorded: Date } | { kind: 'CANCEL'; at: Date } | { kind: 'UNKNOWN'; before: Date | null };
+};
+
+const byRecord = (lines: JournalLine[]) => [...lines].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+const field = (l: JournalLine, key: string) => ((l.data ?? {}) as Record<string, unknown>)[key];
+
+/**
+ * Périodes d'activité d'une inscription, rejouées depuis son historique dans l'ordre d'enregistrement (corrections
+ * du lot G4) : l'état actuel de l'inscription ne sert qu'à repérer un départ enregistré avant cet historique.
+ */
+export function enrollmentEpisodes(e: { enrolledAt: Date; status: string }, journal: JournalLine[]): Episode[] {
+  const lines = byRecord(journal);
+  const created = lines.find((l) => l.kind === 'ENROLLED' || l.kind === 'REENROLLED');
+  const episodes: Episode[] = [];
+  let open: Episode | null = { start: e.enrolledAt, startRecorded: created?.createdAt ?? e.enrolledAt, end: null };
+  for (const l of lines) {
+    if (l.kind === 'TRANSFERRED' || l.kind === 'WITHDRAWN') {
+      if (open) episodes.push({ ...open, end: { kind: 'EXIT', day: String(field(l, 'exitDate')).slice(0, 10), recorded: l.createdAt } });
+      open = null;
+    } else if (l.kind === 'CANCELLED') {
+      if (open) episodes.push({ ...open, end: { kind: 'CANCEL', at: l.createdAt } });
+      open = null;
+    } else if (l.kind === 'REINSTATED') {
+      // Rétablie alors que l'historique la croit active : elle avait été arrêtée avant l'historique, à une date inconnue.
+      if (open) episodes.push({ ...open, end: { kind: 'UNKNOWN', before: l.createdAt } });
+      open = { start: l.createdAt, startRecorded: l.createdAt, end: null };
+    }
+  }
+  // Arrêtée sans aucune ligne d'historique pour le dire : départ enregistré avant le lot G4, date inconnue.
+  if (open) episodes.push(e.status === 'ACTIVE' ? open : { ...open, end: { kind: 'UNKNOWN', before: null } });
+  return episodes;
+}
+
+/**
+ * État d'une inscription à la fin du jour R (instant `at`), d'après ce qui était enregistré à l'instant `knownAt`.
+ * « UNKNOWN » : un départ sans date (enregistré avant l'historique) empêche de conclure.
+ */
+export function stateAt(episodes: Episode[], date: string, at: Date, knownAt: Date): 'ACTIVE' | 'INACTIVE' | 'UNKNOWN' {
+  let unknown = false;
+  for (const ep of episodes) {
+    if (ep.start > at || ep.startRecorded > knownAt) continue;
+    const end = ep.end;
+    if (!end) return 'ACTIVE';
+    if (end.kind === 'EXIT') {
+      // Sortie connue à knownAt et datée du jour R ou d'avant : plus active à la fin du jour R.
+      if (end.recorded > knownAt || date < end.day) return 'ACTIVE';
+    } else if (end.kind === 'CANCEL') {
+      if (end.at > knownAt || end.at > at) return 'ACTIVE';
+    } else if (!end.before || end.before > at) {
+      unknown = true;
+    }
+  }
+  return unknown ? 'UNKNOWN' : 'INACTIVE';
+}
+
+/** Classe de l'inscription à l'instant `at`, d'après l'historique enregistré à l'instant `knownAt`. */
+export function classAt(e: { classId: string }, journal: JournalLine[], at: Date, knownAt: Date): string {
+  const lines = byRecord(journal);
+  const created = lines.find((l) => l.kind === 'ENROLLED' || l.kind === 'REENROLLED');
+  const firstMove = lines.find((l) => l.kind === 'CLASS_CHANGED' || l.kind === 'REINSTATED');
+  const initial = created ? field(created, 'classId')
+    : firstMove ? field(firstMove, firstMove.kind === 'CLASS_CHANGED' ? 'fromClassId' : 'previousClassId') : null;
+  let classId = typeof initial === 'string' ? initial : e.classId;
+  for (const l of lines) {
+    if (l.createdAt > at || l.createdAt > knownAt) break;
+    const to = l.kind === 'CLASS_CHANGED' ? field(l, 'toClassId') : l.kind === 'REINSTATED' ? field(l, 'classId') : null;
+    if (typeof to === 'string') classId = to;
+  }
+  return classId;
+}
+
+export type BillableCount = {
+  /** Jour de référence R (AAAA-MM-JJ), fuseau de l'école, fin de ce jour (instant), et état de l'historique utilisé. */
+  date: string; timeZone: string; at: Date; knownAt: Date;
+  count: number;
+  items: { enrollmentId: string; studentId: string; matricule: string; type: string | null; classId: string; siteId: string | null }[];
+  /** Inscriptions qu'on ne peut pas trancher (départ sans date, enregistré avant l'historique) : à vérifier par une personne. */
+  toReview: { enrollmentId: string; studentId: string; matricule: string; reason: string }[];
+};
+
 /**
  * Élèves facturables d'une école pour une année scolaire, à la date de référence R (définition validée par Dankou
  * le 11 novembre 2026) : « un élève ayant une inscription active pour l'année scolaire concernée à une date de
- * référence ». R est un jour (AAAA-MM-JJ) compté jusqu'à minuit dans le fuseau de l'école. Une inscription de
- * l'année compte si elle est :
- * - enregistrée au plus tard le jour R ;
- * - non annulée à la fin du jour R (annulée avant : exclue ; annulée après : elle était active à R) ;
- * - sans sortie (transfert, abandon) datée du jour R ou d'avant (un élève sorti le jour R ne compte plus).
- * Une seule inscription par élève et par année (contrainte de la base) : un élève n'est jamais compté deux fois
- * dans la même école pour la même année. Deux dossiers en double non tranchés par la direction comptent tels que
- * saisis (règle A du 12 novembre 2026). Aucune facture n'est créée ici : ces données serviront au lot de facturation.
+ * référence ». R est un jour (AAAA-MM-JJ) compté jusqu'à minuit dans le fuseau de l'école.
+ *
+ * Le calcul ne lit pas l'état actuel des inscriptions : il rejoue leur historique (corrections du lot G4, demande
+ * de Dankou du 13 novembre 2026). Une inscription compte si, à la fin du jour R, elle avait commencé, n'avait pas
+ * été annulée (annulée avant : exclue ; annulée après : elle était active à R) et n'avait pas de sortie datée du
+ * jour R ou d'avant ; une inscription annulée puis rétablie après R ne compte donc pas à R.
+ *
+ * `knownAt` (par défaut : maintenant) fige le calcul : seules les lignes d'historique enregistrées à cet instant
+ * sont lues. Refaire le calcul de R avec le même `knownAt` donne toujours la même liste, même si une sortie est
+ * enregistrée plus tard avec une date antérieure ; sans `knownAt`, la sortie tardive est prise en compte.
+ *
+ * Une seule inscription par élève et par année (contrainte de la base) : un élève n'est jamais compté deux fois dans
+ * la même école pour la même année. Deux dossiers en double non tranchés par la direction comptent tels que saisis
+ * (règle A du 12 novembre 2026). Aucune facture n'est créée ici : ces données serviront au lot de facturation.
  */
-export function billableEnrollments(tx: Tx, academicYearId: string, date: string, timeZone: string) {
+export async function billableEnrollments(tx: Tx, academicYearId: string, date: string, timeZone: string, knownAt: Date = new Date()): Promise<BillableCount> {
   const at = endOfSchoolDay(date, timeZone);
-  const day = new Date(`${date}T00:00:00.000Z`);
-  return tx.enrollment.findMany({
-    where: {
-      academicYearId,
-      enrolledAt: { lte: at },
-      AND: [
-        { OR: [{ cancelledAt: null }, { cancelledAt: { gt: at } }] },
-        { OR: [{ exitDate: null }, { exitDate: { gt: day } }] },
-      ],
+  const rows = await tx.enrollment.findMany({
+    where: { academicYearId, enrolledAt: { lte: at } },
+    select: {
+      id: true, studentId: true, classId: true, status: true, type: true, enrolledAt: true, student: { select: { matricule: true } },
+      events: { select: { kind: true, data: true, createdAt: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] },
     },
-    select: { id: true, studentId: true, classId: true, type: true, status: true, enrolledAt: true, class: { select: { siteId: true } }, student: { select: { matricule: true } } },
-    orderBy: { enrolledAt: 'asc' },
+    orderBy: [{ enrolledAt: 'asc' }, { id: 'asc' }],
   });
+  const sites = new Map((await tx.class.findMany({ where: { academicYearId }, select: { id: true, siteId: true } })).map((c) => [c.id, c.siteId]));
+  const out: BillableCount = { date, timeZone, at, knownAt, count: 0, items: [], toReview: [] };
+  for (const r of rows) {
+    const state = stateAt(enrollmentEpisodes(r, r.events), date, at, knownAt);
+    if (state === 'UNKNOWN') {
+      out.toReview.push({ enrollmentId: r.id, studentId: r.studentId, matricule: r.student.matricule, reason: 'Départ enregistré sans date avant l’historique des inscriptions' });
+    } else if (state === 'ACTIVE') {
+      const classId = classAt(r, r.events, at, knownAt);
+      out.items.push({ enrollmentId: r.id, studentId: r.studentId, matricule: r.student.matricule, type: r.type, classId, siteId: sites.get(classId) ?? null });
+    }
+  }
+  out.count = out.items.length;
+  return out;
 }

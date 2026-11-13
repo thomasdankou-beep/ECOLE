@@ -38,6 +38,27 @@ export class FinanceService {
     return new Map(rows.map((r) => [r.studentId, (r._sum.total ?? 0) - (r._sum.paid ?? 0)]));
   }
 
+  /**
+   * Frais impayés par élève (corrections du lot G4) : reste à payer sur toutes ses factures non annulées, dont la part
+   * déjà échue (échéance passée, au jour de l'école). Seuls les élèves qui doivent quelque chose sont dans le résultat.
+   */
+  async unpaidByStudent(tx: Tx, tenantId: string, studentIds: string[]): Promise<Map<string, { due: number; overdue: number }>> {
+    const out = new Map<string, { due: number; overdue: number }>();
+    if (!studentIds.length) return out;
+    const today = toDate(await tenantToday(tx, tenantId));
+    const due = await this.balances(tx, studentIds);
+    const late = await tx.invoice.findMany({
+      where: { studentId: { in: studentIds }, status: { in: ['OPEN', 'PARTIAL'] }, dueDate: { lt: today } },
+      select: { studentId: true, total: true, paid: true },
+    });
+    for (const [id, amount] of due) if (amount > 0) out.set(id, { due: amount, overdue: 0 });
+    for (const i of late) {
+      const row = out.get(i.studentId);
+      if (row) row.overdue += Math.max(0, i.total - i.paid);
+    }
+    return out;
+  }
+
   // ------------------------------------------------------------ Catalogue des frais
   feeTypes(actor: Actor) {
     return this.db.forTenant(actor.tenantId, async (tx) => {

@@ -241,12 +241,17 @@ model Track {
 }
 
 model Level {
-  id       String  @id @default(uuid()) @db.Uuid
-  tenantId String  @map("tenant_id") @db.Uuid
-  name     String
-  cycle    Cycle
-  position Int
-  classes  Class[]
+  id          String  @id @default(uuid()) @db.Uuid
+  tenantId    String  @map("tenant_id") @db.Uuid
+  name        String
+  cycle       Cycle
+  position    Int
+  /// Niveau de l'année suivante pour un élève admis (5e → 4e), défini par la direction : sert à proposer la classe
+  /// à la réinscription (corrections du lot G4). Vide : aucune proposition pour un élève admis.
+  nextLevelId String? @db.Uuid
+  nextLevel   Level?  @relation("LevelPassage", fields: [nextLevelId], references: [id], onDelete: SetNull)
+  fromLevels  Level[] @relation("LevelPassage")
+  classes     Class[]
 
   @@unique([tenantId, name])
   @@map("levels")

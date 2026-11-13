@@ -13,7 +13,7 @@ import { can } from '@/lib/perm';
 import { DOC_KINDS, type ClassRow } from '@/lib/types';
 import { useAction, useApi } from '@/lib/use-api';
 import { StudentFiles, StudentPhoto, type StudentFile } from '@/components/espace/student-files';
-import { ReenrollDialog } from '@/components/espace/reinscription';
+import { ReenrollDialog, type Proposal } from '@/components/espace/reinscription';
 
 type Student = {
   id: string; matricule: string; firstName: string; lastName: string; sex: string | null; birthDate: string | null; birthPlace: string | null; allergies: string | null; status: string;
@@ -23,6 +23,8 @@ type Student = {
   photoUrl: string | null; files?: StudentFile[];
   /** Lot G4 : réinscription possible (aucune inscription active cette année) et année en cours. */
   reenrollable: boolean; currentYear: { id: string; label: string };
+  /** Corrections du lot G4 : frais impayés (le montant échu pour qui voit les finances) et classe proposée. */
+  unpaid?: boolean; overdue?: number; reenrollProposal?: Proposal | null;
 };
 type EnrollmentEvent = { id: string; kind: string; data: Record<string, any> | null; actorName: string | null; createdAt: string };
 type Enrollment = {
@@ -123,17 +125,26 @@ function Infos({ s, editable, onChange }: { s: Student; editable: boolean; onCha
   );
 }
 
+/** Contrôles gardés avec une réinscription (corrections du lot G4) : classe proposée suivie ou changée, impayés signalés. */
+function checks(d: Record<string, any>) {
+  const parts = [
+    d.proposedClass ? (d.followedProposal ? 'classe proposée confirmée' : `classe proposée : ${d.proposedClass}, changée`) : null,
+    d.unpaid ? 'frais impayés signalés' : null,
+  ].filter(Boolean);
+  return parts.length ? ` · ${parts.join(' · ')}` : '';
+}
+
 /** Ligne d'historique d'une inscription (lot G4), en clair. */
 function eventText({ kind, data }: EnrollmentEvent) {
   const d = data ?? {};
   switch (kind) {
     case 'ENROLLED': return `Inscription en ${d.className ?? '—'}${d.type === 'RETURNING' ? ' (ancien élève)' : ''}`;
-    case 'REENROLLED': return `Réinscription en ${d.className ?? '—'}${d.fromClass ? ` (venant de ${d.fromClass}, ${d.fromYear})` : ''}`;
+    case 'REENROLLED': return `Réinscription en ${d.className ?? '—'}${d.fromClass ? ` (venant de ${d.fromClass}, ${d.fromYear})` : ''}${checks(d)}`;
     case 'CLASS_CHANGED': return `Changement de classe : de ${d.fromClass ?? '—'} à ${d.toClass ?? '—'}`;
     case 'TRANSFERRED': return `Départ (transfert) le ${date(d.exitDate)}${d.reason ? ` : ${d.reason}` : ''}`;
     case 'WITHDRAWN': return `Départ (abandon ou retrait) le ${date(d.exitDate)}${d.reason ? ` : ${d.reason}` : ''}`;
     case 'CANCELLED': return `Inscription annulée${d.reason ? ` : ${d.reason}` : ''}`;
-    case 'REINSTATED': return `Inscription rétablie en ${d.className ?? '—'}`;
+    case 'REINSTATED': return `Inscription rétablie en ${d.className ?? '—'}${d.previousStatus === 'CANCELLED' ? ' (annulée auparavant)' : d.exitDate ? ` (sortie du ${date(d.exitDate)} levée)` : ''}${checks(d)}`;
     default: return kind;
   }
 }
@@ -310,7 +321,12 @@ function StudentActions({ s, onDone, canCancel }: { s: Student; onDone: () => vo
       {s.reenrollable && (
         <>
           <Button onClick={() => setReenroll(true)}>Réinscrire pour {s.currentYear.label}</Button>
-          <ReenrollDialog pupils={reenroll ? [s] : null} year={s.currentYear.label} classes={classes.data ?? []} onClose={(done) => { setReenroll(false); if (done) onDone(); }} />
+          <ReenrollDialog
+            pupils={reenroll ? [{ id: s.id, firstName: s.firstName, lastName: s.lastName, matricule: s.matricule, proposal: s.reenrollProposal, unpaid: s.unpaid, balance: s.unpaid ? s.balance : undefined, overdue: s.overdue }] : null}
+            year={s.currentYear.label}
+            classes={classes.data ?? []}
+            onClose={(done) => { setReenroll(false); if (done) onDone(); }}
+          />
         </>
       )}
       {s.currentClass && (
@@ -348,7 +364,7 @@ function StudentActions({ s, onDone, canCancel }: { s: Student; onDone: () => vo
         <DialogContent title="Enregistrer un départ" description="L’élève est retiré de sa classe à cette date. Son dossier, ses notes et ses paiements sont conservés.">
           <form className="grid gap-3" onSubmit={async (e) => { e.preventDefault(); if (await run(() => api.post(`/students/${s.id}/withdraw`, withdraw), toast, 'Départ enregistré')) { setOpen(null); onDone(); } }}>
             <Field label="Motif du départ"><Select value={withdraw.status} onChange={(e) => setWithdraw({ ...withdraw, status: e.target.value })}><option value="TRANSFERRED">Transfert vers une autre école</option><option value="WITHDRAWN">Abandon ou retrait</option></Select></Field>
-            <Field label="Date de sortie" hint="Pas avant la rentrée, pas dans le futur"><Input type="date" value={withdraw.exitDate} max={today()} onChange={(e) => setWithdraw({ ...withdraw, exitDate: e.target.value })} required /></Field>
+            <Field label="Date de sortie" hint="Pas avant l’inscription (ou le retour) de l’élève, pas dans le futur. Il ne compte plus parmi les élèves à partir de ce jour."><Input type="date" value={withdraw.exitDate} max={today()} onChange={(e) => setWithdraw({ ...withdraw, exitDate: e.target.value })} required /></Field>
             <Field label="Précisions"><Textarea value={withdraw.reason} onChange={(e) => setWithdraw({ ...withdraw, reason: e.target.value })} minLength={3} required /></Field>
             <Button type="submit" variant="danger" loading={busy}>Confirmer le départ</Button>
           </form>

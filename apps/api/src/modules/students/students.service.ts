@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { AnnualOutcome, Prisma } from '@prisma/client';
 import { Actor } from '../../common/auth';
 import { AuditService, auditChanges, maskIdentifier } from '../../common/audit.service';
 import { assertOwned } from '../../common/ownership';
@@ -7,13 +7,14 @@ import { can } from '../../common/permissions';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
 import { nextNumber, pad, toDate } from '../../common/util';
-import { tenantPhone } from '../../common/country';
+import { localDay, tenantLocale, tenantPhone } from '../../common/country';
 import { hashPassword } from '../auth/auth.service';
 import { FilesService } from '../files/files.service';
 import { FinanceService } from '../finance/finance.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SettingsService, temporaryPassword } from '../settings/settings.service';
 import { DUPLICATE_REASON_LABELS, DuplicateReason, enrollmentEvent, findDuplicates, historyStudentIds, nameKey, suspectedPairs } from './enrollments';
+import { ClassChoice, Proposal, proposeClass } from './reenrollment';
 import {
   CancelEnrollmentDto, ChangeClassDto, DuplicateDecisionDto, EnrollStudentDto, GuardianInput, ReenrollDto, UpdateStudentDto, WithdrawDto,
 } from './students.dto';
@@ -109,8 +110,15 @@ export class StudentsService {
       const rest = actor.role === 'COMPTABLE' || actor.role === 'ELEVE' ? withoutHealth : all;
       // Réinscription possible depuis le dossier : aucune inscription active cette année (lot G4).
       const reenrollable = full && (!thisYear || thisYear.status !== 'ACTIVE');
-      const currentYear = await tx.academicYear.findUniqueOrThrow({ where: { id: yearId }, select: { id: true, label: true } });
-      return { ...rest, enrollments, photoUrl: this.photoUrl(s), guardians, currentClass: current?.class ?? null, balance, hasAccount: !!s.userId, files, reenrollable, currentYear };
+      const currentYear = await tx.academicYear.findUniqueOrThrow({ where: { id: yearId }, select: { id: true, label: true, startDate: true } });
+      // Corrections du lot G4 : frais impayés signalés (sans bloquer), montants pour qui voit les finances ; classe proposée.
+      const debt = full ? (await this.finance.unpaidByStudent(tx, actor.tenantId, [id])).get(id) : undefined;
+      const unpaid = full ? { unpaid: !!debt, ...(can(actor.role, 'finance.read') ? { overdue: debt?.overdue ?? 0 } : {}) } : {};
+      const reenrollProposal = reenrollable ? await this.proposalForStudent(tx, await this.proposalContext(tx, actor, yearId), id, yearId, currentYear.startDate) : undefined;
+      return {
+        ...rest, enrollments, photoUrl: this.photoUrl(s), guardians, currentClass: current?.class ?? null, balance, ...unpaid, hasAccount: !!s.userId, files,
+        reenrollable, reenrollProposal, currentYear: { id: currentYear.id, label: currentYear.label },
+      };
     });
   }
 
@@ -146,7 +154,7 @@ export class StudentsService {
         candidates: duplicates.map((d) => (mine(d)
           ? {
             id: d.id, matricule: d.matricule, firstName: d.firstName, lastName: d.lastName, birthDate: d.birthDate, reason: d.reason, reasonLabel: d.reasonLabel,
-            lastClass: d.lastClass, lastYear: d.lastYear, lastSite: d.lastSite, enrolledThisYear: d.enrolledThisYear, otherSite: false,
+            lastClass: d.lastClass, lastYear: d.lastYear, lastSite: d.lastSite, enrolledThisYear: d.enrolledThisYear, lastCancelled: d.lastCancelled, otherSite: false,
           }
           : {
             id: null, matricule: d.matricule, firstName: d.firstName, lastName: d.lastName, birthDate: null, reason: d.reason, reasonLabel: d.reasonLabel,
@@ -362,6 +370,13 @@ export class StudentsService {
       const exitDate = toDate(day);
       if (exitDate < e.academicYear.startDate) throw new BadRequestException('La date de sortie précède la rentrée de l’année en cours');
       if (exitDate.getTime() > Date.now() + 86_400_000) throw new BadRequestException('La date de sortie ne peut pas être dans le futur');
+      // Corrections du lot G4 : pas de sortie datée d'avant l'inscription, ou d'avant le retour de l'élève dans sa classe
+      // (inscription rétablie) ; sinon l'historique se contredirait et le comptage à une date passée serait faux.
+      const back = await tx.enrollmentEvent.findFirst({ where: { enrollmentId: e.id, kind: 'REINSTATED' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
+      const since = localDay((await tenantLocale(tx, actor.tenantId)).timezone, back?.createdAt ?? e.enrolledAt);
+      if (day < since) {
+        throw new BadRequestException(`La date de sortie précède ${back ? 'le retour de l’élève dans sa classe' : 'son inscription'} (le ${since.split('-').reverse().join('/')})`);
+      }
       const reason = dto.reason.trim();
       await tx.student.update({ where: { id }, data: { status: dto.status } });
       await tx.enrollment.update({ where: { id: e.id }, data: { status: dto.status, exitDate, exitReason: reason } });
@@ -397,8 +412,9 @@ export class StudentsService {
 
   /**
    * Élèves à réinscrire (lot G4) : inscrits jusqu'au bout d'une année antérieure (par défaut la précédente), sans
-   * inscription pour l'année en cours. Pour chacun : sa classe, la décision de fin d'année et, pour qui voit les
-   * finances, son solde (affiché seulement : aucune règle de blocage n'est appliquée).
+   * inscription pour l'année en cours. Pour chacun : sa classe, la décision de fin d'année, la classe proposée pour
+   * l'année en cours et un avertissement s'il a des frais impayés ; les montants pour qui voit les finances. Les impayés
+   * ne bloquent pas la réinscription : la direction applique les règles financières de son établissement.
    */
   reenrollmentCandidates(actor: Actor, fromYearId?: string) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
@@ -418,22 +434,30 @@ export class StudentsService {
         },
         select: {
           student: { select: { id: true, matricule: true, firstName: true, lastName: true, status: true, annualDecisions: { where: { academicYearId: from.id }, select: { outcome: true } } } },
-          class: { select: { id: true, name: true, level: { select: { name: true } }, site: { select: { id: true, name: true } } } },
+          class: { select: { id: true, name: true, siteId: true, levelId: true, trackId: true, level: { select: { name: true } }, site: { select: { id: true, name: true } } } },
         },
         orderBy: [{ class: { name: 'asc' } }, { student: { lastName: 'asc' } }, { student: { firstName: 'asc' } }],
         take: 3000,
       });
-      const balances = can(actor.role, 'finance.read') ? await this.finance.balances(tx, rows.map((r) => r.student.id)) : null;
+      const money = can(actor.role, 'finance.read');
+      const debts = await this.finance.unpaidByStudent(tx, actor.tenantId, rows.map((r) => r.student.id));
+      const ctx = await this.proposalContext(tx, actor, current.id);
       return {
         toYear,
         fromYear: from,
         years,
-        items: rows.map(({ student: { annualDecisions, ...st }, class: c }) => ({
-          ...st,
-          outcome: annualDecisions[0]?.outcome ?? null,
-          fromClass: { id: c.id, name: c.name, level: c.level.name, site: c.site },
-          ...(balances ? { balance: balances.get(st.id) ?? 0 } : {}),
-        })),
+        items: rows.map(({ student: { annualDecisions, ...st }, class: c }) => {
+          const outcome = annualDecisions[0]?.outcome ?? null;
+          const debt = debts.get(st.id);
+          return {
+            ...st,
+            outcome,
+            fromClass: { id: c.id, name: c.name, level: c.level.name, site: c.site },
+            proposal: this.propose(ctx, outcome, c),
+            unpaid: !!debt,
+            ...(money ? { balance: debt?.due ?? 0, overdue: debt?.overdue ?? 0 } : {}),
+          };
+        }),
       };
     });
   }
@@ -450,7 +474,7 @@ export class StudentsService {
       await this.scope.assertClass(tx, actor, dto.classId);
       const klass = await tx.class.findUnique({
         where: { id: dto.classId },
-        include: { academicYear: { select: { label: true } }, _count: { select: { enrollments: { where: { status: 'ACTIVE' } } } } },
+        include: { academicYear: { select: { label: true, startDate: true } }, _count: { select: { enrollments: { where: { status: 'ACTIVE' } } } } },
       });
       if (!klass || klass.academicYearId !== yearId) throw new BadRequestException("Cette classe n'existe pas pour l'année en cours");
       const student = await tx.student.findUniqueOrThrow({ where: { id }, select: { matricule: true, firstName: true, lastName: true, status: true } });
@@ -459,6 +483,15 @@ export class StudentsService {
       if (klass.capacity && klass._count.enrollments >= klass.capacity) throw new ConflictException(`La classe ${klass.name} est complète (${klass.capacity} places)`);
       if (dto.applicationId) await this.assertApplication(tx, actor, dto.applicationId, id);
 
+      // Corrections du lot G4 : la classe proposée et les impayés sont gardés avec la réinscription, pour le contrôle.
+      // La classe retenue est celle que la personne a confirmée ; les impayés ne bloquent pas.
+      const proposal = await this.proposalForStudent(tx, await this.proposalContext(tx, actor, yearId), id, yearId, klass.academicYear.startDate);
+      const debt = (await this.finance.unpaidByStudent(tx, actor.tenantId, [id])).get(id);
+      const checks = {
+        proposedClassId: proposal.classId, proposedClass: proposal.className, proposalBasis: proposal.basis,
+        followedProposal: proposal.classId === klass.id, unpaid: !!debt,
+      };
+
       let enrollmentId: string;
       let invoices = 0;
       if (existing) {
@@ -466,9 +499,11 @@ export class StudentsService {
           where: { id: existing.id },
           data: { status: 'ACTIVE', classId: klass.id, cancelledAt: null, cancelReason: null, cancelledById: null, exitDate: null, exitReason: null },
         });
+        // L'ancienne situation (classe, sortie ou annulation) reste écrite dans l'historique : rien n'est perdu.
         await enrollmentEvent(tx, actor, existing.id, 'REINSTATED', {
-          previousStatus: existing.status, previousClass: existing.class.name, classId: klass.id, className: klass.name, studentStatusBefore: student.status,
-          cancelReason: existing.cancelReason, exitDate: existing.exitDate?.toISOString().slice(0, 10) ?? null, exitReason: existing.exitReason,
+          previousStatus: existing.status, previousClassId: existing.classId, previousClass: existing.class.name, classId: klass.id, className: klass.name,
+          studentStatusBefore: student.status, cancelledAt: existing.cancelledAt?.toISOString() ?? null, cancelReason: existing.cancelReason,
+          exitDate: existing.exitDate?.toISOString().slice(0, 10) ?? null, exitReason: existing.exitReason, ...checks,
         });
         enrollmentId = existing.id;
       } else {
@@ -478,7 +513,7 @@ export class StudentsService {
         });
         const e = await tx.enrollment.create({ data: { tenantId: actor.tenantId, studentId: id, classId: klass.id, academicYearId: yearId, type: 'RETURNING' } });
         await enrollmentEvent(tx, actor, e.id, 'REENROLLED', {
-          classId: klass.id, className: klass.name, fromYear: previous?.academicYear.label ?? null, fromClass: previous?.class.name ?? null, studentStatusBefore: student.status,
+          classId: klass.id, className: klass.name, fromYear: previous?.academicYear.label ?? null, fromClass: previous?.class.name ?? null, studentStatusBefore: student.status, ...checks,
         });
         enrollmentId = e.id;
         if (dto.createInvoices) invoices = await this.finance.invoiceFromCatalog(tx, actor, id, klass.id, true);
@@ -487,9 +522,69 @@ export class StudentsService {
       if (dto.applicationId) await tx.application.update({ where: { id: dto.applicationId }, data: { status: 'INSCRIT', studentId: id } });
       await this.audit.log(tx, actor, existing ? 'student.enrollment_reinstated' : 'student.reenrolled', 'Student', id, {
         matricule: student.matricule, classId: klass.id, enrollmentId, invoices, ...(dto.applicationId ? { applicationId: dto.applicationId } : {}),
+        ...checks, ...(debt ? { balanceDue: debt.due, overdue: debt.overdue } : {}),
       });
-      return { id, matricule: student.matricule, enrollmentId, className: klass.name, year: klass.academicYear.label, invoices, reinstated: !!existing };
+      return {
+        id, matricule: student.matricule, enrollmentId, className: klass.name, year: klass.academicYear.label, invoices, reinstated: !!existing,
+        followedProposal: checks.followedProposal, unpaid: !!debt, ...(debt && can(actor.role, 'finance.read') ? { balance: debt.due, overdue: debt.overdue } : {}),
+      };
     });
+  }
+
+  /**
+   * Classes de l'année en cours que la personne peut choisir (son périmètre), avec leurs places, et niveaux avec leur
+   * niveau suivant : de quoi proposer une classe (corrections du lot G4).
+   */
+  private async proposalContext(tx: Tx, actor: Actor, yearId: string) {
+    const visible = await this.scope.classIds(tx, actor);
+    const rows = await tx.class.findMany({
+      where: { academicYearId: yearId, ...(visible ? { id: { in: visible } } : {}) },
+      select: {
+        id: true, name: true, siteId: true, levelId: true, trackId: true, capacity: true, site: { select: { name: true } }, level: { select: { name: true } },
+        _count: { select: { enrollments: { where: { status: 'ACTIVE' } } } },
+      },
+    });
+    const classes: ClassChoice[] = rows.map((c) => ({
+      id: c.id, name: c.name, siteId: c.siteId, siteName: c.site.name, levelId: c.levelId, levelName: c.level.name, trackId: c.trackId,
+      full: !!c.capacity && c._count.enrollments >= c.capacity,
+    }));
+    const levels = new Map((await tx.level.findMany({ select: { id: true, name: true, nextLevelId: true } })).map((l) => [l.id, l]));
+    const year = await tx.academicYear.findUniqueOrThrow({ where: { id: yearId }, select: { label: true } });
+    return { classes, levels, year: year.label };
+  }
+
+  private propose(
+    ctx: Awaited<ReturnType<StudentsService['proposalContext']>>,
+    outcome: AnnualOutcome | null,
+    from: { name: string; siteId: string; trackId: string | null; levelId: string } | null,
+    returningClassId?: string,
+  ): Proposal {
+    const level = from ? ctx.levels.get(from.levelId) : undefined;
+    const next = level?.nextLevelId ? ctx.levels.get(level.nextLevelId) : undefined;
+    return proposeClass({
+      outcome, returningClassId, classes: ctx.classes, year: ctx.year,
+      from: from && level
+        ? { className: from.name, siteId: from.siteId, trackId: from.trackId, levelId: from.levelId, levelName: level.name, nextLevelId: next?.id ?? null, nextLevelName: next?.name ?? null }
+        : null,
+    });
+  }
+
+  /**
+   * Classe proposée pour un élève : retour dans sa classe de l'année s'il en est parti ; sinon d'après sa dernière
+   * année d'avant (classe et décision de fin d'année). Une inscription de l'année annulée (erreur, doublon) n'est pas
+   * une base : la proposition suit l'année d'avant.
+   */
+  private async proposalForStudent(tx: Tx, ctx: Awaited<ReturnType<StudentsService['proposalContext']>>, studentId: string, yearId: string, yearStart: Date) {
+    const thisYear = await tx.enrollment.findUnique({ where: { studentId_academicYearId: { studentId, academicYearId: yearId } }, select: { status: true, classId: true } });
+    if (thisYear && (thisYear.status === 'TRANSFERRED' || thisYear.status === 'WITHDRAWN')) return this.propose(ctx, null, null, thisYear.classId);
+    const last = await tx.enrollment.findFirst({
+      where: { studentId, academicYear: { startDate: { lt: yearStart } } },
+      orderBy: { academicYear: { startDate: 'desc' } },
+      select: { academicYearId: true, class: { select: { name: true, siteId: true, trackId: true, levelId: true } } },
+    });
+    if (!last) return this.propose(ctx, null, null);
+    const decision = await tx.annualDecision.findUnique({ where: { studentId_academicYearId: { studentId, academicYearId: last.academicYearId } }, select: { outcome: true } });
+    return this.propose(ctx, decision?.outcome ?? null, last.class);
   }
 
   /**

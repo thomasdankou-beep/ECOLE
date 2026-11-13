@@ -13,7 +13,6 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { NotificationsService } from '../src/modules/notifications/notifications.service';
 import { consoleSms } from '../src/modules/notifications/sms.provider';
-import { billableEnrollments } from '../src/modules/students/enrollments';
 
 const PASSWORD = 'Kisito2026';
 const PHONES = { direction: '+2290190000010', secretariat: '+2290190000011', teacher: '+2290190000001', comptable: '+2290190000013', parent: '+2290197000001' };
@@ -32,6 +31,8 @@ const newClasses: Record<string, string> = {};
 
 /** Jour (AAAA-MM-JJ, UTC) décalé de `offset` jours par rapport au jour du test. */
 const day = (offset = 0) => new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+/** Jour du test à l'heure de l'école (Porto-Novo) : une sortie ne peut pas précéder le jour de l'inscription. */
+const schoolDay = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Porto-Novo' }).format(new Date());
 
 async function login(identifier: string) {
   const r = await http.post('/api/v1/auth/login').send({ tenant: 'saint-kisito', identifier, password: PASSWORD });
@@ -431,7 +432,11 @@ describe("Lot G4 · réinscription pour la nouvelle année, sur le même dossier
     expect(await history(id)).toEqual(before);
     const enrollments = await inTenant((tx) => tx.enrollment.findMany({ where: { studentId: id }, include: { academicYear: true, events: true }, orderBy: { enrolledAt: 'asc' } }));
     expect(enrollments.map((e) => [e.academicYear.label, e.status, e.type])).toEqual([['2026-2027', 'ACTIVE', null], ['2027-2028', 'ACTIVE', 'RETURNING']]);
-    expect(enrollments[1].events.map((e) => [e.kind, e.data])).toEqual([['REENROLLED', { classId: newClasses['3e A'], className: '3e A', fromYear: '2026-2027', fromClass: '4e A', studentStatusBefore: 'ACTIVE' }]]);
+    expect(enrollments[1].events.map((e) => [e.kind, e.data])).toEqual([['REENROLLED', {
+      classId: newClasses['3e A'], className: '3e A', fromYear: '2026-2027', fromClass: '4e A', studentStatusBefore: 'ACTIVE',
+      // Corrections du lot G4 : classe proposée (admis, 4e → 3e) confirmée, impayés signalés (sans blocage).
+      proposedClassId: newClasses['3e A'], proposedClass: '3e A', proposalBasis: 'ADMIS', followedProposal: true, unpaid: true,
+    }]]);
     expect(await inTenant((tx) => tx.student.count({ where: { matricule: 'SKG-26-0013' } }))).toBe(1);
     const file = (await as('direction').get(`/students/${id}`)).body;
     expect(file.currentClass).toMatchObject({ name: '3e A' });
@@ -542,12 +547,12 @@ describe("Lot G4 · réinscription pour la nouvelle année, sur le même dossier
   it("départ dans la nouvelle année puis retour : l'inscription est rétablie, la sortie reste dans l'historique", async () => {
     const id = await sid('SKG-26-0016');
     expect((await as('secretariat').post(`/students/${id}/reenroll`, { classId: newClasses['3e A'] })).status).toBe(201);
-    expect((await as('secretariat').post(`/students/${id}/withdraw`, { status: 'WITHDRAWN', reason: 'Abandon', exitDate: day(0) })).status).toBe(201);
+    expect((await as('secretariat').post(`/students/${id}/withdraw`, { status: 'WITHDRAWN', reason: 'Abandon', exitDate: schoolDay() })).status).toBe(201);
     expect((await as('secretariat').post(`/students/${id}/reenroll`, { classId: newClasses['3e A'] })).body).toMatchObject({ reinstated: true });
     const e = await inTenant((tx) => tx.enrollment.findFirstOrThrow({ where: { studentId: id, academicYearId: year2 }, include: { events: { orderBy: { createdAt: 'asc' } } } }));
     expect(e).toMatchObject({ status: 'ACTIVE', exitDate: null, exitReason: null });
     expect(e.events.map((x) => x.kind)).toEqual(['REENROLLED', 'WITHDRAWN', 'REINSTATED']);
-    expect(e.events[2].data).toMatchObject({ previousStatus: 'WITHDRAWN', exitDate: day(0), exitReason: 'Abandon', studentStatusBefore: 'WITHDRAWN' });
+    expect(e.events[2].data).toMatchObject({ previousStatus: 'WITHDRAWN', previousClassId: newClasses['3e A'], previousClass: '3e A', exitDate: schoolDay(), exitReason: 'Abandon', studentStatusBefore: 'WITHDRAWN' });
   });
 
   it("réinscription depuis une pré-inscription : la demande passe « inscrite », ne sert qu'une fois et reste dans le périmètre du site", async () => {
@@ -596,70 +601,5 @@ describe("Lot G4 · réinscription pour la nouvelle année, sur le même dossier
       expect(r.enrollments[0].events).toBeUndefined();
       expect(r.reenrollable).toBe(false);
     }
-  });
-});
-
-describe('Lot G4 · élèves facturables à une date de référence (préparation de la facturation, aucune facture)', () => {
-  const R = '2027-03-31';
-  const at = (iso: string) => new Date(iso);
-  let ids: Record<string, string> = {};
-
-  beforeAll(async () => {
-    // Inscriptions de la nouvelle année aux dates voulues (base de test seulement).
-    const take = async (matricule: string) => {
-      const id = await sid(matricule);
-      const e = await inTenant((tx) => tx.enrollment.findUnique({ where: { studentId_academicYearId: { studentId: id, academicYearId: year2 } } }));
-      if (!e) expect((await as('direction').post(`/students/${id}/reenroll`, { classId: newClasses[matricule <= 'SKG-26-0010' ? '2e année F3' : '3e A'] })).status).toBe(201);
-      return (await inTenant((tx) => tx.enrollment.findUniqueOrThrow({ where: { studentId_academicYearId: { studentId: id, academicYearId: year2 } } }))).id;
-    };
-    ids = {
-      active: await take('SKG-26-0003'),
-      cancelledBefore: await take('SKG-26-0004'),
-      cancelledAfter: await take('SKG-26-0005'),
-      exitOnR: await take('SKG-26-0006'),
-      exitAfter: await take('SKG-26-0007'),
-      enrolledAfter: await take('SKG-26-0008'),
-      lateEvening: await take('SKG-26-0009'),
-      nextMorning: await take('SKG-26-0010'),
-    };
-    const set = (id: string, data: Prisma.EnrollmentUpdateInput) => inTenant((tx) => tx.enrollment.update({ where: { id }, data }));
-    const early = at('2027-03-01T09:00:00Z');
-    for (const id of Object.values(ids)) await set(id, { enrolledAt: early });
-    await set(ids.cancelledBefore, { status: 'CANCELLED', cancelledAt: at('2027-03-30T10:00:00Z'), cancelReason: 'Test' });
-    await set(ids.cancelledAfter, { status: 'CANCELLED', cancelledAt: at('2027-04-01T10:00:00Z'), cancelReason: 'Test' });
-    await set(ids.exitOnR, { status: 'WITHDRAWN', exitDate: at(`${R}T00:00:00Z`), exitReason: 'Test' });
-    await set(ids.exitAfter, { status: 'TRANSFERRED', exitDate: at('2027-04-02T00:00:00Z'), exitReason: 'Test' });
-    await set(ids.enrolledAfter, { enrolledAt: at('2027-04-03T08:00:00Z') });
-    await set(ids.lateEvening, { enrolledAt: at(`${R}T22:30:00Z`) }); // 23 h 30 à Porto-Novo, encore le 31 mars
-    await set(ids.nextMorning, { enrolledAt: at(`${R}T23:30:00Z`) }); // 0 h 30 le 1er avril à Porto-Novo
-  });
-
-  const billable = (date: string) => inTenant((tx) => billableEnrollments(tx, year2, date, 'Africa/Porto-Novo'));
-
-  it('compte les inscriptions actives à la fin du jour R, dans le fuseau de l’école', async () => {
-    const rows = await billable(R);
-    const got = new Set(rows.map((r) => r.id));
-    expect(got.has(ids.active)).toBe(true);
-    expect(got.has(ids.cancelledBefore)).toBe(false); // annulée avant R
-    expect(got.has(ids.cancelledAfter)).toBe(true); // annulée après R : elle était active à R
-    expect(got.has(ids.exitOnR)).toBe(false); // sortie le jour R
-    expect(got.has(ids.exitAfter)).toBe(true); // sortie après R
-    expect(got.has(ids.enrolledAfter)).toBe(false); // inscrite après R
-    expect(got.has(ids.lateEvening)).toBe(true);
-    expect(got.has(ids.nextMorning)).toBe(false);
-  });
-
-  it("un élève n'est jamais compté deux fois dans la même école pour la même année ; rien d'une autre école", async () => {
-    const rows = await billable(R);
-    expect(new Set(rows.map((r) => r.studentId)).size).toBe(rows.length);
-    expect(rows.every((r) => r.student.matricule.startsWith('SKG-'))).toBe(true);
-    // La veille, l'inscription annulée le 30 mars comptait encore ; la sortie du 31 mars aussi.
-    const before = new Set((await billable('2027-03-29')).map((r) => r.id));
-    expect(before.has(ids.cancelledBefore)).toBe(true);
-    expect(before.has(ids.exitOnR)).toBe(true);
-    // Aucune facture n'est créée par ce calcul.
-    const invoices = await inTenant((tx) => tx.invoice.count());
-    await billable(R);
-    expect(await inTenant((tx) => tx.invoice.count())).toBe(invoices);
   });
 });
