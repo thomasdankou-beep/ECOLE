@@ -9,13 +9,13 @@ import { ScopeService } from './common/scope.service';
 import { HealthController } from './health.controller';
 import { AdmissionsController, AdmissionsService } from './modules/admissions/admissions';
 import { AttendanceController } from './modules/attendance/attendance.controller';
-import { BillingController, BillingService } from './modules/billing/billing';
-import { BillingJobsController, BillingJobsService } from './modules/billing/billing-jobs';
-import { SchoolSubscriptionController, SchoolSubscriptionService } from './modules/billing/subscription-school';
 import { AttendanceService } from './modules/attendance/attendance.service';
 import { AuthController } from './modules/auth/auth.controller';
 import { AuthService } from './modules/auth/auth.service';
 import { RecoveryController, RecoveryService } from './modules/auth/recovery';
+import { BillingController, BillingService } from './modules/billing/billing';
+import { BillingJobsController, BillingJobsService } from './modules/billing/billing-jobs';
+import { SchoolSubscriptionController, SchoolSubscriptionService } from './modules/billing/subscription-school';
 import { CommunicationController, CommunicationService, PublicService } from './modules/communication/communication';
 import { DashboardController, DashboardService } from './modules/dashboard/dashboard';
 import { DocumentsController, DocumentsService } from './modules/documents/documents';
@@ -64,19 +64,21 @@ class CoreModule {}
     ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 300 }], skipIf: () => process.env.NODE_ENV === 'test' }),
   ],
   controllers: [
+    // Facturation de Cahiora (lot G5a).
+    BillingController, BillingJobsController, SchoolSubscriptionController,
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
     InternshipsController, PlatformController, PlatformGroupsController, HonorsController,
-    BillingController, BillingJobsController, SchoolSubscriptionController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
+    // Facturation de Cahiora (lot G5a).
+    BillingService, BillingJobsService, SchoolSubscriptionService,
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,
-    BillingService, BillingJobsService, SchoolSubscriptionService,
   ],
 })
 export class AppModule {}

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { Network, Pencil, ScrollText, Trash2 } from 'lucide-react';
 import { Button, Card, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
-import { BILLING_ACTIONS } from './facturation';
+import { BILLING_ACTIONS } from '@/lib/billing';
 
 /**
  * Groupes scolaires du Super Admin (lot G1, D-G1) : chaque école appartient à un groupe, le compte client ;
@@ -43,7 +43,6 @@ const GROUP_ACTIONS: Record<string, string> = {
   'group.school_joined': 'École rattachée au groupe',
   'group.school_left': 'École retirée du groupe',
   'group.deleted': 'Groupe supprimé',
-  ...BILLING_ACTIONS,
 };
 const FIELD_LABELS: Record<string, string> = {
   name: 'nom', legalName: 'raison sociale', promoter: 'promoteur', phone: 'téléphone', email: 'e-mail', address: 'adresse', country: 'pays', taxId: 'identifiant fiscal',
@@ -267,7 +266,7 @@ function GroupLogDialog({ g }: { g: Group }) {
         <ul className="grid gap-2">
           {rows.map((r) => (
             <li key={r.id} className="rounded-lg border border-line p-2.5 text-sm">
-              <div className="flex flex-wrap justify-between gap-2"><b>{GROUP_ACTIONS[r.action] ?? r.action}</b><span className="text-muted">{when(r.createdAt)}</span></div>
+              <div className="flex flex-wrap justify-between gap-2"><b>{GROUP_ACTIONS[r.action] ?? BILLING_ACTIONS[r.action] ?? r.action}</b><span className="text-muted">{when(r.createdAt)}</span></div>
               {groupLogDetail(r) && <p>{groupLogDetail(r)}</p>}
               <p className="text-xs text-muted">{r.actorName ?? '—'}</p>
             </li>

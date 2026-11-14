@@ -6,8 +6,9 @@ import { KeyRound, LifeBuoy, LogOut, Network, Pencil, Plus, ShieldCheck } from '
 import { RecoveryCodesPanel } from '@/components/recovery-codes';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, PageHeader, Select, Table, Textarea, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
+import { BILLING_ACTIONS } from '@/lib/billing';
 import { pf } from '@/lib/platform';
-import { BILLING_ACTIONS, Facturation } from './facturation';
+import { Facturation } from './facturation';
 import { GroupDialog, Groups, MoveDialog, PLATFORM_GROUP_ACTIONS, platformGroupDetail, type Group, type GroupRef } from './groupes';
 
 type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; mustSetupTwoFactor?: boolean; platformDomain: string | null };
