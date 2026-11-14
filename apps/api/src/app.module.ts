@@ -16,6 +16,7 @@ import { RecoveryController, RecoveryService } from './modules/auth/recovery';
 import { BillingController, BillingService } from './modules/billing/billing';
 import { BillingJobsController, BillingJobsService } from './modules/billing/billing-jobs';
 import { SchoolSubscriptionController, SchoolSubscriptionService } from './modules/billing/subscription-school';
+import { ServicesController, ServicesService } from './modules/billing/services';
 import { CommunicationController, CommunicationService, PublicService } from './modules/communication/communication';
 import { DashboardController, DashboardService } from './modules/dashboard/dashboard';
 import { DocumentsController, DocumentsService } from './modules/documents/documents';
@@ -64,8 +65,8 @@ class CoreModule {}
     ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 300 }], skipIf: () => process.env.NODE_ENV === 'test' }),
   ],
   controllers: [
-    // Facturation de Cahiora (lot G5a).
-    BillingController, BillingJobsController, SchoolSubscriptionController,
+    // Facturation de Cahiora (lots G5a et G5g).
+    BillingController, BillingJobsController, SchoolSubscriptionController, ServicesController,
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
@@ -74,8 +75,8 @@ class CoreModule {}
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
-    // Facturation de Cahiora (lot G5a).
-    BillingService, BillingJobsService, SchoolSubscriptionService,
+    // Facturation de Cahiora (lots G5a et G5g).
+    BillingService, BillingJobsService, SchoolSubscriptionService, ServicesService,
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,

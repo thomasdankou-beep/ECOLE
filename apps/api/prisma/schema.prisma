@@ -45,6 +45,8 @@ model Tenant {
   /// Facturation de Cahiora (lot G5a) : zone de la plateforme, jamais lue par le rôle des écoles.
   subscription     Subscription?
   billingCalendars BillingCalendar[]
+  /// Prestations complémentaires (lot G5g) : tarifs particuliers, remises et gratuités propres à l'établissement.
+  serviceRates     ServiceRate[]
 
   @@index([groupId])
   @@map("tenants")
@@ -324,6 +326,105 @@ model PlatformAlert {
 
   @@index([createdAt])
   @@map("platform_alerts")
+}
+
+// Prestations complémentaires de Cahiora (lot G5g, cahier des charges G5 §7 et §15) : zone de la plateforme, sans
+// aucun droit pour les écoles, les groupes ni les statistiques. Tout est en ajout seul (forbid_change).
+
+/// Prestation du catalogue (formation, paramétrage…). Jamais rattachée d'office à un établissement : elle n'entre
+/// dans un devis ou une facture que si quelqu'un l'y ajoute (lot G5c). Son nom, sa description, son mode de prix et
+/// son activation sont des versions datées ; ses prix, remises, tarifs particuliers et gratuités, des règles datées.
+model Service {
+  id            String           @id @default(uuid()) @db.Uuid
+  /// Code stable tiré du premier nom (FORMATION_ET_PRISE_EN_MAIN), pour les documents et les journaux.
+  code          String           @unique
+  createdById   String?          @db.Uuid
+  createdByName String
+  createdAt     DateTime         @default(now())
+  versions      ServiceVersion[]
+  rates         ServiceRate[]
+
+  @@map("services")
+}
+
+enum ServicePricing {
+  FIXED
+  FREE
+  QUOTE
+}
+
+/// Version d'une prestation, avec sa date d'effet (jamais passée). La version en vigueur un jour donné est celle de
+/// date d'effet la plus récente jusqu'à ce jour ; à date égale, la dernière inscrite.
+model ServiceVersion {
+  id            String         @id @default(uuid()) @db.Uuid
+  serviceId     String         @db.Uuid
+  service       Service        @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  version       Int
+  name          String
+  /// Contenu de la prestation ; vide tant que Cahiora ne l'a pas rédigé (INFORMATION MANQUANTE).
+  description   String?
+  pricing       ServicePricing
+  /// Désactivée : plus proposée dans un nouveau devis ou une nouvelle facture à partir de sa date d'effet.
+  active        Boolean
+  effectiveFrom DateTime       @db.Date
+  reason        String
+  createdById   String?        @db.Uuid
+  createdByName String
+  createdAt     DateTime       @default(now())
+
+  @@unique([serviceId, version])
+  @@map("service_versions")
+}
+
+enum ServiceRateKind {
+  PRICE
+  SPECIAL_PRICE
+  DISCOUNT_PERCENT
+  DISCOUNT_AMOUNT
+  FREE
+}
+
+/// Règle de prix datée : prix du catalogue (tous les établissements, sans fin), tarif particulier d'un établissement,
+/// remise (pourcentage ou montant) ou gratuité, pour un établissement ou pour tous. Une seule règle s'applique à la
+/// fois, jamais de cumul (services-rules.ts).
+model ServiceRate {
+  id            String          @id @default(uuid()) @db.Uuid
+  serviceId     String          @db.Uuid
+  service       Service         @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  /// Établissement visé ; vide : tous les établissements.
+  tenantId      String?         @map("tenant_id") @db.Uuid
+  tenant        Tenant?         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  kind          ServiceRateKind
+  /// Monnaie d'un montant ; vide pour un pourcentage ou une gratuité.
+  currency      String?
+  /// Montant dans la monnaie, ou pourcentage en centièmes (1500 = 15 %) ; vide pour une gratuité.
+  value         Int?
+  effectiveFrom DateTime        @db.Date
+  /// Dernier jour prévu à la création ; vide : sans fin. Un arrêt plus tôt est une ligne de service_rate_ends.
+  effectiveTo   DateTime?       @db.Date
+  reason        String
+  createdById   String?         @db.Uuid
+  createdByName String
+  createdAt     DateTime        @default(now())
+  stop          ServiceRateEnd?
+
+  @@index([serviceId, effectiveFrom])
+  @@index([tenantId])
+  @@map("service_rates")
+}
+
+/// Arrêt d'une règle avant son dernier jour prévu (ou annulation avant son début), une seule fois, avec un motif.
+model ServiceRateEnd {
+  id            String      @id @default(uuid()) @db.Uuid
+  rateId        String      @unique @db.Uuid
+  rate          ServiceRate @relation(fields: [rateId], references: [id], onDelete: Restrict)
+  lastDay       DateTime    @db.Date
+  reason        String
+  createdById   String?     @db.Uuid
+  createdByName String
+  createdAt     DateTime    @default(now())
+
+  @@map("service_rate_ends")
 }
 
 model Site {

@@ -4,10 +4,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Bell, CalendarDays, History, Play, Plus } from 'lucide-react';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
+import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { Prestations } from './prestations';
 
 /**
  * Commercial et facturation (lot G5a) : vue d'ensemble, abonnements, établissements clients et leurs calendriers,
- * paramètres tarifaires datés et conditions commerciales. Les autres rubriques arrivent avec les lots G5b à G5h.
+ * paramètres tarifaires datés et conditions commerciales ; prestations complémentaires (lot G5g, ./prestations.tsx).
+ * Les autres rubriques arrivent avec les lots G5b à G5h.
  * Chaque opération financière demande un code actuel de l'application d'authentification.
  */
 
@@ -47,17 +50,13 @@ const LATER: Partial<Record<Section, [string, string]>> = {
   documents: ['G5c', 'Proformas, documents de régularisation et avoirs, toujours provisoires tant que les informations fiscales manquent (G5f pour les factures fiscales).'],
   paiements: ['G5d', 'Saisie et vérification des paiements, statuts, reçus provisoires.'],
   avoirs: ['G5d', 'Trop-perçus en crédits, utilisation, demandes de remboursement.'],
-  prestations: ['G5g', 'Catalogue des prestations (formation, paramétrage, intervention sur devis), prix datés, remises et gratuités.'],
   parrainage: ['G5h', 'Codes de parrainage, écoles filleules et crédits de 5 000 FCFA après le premier paiement confirmé.'],
   partenaires: ['G5h', 'Apporteurs d’affaires et partenaires premium, commissions et versements.'],
   sms: ['G5e', 'Crédits SMS prépayés par établissement (prix et forfaits : INFORMATION MANQUANTE).'],
   rapports: ['G5c et G5d', 'Facturé, encaissé et impayés par période, établissement, groupe et état.'],
 };
 
-/** Libellés des journaux (plateforme et groupe) pour la facturation. */
 const UNIT_SUFFIX = { days: 'jours', months: 'mois' } as const;
-export const frDate = (d: string | null | undefined) => (d ? new Date(`${d.slice(0, 10)}T00:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : '—');
-const money = (n: number, currency: string | null) => `${new Intl.NumberFormat('fr-FR').format(n).replace(/[  ]/g, ' ')} ${!currency || currency === 'XOF' || currency === 'XAF' ? 'FCFA' : currency}`;
 function paramValue(unit: Param['unit'], value: number | null, currency: string | null) {
   if (value === null) return 'INFORMATION MANQUANTE';
   if (unit === 'money') return money(value, currency);
@@ -82,36 +81,6 @@ function pilotEndPreview(start: string, months: number) {
   return new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), d) - 86_400_000).toISOString().slice(0, 10);
 }
 
-/** Code à 6 chiffres de l'application d'authentification, demandé pour chaque opération financière. */
-function CodeField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  return (
-    <Field label="Code de votre application d’authentification" hint="Exigé pour chaque opération de facturation.">
-      <Input inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={value} onChange={(e) => onChange(e.target.value.replace(/\D/g, ''))} required className="max-w-40 text-center font-mono tracking-[0.3em]" />
-    </Field>
-  );
-}
-
-/** Formulaire d'une opération : envoi, erreur affichée, fermeture et rechargement en cas de succès. */
-function useSubmit(done: () => void, success: string) {
-  const toast = useToast();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const submit = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      toast(success);
-      done();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return { busy, error, submit };
-}
-
 export function Facturation() {
   const [section, setSection] = useState<Section>('ensemble');
   const later = LATER[section];
@@ -126,7 +95,8 @@ export function Facturation() {
       {section === 'ensemble' && <Ensemble />}
       {section === 'abonnements' && <Abonnements />}
       {section === 'etablissements' && <Etablissements />}
-      {section === 'parametres' && <Parametres />}
+      {section === 'prestations' && <Prestations />}
+      {section === 'parametres' && <Parametres open={setSection} />}
       {later && <Empty title={`Prévu au lot ${later[0]}`}>{later[1]}</Empty>}
     </div>
   );
@@ -488,7 +458,7 @@ function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
 
 // ---------------------------------------------------------------- Paramètres tarifaires et conditions commerciales
 
-function Parametres() {
+function Parametres({ open }: { open: (s: Section) => void }) {
   const [p, setP] = useState<Params | null>(null);
   const [terms, setTerms] = useState<{ today: string; current: Terms | null; versions: Terms[] } | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -524,7 +494,12 @@ function Parametres() {
             ))}
           </tbody>
         </Table>
-        <p className="px-4 pb-4 text-xs text-muted">Prix des prestations : lot G5g. Prix des SMS : lot G5e (INFORMATION MANQUANTE). Dates de régularisation : calendrier de chaque établissement.</p>
+        <p className="px-4 pb-4 text-xs text-muted">Prix des SMS : lot G5e (INFORMATION MANQUANTE). Dates de régularisation : calendrier de chaque établissement.</p>
+      </Card>
+      <Card className="grid gap-2">
+        <h3 className="font-bold">Tarification et prestations</h3>
+        <p className="text-sm text-muted">Les prix des prestations complémentaires (formation, paramétrage, intervention sur site), leurs remises, tarifs particuliers et gratuités se règlent dans la rubrique « Prestations complémentaires ».</p>
+        <Button variant="outline" className="justify-self-start" onClick={() => open('prestations')}>Ouvrir les prestations complémentaires</Button>
       </Card>
       <Card className="grid gap-2">
         <h3 className="font-bold">Historique des valeurs</h3>

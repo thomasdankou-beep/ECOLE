@@ -1,4 +1,4 @@
-/** Libellés des actions de la facturation (lot G5a) dans les journaux de la plateforme et des groupes. */
+/** Libellés des actions de la facturation (lots G5a et G5g) dans les journaux de la plateforme et des groupes. */
 export const BILLING_ACTIONS: Record<string, string> = {
   'billing.trial_opened': 'Facturation : essai gratuit ouvert',
   'billing.pilot_opened': 'Facturation : école pilote partenaire activée',
@@ -12,4 +12,10 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.parameter_added': 'Facturation : nouvelle valeur d’un paramètre tarifaire',
   'billing.parameters.initial': 'Facturation : paramètres tarifaires initiaux (mise à jour de Cahiora)',
   'billing.2fa_failed': 'Facturation : code de double authentification incorrect',
+  'billing.services.initial': 'Prestations : catalogue initial (mise à jour de Cahiora)',
+  'billing.service_created': 'Prestations : nouvelle prestation',
+  'billing.service_version': 'Prestations : nouvelle version d’une prestation',
+  'billing.service_rule_added': 'Prestations : nouveau prix, remise, tarif particulier ou gratuité',
+  'billing.service_rule_ended': 'Prestations : règle de prix arrêtée',
+  'billing.service_rule_cancelled': 'Prestations : règle de prix annulée avant son début',
 };

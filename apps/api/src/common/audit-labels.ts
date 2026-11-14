@@ -160,6 +160,10 @@ export const AUDIT_LABELS: Record<string, string> = {
   'billing.pilot_ended': 'Cahiora : période pilote terminée, conditions à accepter',
   'billing.calendar_saved': 'Cahiora : calendrier de facturation enregistré',
   'billing.terms_accepted': 'Conditions commerciales de Cahiora acceptées',
+  // Prestations complémentaires de Cahiora pour l'établissement (lot G5g).
+  'billing.service_rule_added': 'Cahiora : prix d’une prestation pour l’établissement (tarif particulier, remise ou gratuité)',
+  'billing.service_rule_ended': 'Cahiora : règle de prix d’une prestation arrêtée',
+  'billing.service_rule_cancelled': 'Cahiora : règle de prix d’une prestation annulée avant son début',
 };
 
 export const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action;
