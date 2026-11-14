@@ -41,7 +41,10 @@ test.afterAll(async () => {
 });
 
 async function shot(page: Page, name: string) {
-  if (SHOTS) await page.screenshot({ path: `${SHOTS}/${test.info().project.name}-${name}.png`, fullPage: true });
+  if (!SHOTS) return;
+  // Les messages de confirmation s'effacent après quelques secondes : la capture les attend, pour ne rien masquer.
+  await expect(page.locator('div.fixed[aria-live="polite"] > *')).toHaveCount(0, { timeout: 8000 });
+  await page.screenshot({ path: `${SHOTS}/${test.info().project.name}-${name}.png`, fullPage: true });
 }
 
 /** Aucun défilement horizontal de la page (téléphone Android d'abord). */
