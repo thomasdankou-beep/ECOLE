@@ -7,6 +7,7 @@ import { RecoveryCodesPanel } from '@/components/recovery-codes';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, PageHeader, Select, Table, Textarea, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 import { pf } from '@/lib/platform';
+import { BILLING_ACTIONS, Facturation } from './facturation';
 import { GroupDialog, Groups, MoveDialog, PLATFORM_GROUP_ACTIONS, platformGroupDetail, type Group, type GroupRef } from './groupes';
 
 type Admin = { id: string; name: string; email: string; mustChangePassword: boolean; totpEnabled: boolean; mustSetupTwoFactor?: boolean; platformDomain: string | null };
@@ -30,6 +31,7 @@ const ACTIONS: Record<string, string> = {
   'platform.auth.2fa_enabled': 'Double authentification activée', 'platform.auth.2fa_reset': 'Double authentification reconfigurée',
   'platform.auth.refused': 'Connexion refusée (compte bloqué ou désactivé)', 'platform.auth.unknown_identifier': 'Connexion avec un e-mail inconnu',
   ...PLATFORM_GROUP_ACTIONS,
+  ...BILLING_ACTIONS,
 };
 type Country = { code: string; name: string; dial: string; currency: string; timezone: string; einvoice: string | null };
 type Locale = { country: string; currency: string; timezone: string };
@@ -175,7 +177,7 @@ function ChangePassword({ done }: { done: () => void }) {
 
 function Schools({ admin }: { admin: Admin }) {
   const toast = useToast();
-  const [tab, setTab] = useState<'ecoles' | 'groupes' | 'recuperation' | 'journal'>('ecoles');
+  const [tab, setTab] = useState<'ecoles' | 'groupes' | 'facturation' | 'recuperation' | 'journal'>('ecoles');
   const [tenants, setTenants] = useState<Tenant[] | null>(null);
   const [groups, setGroups] = useState<Group[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
@@ -221,11 +223,13 @@ function Schools({ admin }: { admin: Admin }) {
     <>
       {tab === 'groupes' ? (
         <PageHeader title="Groupes scolaires" subtitle="Le compte client : une ou plusieurs écoles, une seule facture plus tard." actions={<Button onClick={() => setNewGroup(true)}><Plus className="size-4" /> Nouveau groupe</Button>} />
+      ) : tab === 'facturation' ? (
+        <PageHeader title="Commercial et facturation" subtitle="Abonnements, gratuités, calendriers et tarifs de Cahiora. Aucune facture réelle tant que les informations fiscales et légales ne sont pas confirmées." />
       ) : (
         <PageHeader title="Écoles clientes" subtitle="Chaque école a sa propre adresse, ses données séparées et son compte Direction." actions={<Button onClick={() => setCreating(true)}><Plus className="size-4" /> Nouvelle école</Button>} />
       )}
       {secret && <SecretCard s={secret} close={() => setSecret(null)} />}
-      <Chips label="Rubrique" value={tab} onChange={setTab} options={[{ value: 'ecoles', label: 'Écoles' }, { value: 'groupes', label: 'Groupes' }, { value: 'recuperation', label: 'Récupération des comptes' }, { value: 'journal', label: 'Journal' }]} />
+      <Chips label="Rubrique" value={tab} onChange={setTab} options={[{ value: 'ecoles', label: 'Écoles' }, { value: 'groupes', label: 'Groupes' }, { value: 'facturation', label: 'Commercial et facturation' }, { value: 'recuperation', label: 'Récupération des comptes' }, { value: 'journal', label: 'Journal' }]} />
       <ErrorNote error={error} />
       {tab === 'ecoles' && tenants && (tenants.length === 0 ? <Empty title="Aucune école">Créez la première école cliente.</Empty> : (
         <Card className="overflow-x-auto p-0">
@@ -258,6 +262,7 @@ function Schools({ admin }: { admin: Admin }) {
         </Card>
       ))}
       {tab === 'groupes' && <Groups groups={groups} countries={countries} reload={load} />}
+      {tab === 'facturation' && <Facturation />}
       {tab === 'recuperation' && tenants && <Recoveries tenants={tenants} reload={load} />}
       {tab === 'journal' && (
         <Card className="overflow-x-auto p-0">

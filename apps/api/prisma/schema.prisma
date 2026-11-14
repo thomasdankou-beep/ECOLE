@@ -42,6 +42,10 @@ model Tenant {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
+  /// Facturation de Cahiora (lot G5a) : zone de la plateforme, jamais lue par le rôle des écoles.
+  subscription     Subscription?
+  billingCalendars BillingCalendar[]
+
   @@index([groupId])
   @@map("tenants")
 }
@@ -159,6 +163,167 @@ model PlatformAuditLog {
 
   @@index([createdAt])
   @@map("platform_audit_logs")
+}
+
+// ---------------------------------------------------------------- Facturation de Cahiora (lot G5)
+// Zone de la plateforme : le rôle des écoles (erp_app) n'a aucun droit sur ces tables. La direction lit son
+// abonnement et accepte les conditions par des fonctions limitées à son école (migration facturation_g5a).
+// Montants en entiers dans la monnaie de l'établissement ; dates de calendrier sans heure.
+
+/// Paramètre tarifaire daté (cahier des charges G5, §2 et §15). Un changement ajoute une version avec sa date
+/// d'effet, jamais une modification : la table est en ajout seul (forbid_change). La valeur en vigueur un jour donné
+/// est la version de date d'effet la plus récente jusqu'à ce jour (à date égale, la dernière enregistrée).
+model BillingParameter {
+  id            String   @id @default(uuid()) @db.Uuid
+  key           String
+  /// Monnaie d'un montant (XOF…) ; vide pour une durée ou un pourcentage.
+  currency      String?
+  /// Montant dans la monnaie, nombre de jours ou de mois, ou pourcentage en centièmes (1500 = 15 %).
+  value         Int
+  effectiveFrom DateTime @db.Date
+  reason        String
+  createdById   String?  @db.Uuid
+  createdByName String
+  createdAt     DateTime @default(now())
+
+  @@index([key, currency, effectiveFrom])
+  @@map("billing_parameters")
+}
+
+/// Calendrier de facturation d'un établissement pour une année scolaire (§3) : début, fin, préparation, comptage
+/// initial, régularisations et renouvellement. Chaque modification ajoute une version (en ajout seul) ; une date
+/// passée ne change jamais.
+model BillingCalendar {
+  id                      String    @id @default(uuid()) @db.Uuid
+  tenantId                String    @map("tenant_id") @db.Uuid
+  tenant                  Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  yearLabel               String
+  version                 Int
+  startDate               DateTime  @db.Date
+  endDate                 DateTime  @db.Date
+  preparationFrom         DateTime? @db.Date
+  initialCountDate        DateTime  @db.Date
+  firstRegularizationDate DateTime  @db.Date
+  finalRegularizationDate DateTime  @db.Date
+  renewalDate             DateTime? @db.Date
+  /// Formule qui a proposé les dates : B ou A (D-G5-28 en attente, provisoire) ; MANUEL si saisies à la main.
+  formula                 String
+  reason                  String
+  createdById             String?   @db.Uuid
+  createdByName           String
+  createdAt               DateTime  @default(now())
+
+  @@unique([tenantId, yearLabel, version])
+  @@map("billing_calendars")
+}
+
+enum SubscriptionStatus {
+  /// Essai gratuit (14 jours par défaut, paramètre daté).
+  TRIAL
+  /// École pilote partenaire CAHIORA : gratuité de quelques mois à partir de l'activation effective (§13).
+  PILOT
+  /// Essai ou pilote terminé : l'établissement doit accepter les conditions commerciales.
+  AWAITING_ACCEPTANCE
+  /// Conditions acceptées : demande de paiement, en attente du paiement vérifié (lots G5c et G5d).
+  AWAITING_PAYMENT
+  /// Abonnement payé et activé (lot G5d).
+  ACTIVE
+  /// Accès limité, sans suppression de données : restrictions appliquées après la décision D-G5-30.
+  LIMITED
+}
+
+/// Abonnement d'un établissement à Cahiora (§4 et §13) : un seul par établissement, jamais supprimé. L'état change
+/// par des transitions contrôlées, chacune inscrite dans subscription_events (en ajout seul).
+model Subscription {
+  id              String              @id @default(uuid()) @db.Uuid
+  tenantId        String              @unique @map("tenant_id") @db.Uuid
+  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  status          SubscriptionStatus
+  statusSince     DateTime            @default(now())
+  trialStart      DateTime?           @db.Date
+  trialEnd        DateTime?           @db.Date
+  trialDays       Int?
+  pilotStart      DateTime?           @db.Date
+  pilotEnd        DateTime?           @db.Date
+  pilotMonths     Int?
+  /// Conditions commerciales acceptées par la direction : version, date et auteur.
+  acceptedTermsId String?             @db.Uuid
+  acceptedAt      DateTime?
+  acceptedByName  String?
+  /// Tarif en vigueur le jour de l'acceptation, figé : un changement de tarif ultérieur ne le modifie jamais (§2).
+  acceptedTariff  Json?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  events          SubscriptionEvent[]
+
+  @@map("subscriptions")
+}
+
+/// Historique d'un abonnement, en ajout seul : ouverture, dates du pilote, fin d'essai, acceptation…
+model SubscriptionEvent {
+  id             String              @id @default(uuid()) @db.Uuid
+  subscriptionId String              @db.Uuid
+  subscription   Subscription        @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  tenantId       String              @map("tenant_id") @db.Uuid
+  kind           String
+  fromStatus     SubscriptionStatus?
+  toStatus       SubscriptionStatus?
+  data           Json?
+  /// Motif saisi par le Super Admin : jamais montré à l'école.
+  reason         String?
+  /// platform (Super Admin), school (direction), system (tâche planifiée).
+  actorKind      String
+  actorId        String?             @db.Uuid
+  actorName      String
+  ip             String?
+  createdAt      DateTime            @default(now())
+
+  @@index([tenantId, createdAt])
+  @@map("subscription_events")
+}
+
+/// Conditions commerciales publiées par Cahiora, versionnées, que la direction accepte à la fin de l'essai.
+/// Le texte vient de Dankou (INFORMATION MANQUANTE tant qu'il n'est pas publié) ; en ajout seul.
+model CommercialTerms {
+  id            String   @id @default(uuid()) @db.Uuid
+  version       Int      @unique
+  title         String
+  body          String
+  effectiveFrom DateTime @db.Date
+  createdById   String?  @db.Uuid
+  createdByName String
+  createdAt     DateTime @default(now())
+
+  @@map("commercial_terms")
+}
+
+/// Tâche planifiée déjà exécutée (fin d'essai, alerte ou fin de pilote) : la clé unique, écrite dans la même
+/// transaction que l'effet, garantit qu'une tâche relancée ne produit jamais de doublon. En ajout seul.
+model BillingJob {
+  id        String   @id @default(uuid()) @db.Uuid
+  key       String   @unique
+  kind      String
+  tenantId  String?  @map("tenant_id") @db.Uuid
+  dueDate   DateTime @db.Date
+  result    Json?
+  createdAt DateTime @default(now())
+
+  @@map("billing_jobs")
+}
+
+/// Alerte du tableau de bord du Super Admin (fin d'essai, pilote bientôt terminé…). Jamais supprimée.
+model PlatformAlert {
+  id        String    @id @default(uuid()) @db.Uuid
+  tenantId  String?   @map("tenant_id") @db.Uuid
+  kind      String
+  message   String
+  dueDate   DateTime? @db.Date
+  readAt    DateTime?
+  readById  String?   @db.Uuid
+  createdAt DateTime  @default(now())
+
+  @@index([createdAt])
+  @@map("platform_alerts")
 }
 
 model Site {

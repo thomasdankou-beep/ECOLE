@@ -151,6 +151,15 @@ export const AUDIT_LABELS: Record<string, string> = {
   'platform.group.initial': 'Groupe scolaire créé au nom de l’école (mise à jour de Cahiora)',
   'platform.group.attached': 'Super Admin : rattachement à un groupe scolaire',
   'platform.group.detached': 'Super Admin : détachement du groupe scolaire (établissement indépendant)',
+  // Abonnement Cahiora de l'établissement (lot G5a).
+  'billing.trial_opened': 'Cahiora : essai gratuit ouvert',
+  'billing.pilot_opened': 'Cahiora : statut d’école pilote partenaire activé',
+  'billing.pilot_end_changed': 'Cahiora : fin de la période pilote modifiée',
+  'billing.pilot_alert': 'Cahiora : alerte avant la fin de la période pilote',
+  'billing.trial_ended': 'Cahiora : essai terminé, conditions à accepter',
+  'billing.pilot_ended': 'Cahiora : période pilote terminée, conditions à accepter',
+  'billing.calendar_saved': 'Cahiora : calendrier de facturation enregistré',
+  'billing.terms_accepted': 'Conditions commerciales de Cahiora acceptées',
 };
 
 export const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action;

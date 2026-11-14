@@ -9,6 +9,9 @@ import { ScopeService } from './common/scope.service';
 import { HealthController } from './health.controller';
 import { AdmissionsController, AdmissionsService } from './modules/admissions/admissions';
 import { AttendanceController } from './modules/attendance/attendance.controller';
+import { BillingController, BillingService } from './modules/billing/billing';
+import { BillingJobsController, BillingJobsService } from './modules/billing/billing-jobs';
+import { SchoolSubscriptionController, SchoolSubscriptionService } from './modules/billing/subscription-school';
 import { AttendanceService } from './modules/attendance/attendance.service';
 import { AuthController } from './modules/auth/auth.controller';
 import { AuthService } from './modules/auth/auth.service';
@@ -65,6 +68,7 @@ class CoreModule {}
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
     InternshipsController, PlatformController, PlatformGroupsController, HonorsController,
+    BillingController, BillingJobsController, SchoolSubscriptionController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -72,6 +76,7 @@ class CoreModule {}
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,
+    BillingService, BillingJobsService, SchoolSubscriptionService,
   ],
 })
 export class AppModule {}

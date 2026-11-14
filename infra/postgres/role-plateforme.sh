@@ -13,5 +13,6 @@ SELECT format('CREATE ROLE erp_platform LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB
 SELECT format('ALTER ROLE erp_platform LOGIN PASSWORD %L', :'pw') \gexec
 GRANT CONNECT ON DATABASE erp TO erp_platform;
 SELECT 'SELECT grant_platform_role()' WHERE to_regproc('grant_platform_role') IS NOT NULL \gexec
+SELECT 'SELECT grant_platform_billing_role()' WHERE to_regproc('grant_platform_billing_role') IS NOT NULL \gexec
 SQL
 echo "Rôle erp_platform prêt."

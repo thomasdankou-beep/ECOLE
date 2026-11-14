@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { Network, Pencil, ScrollText, Trash2 } from 'lucide-react';
 import { Button, Card, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
+import { BILLING_ACTIONS } from './facturation';
 
 /**
  * Groupes scolaires du Super Admin (lot G1, D-G1) : chaque école appartient à un groupe, le compte client ;
@@ -42,6 +43,7 @@ const GROUP_ACTIONS: Record<string, string> = {
   'group.school_joined': 'École rattachée au groupe',
   'group.school_left': 'École retirée du groupe',
   'group.deleted': 'Groupe supprimé',
+  ...BILLING_ACTIONS,
 };
 const FIELD_LABELS: Record<string, string> = {
   name: 'nom', legalName: 'raison sociale', promoter: 'promoteur', phone: 'téléphone', email: 'e-mail', address: 'adresse', country: 'pays', taxId: 'identifiant fiscal',
