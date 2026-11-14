@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { History, Plus } from 'lucide-react';
-import { Badge, Button, Card, Dialog, DialogContent, ErrorNote, Field, Input, Select, Table, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Dialog, DialogContent, ErrorNote, Field, Input, Select, Textarea } from '@/components/ui';
 import { pf } from '@/lib/platform';
 import { CodeField, frDate, money, useSubmit } from './facturation-outils';
 
@@ -38,6 +38,8 @@ type Open =
   | { kind: 'end'; r: Rule & { service: string } };
 
 const STATE_TONE: Record<Rule['state'], 'info' | 'good' | 'warn' | 'bad' | 'accent'> = { 'En cours': 'good', 'À venir': 'info', Terminée: 'warn', Annulée: 'bad' };
+/** Colonnes du catalogue à partir de la largeur d'une tablette ; au téléphone, chaque prestation s'empile. */
+const SERVICE_COLS = 'md:grid-cols-[minmax(0,2fr)_minmax(0,1.5fr)_minmax(0,1fr)_auto] md:gap-3';
 const toAmount = (v: string) => Number(v.replace(/[\s  ]/g, ''));
 const toPercent = (v: string) => Math.round(Number(v.replace(',', '.')) * 100);
 const eve = (d: string) => new Date(Date.parse(`${d}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
@@ -93,30 +95,29 @@ export function Prestations() {
           </div>
           <Button onClick={() => setOpen({ kind: 'create' })}><Plus className="size-4" /> Nouvelle prestation</Button>
         </div>
-        <div className="overflow-x-auto">
-          <Table>
-            <thead><tr><th>Prestation</th><th>Prix du catalogue</th><th>État</th><th /></tr></thead>
-            <tbody>
-              {c.services.map((s) => (
-                <tr key={s.id}>
-                  <td className="min-w-48">
-                    <b>{s.name}</b>
-                    <span className="block text-xs text-muted">{s.description ?? 'Description : INFORMATION MANQUANTE'}</span>
-                  </td>
-                  <td className="min-w-40 text-sm"><CatalogPrice s={s} /></td>
-                  <td><ServiceState s={s} /></td>
-                  <td>
-                    <div className="flex flex-wrap justify-end gap-1">
-                      <Button size="sm" variant="outline" aria-label={`Modifier ${s.name}`} onClick={() => setOpen({ kind: 'version', s })}>Modifier</Button>
-                      {s.last.pricing === 'FIXED' && <Button size="sm" variant="outline" aria-label={`Nouveau prix de ${s.name}`} onClick={() => setOpen({ kind: 'price', s })}>Nouveau prix</Button>}
-                      {s.last.pricing !== 'FREE' && <Button size="sm" variant="outline" aria-label={`Remise, tarif particulier ou gratuité pour ${s.name}`} onClick={() => setOpen({ kind: 'rule', s })}>Remise ou tarif</Button>}
-                      <Button size="icon" variant="ghost" aria-label={`Historique de ${s.name}`} onClick={() => setOpen({ kind: 'history', s })}><History className="size-4" /></Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </Table>
+        {/* Une liste plutôt qu'un tableau : au téléphone, chaque prestation tient en largeur, boutons compris. */}
+        <div>
+          <div className={`hidden border-b border-line px-4 pb-2 text-xs font-bold uppercase tracking-wider text-muted md:grid ${SERVICE_COLS}`} aria-hidden="true">
+            <span>Prestation</span><span>Prix du catalogue</span><span>État</span><span />
+          </div>
+          <ul aria-label="Catalogue des prestations">
+            {c.services.map((s) => (
+              <li key={s.id} className={`grid gap-2 border-b border-line px-4 py-3 last:border-b-0 md:items-center ${SERVICE_COLS}`}>
+                <div>
+                  <b>{s.name}</b>
+                  <span className="block text-xs text-muted">{s.description ?? 'Description : INFORMATION MANQUANTE'}</span>
+                </div>
+                <div className="text-sm"><CatalogPrice s={s} /></div>
+                <ServiceState s={s} />
+                <div className="flex flex-wrap items-center gap-1 md:justify-end">
+                  <Button size="sm" variant="outline" aria-label={`Modifier ${s.name}`} onClick={() => setOpen({ kind: 'version', s })}>Modifier</Button>
+                  {s.last.pricing === 'FIXED' && <Button size="sm" variant="outline" aria-label={`Nouveau prix de ${s.name}`} onClick={() => setOpen({ kind: 'price', s })}>Nouveau prix</Button>}
+                  {s.last.pricing !== 'FREE' && <Button size="sm" variant="outline" aria-label={`Remise, tarif particulier ou gratuité pour ${s.name}`} onClick={() => setOpen({ kind: 'rule', s })}>Remise ou tarif</Button>}
+                  <Button size="icon" variant="ghost" aria-label={`Historique de ${s.name}`} onClick={() => setOpen({ kind: 'history', s })}><History className="size-4" /></Button>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
       </Card>
 
@@ -126,23 +127,22 @@ export function Prestations() {
           <p className="text-sm text-muted">Une seule règle s’applique à la fois, jamais de cumul : la gratuité d’abord, puis le tarif particulier, puis le prix du catalogue moins une remise (celle de l’établissement avant celle de tous).</p>
         </div>
         {rules.length === 0 ? <p className="px-4 pb-4 text-sm text-muted">Aucune règle en cours ni à venir.</p> : (
-          <div className="overflow-x-auto">
-            <Table>
-              <thead><tr><th>Prestation</th><th>Pour</th><th>Règle</th><th>Période</th><th>État</th><th /></tr></thead>
-              <tbody>
-                {rules.map((r) => (
-                  <tr key={r.id}>
-                    <td className="font-bold">{r.service}</td>
-                    <td className="text-sm">{r.scope}</td>
-                    <td className="text-sm">{r.text}<span className="block text-xs text-muted">{r.reason}</span></td>
-                    <td className="text-sm">du {frDate(r.effectiveFrom)}{r.lastDay ? ` au ${frDate(r.lastDay)}` : ', sans fin'}</td>
-                    <td><Badge tone={STATE_TONE[r.state]}>{r.state}</Badge></td>
-                    <td>{!r.stopped && <Button size="sm" variant="outline" aria-label={`Arrêter : ${r.text}, ${r.scope}`} onClick={() => setOpen({ kind: 'end', r })}>Arrêter</Button>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          </div>
+          <ul aria-label="Remises, tarifs particuliers et gratuités en cours ou à venir" className="border-t border-line">
+            {rules.map((r) => (
+              <li key={r.id} className="grid gap-1 border-b border-line px-4 py-3 text-sm last:border-b-0 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.6fr)_minmax(0,1.2fr)_auto] md:items-center md:gap-3">
+                <div>
+                  <b>{r.service}</b>
+                  <span className="block">{r.scope}</span>
+                </div>
+                <div>{r.text}<span className="block text-xs text-muted">{r.reason}</span></div>
+                <div>du {frDate(r.effectiveFrom)}{r.lastDay ? ` au ${frDate(r.lastDay)}` : ', sans fin'}</div>
+                <div className="flex items-center gap-2 md:justify-end">
+                  <Badge tone={STATE_TONE[r.state]}>{r.state}</Badge>
+                  {!r.stopped && <Button size="sm" variant="outline" aria-label={`Arrêter : ${r.text}, ${r.scope}`} onClick={() => setOpen({ kind: 'end', r })}>Arrêter</Button>}
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
 

@@ -94,8 +94,8 @@ test('Super Admin : catalogue initial, nouvelle prestation, remise pour un étab
   await expect(page.getByRole('heading', { name: 'Catalogue des prestations' })).toBeVisible();
 
   // Catalogue initial du cahier des charges (§7), lu seulement : prix datés, descriptions à rédiger.
-  // Lignes du tableau du catalogue (le premier de la page), pas celles des règles.
-  const ligne = (nom: string) => page.locator('table').first().locator('tr', { has: page.getByText(nom, { exact: true }) });
+  // Lignes de la liste du catalogue, pas celles des règles ni des prix.
+  const ligne = (nom: string) => page.getByRole('list', { name: 'Catalogue des prestations' }).getByRole('listitem').filter({ has: page.getByText(nom, { exact: true }) });
   await expect(ligne('Configuration autonome')).toContainText('Gratuite');
   await expect(ligne('Formation et prise en main')).toContainText('15 000 FCFA');
   await expect(ligne('Paramétrage complet')).toContainText('50 000 FCFA');
@@ -133,7 +133,7 @@ test('Super Admin : catalogue initial, nouvelle prestation, remise pour un étab
   await regle.getByLabel('Code de votre application d’authentification').fill(await code(page));
   await regle.getByRole('button', { name: 'Enregistrer la règle' }).click();
   await expect(regle).toBeHidden();
-  const remise = page.locator('tr', { hasText: ecole.name }).filter({ hasText: 'Remise en pourcentage de 10 %' });
+  const remise = page.getByRole('list', { name: /^Remises, tarifs particuliers et gratuités/ }).getByRole('listitem').filter({ hasText: ecole.name }).filter({ hasText: 'Remise en pourcentage de 10 %' });
   await expect(remise).toContainText(prestation);
   await expect(remise).toContainText(`du ${frDate(jour())}, sans fin`);
   await expect(remise.getByText('En cours', { exact: true })).toBeVisible();
