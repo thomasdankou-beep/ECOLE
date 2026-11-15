@@ -6,6 +6,7 @@ import { Building2, KeyRound, LogOut, MonitorSmartphone, Plus, ShieldCheck, User
 import { RecoveryCodesPanel } from '@/components/recovery-codes';
 import { Badge, Button, Card, CardTitle, Chips, Empty, ErrorNote, Field, Input, PageHeader, Select, Table, useToast } from '@/components/ui';
 import { ApiError } from '@/lib/api';
+import { BILLING_ACTIONS } from '@/lib/billing';
 import {
   accountState, dateTime, gp, GROUP_ACTIONS, GROUP_ROLE_HINTS, GROUP_ROLE_LABELS, groupLogDetail, type GroupAccount, type GroupLog, type GroupRole,
 } from '@/lib/group';
@@ -327,7 +328,7 @@ function Journal() {
         <ul className="grid gap-2">
           {rows.map((r) => (
             <li key={r.id} className="rounded-lg border border-line p-2.5 text-sm">
-              <div className="flex flex-wrap justify-between gap-2"><b>{GROUP_ACTIONS[r.action] ?? r.action}</b><span className="text-muted">{dateTime(r.createdAt)}</span></div>
+              <div className="flex flex-wrap justify-between gap-2"><b>{GROUP_ACTIONS[r.action] ?? BILLING_ACTIONS[r.action] ?? r.action}</b><span className="text-muted">{dateTime(r.createdAt)}</span></div>
               {groupLogDetail(r) && <p>{groupLogDetail(r)}</p>}
               <p className="text-xs text-muted">{r.actorName ?? '—'}{r.ip ? ` · ${r.ip}` : ''}</p>
             </li>
