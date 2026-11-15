@@ -56,6 +56,10 @@ SELECT t.slug,
   (SELECT count(*) FROM sms_messages x WHERE x.tenant_id = t.id) AS sms,
   (SELECT to_char(max(x."createdAt"), 'YYYY-MM-DD') FROM audit_logs x WHERE x.tenant_id = t.id) AS derniere_action
 FROM tenants t ORDER BY t."createdAt";
+\echo '-- Directions limitées à un site (bloquées par la correction GRP-001 tant qu''elles ne sont pas régularisées)'
+SELECT t.slug, count(*) AS directions_limitees_a_un_site
+FROM user_roles r JOIN tenants t ON t.id = r.tenant_id
+WHERE r.role = 'DIRECTION' AND r."siteId" IS NOT NULL GROUP BY t.slug ORDER BY t.slug;
 \echo '-- Comptes Super Admin'
 SELECT count(*) AS comptes, count(*) FILTER (WHERE active) AS actifs, count(*) FILTER (WHERE "totpEnabled") AS double_authentification FROM platform_admins;
 \echo '-- Lignes par table (tables non vides)'
