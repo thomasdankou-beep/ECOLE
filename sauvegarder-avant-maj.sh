@@ -40,7 +40,7 @@ fi
 echo "3. Vérification de la copie (base temporaire $VERIF)..."
 LIGNES="SELECT table_name || ' ' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), false, true, '')))[1]::text
   FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name"
-pg psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres -c "DROP DATABASE IF EXISTS $VERIF" -c "CREATE DATABASE $VERIF OWNER erp_owner" </dev/null
+pg psql -X -q -v ON_ERROR_STOP=1 -U postgres -d postgres -c "SET client_min_messages TO warning" -c "DROP DATABASE IF EXISTS $VERIF" -c "CREATE DATABASE $VERIF OWNER erp_owner" </dev/null
 if ! pg psql -X -q -v ON_ERROR_STOP=1 -U postgres -d "$VERIF" < "$copie" > /dev/null; then
   pg psql -X -q -U postgres -d postgres -c "DROP DATABASE IF EXISTS $VERIF" </dev/null
   echo "ÉCHEC : la copie ne se restaure pas. Ne pas faire la mise à jour."; exit 1
