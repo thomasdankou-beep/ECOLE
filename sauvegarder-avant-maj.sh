@@ -1,6 +1,7 @@
 #!/bin/sh
 # Sauvegarde avant une mise à jour, VÉRIFIÉE :
 # 1. copie de la base (pg_dump) dans ~/copie-avant-<nom>-AAAAMMJJ-HHMM.sql, refusée si elle est incomplète ;
+#    avec, à côté, la version du code (…-HHMM.commit) ;
 # 2. copie du .env à côté (…-HHMM.env), puis fichiers envoyés par sauvegarder.sh s'il est présent
 #    (une erreur de sauvegarder.sh est signalée, sans arrêter la vérification de la copie de la base) ;
 # 3. la copie est restaurée dans une base TEMPORAIRE (erp_verif), comparée table par table avec la base en ligne,
@@ -28,6 +29,8 @@ if ! pg pg_dump -U postgres "$BASE" > "$copie.tmp" </dev/null || ! tail -n 20 "$
 fi
 mv "$copie.tmp" "$copie"
 echo "   $copie ($(du -h "$copie" | cut -f1))"
+# Version du code au moment de la copie : restaurer-copie.sh l'indique pour remettre l'ancien code.
+git rev-parse --short HEAD > "${copie%.sql}.commit" 2>/dev/null && echo "   code en ligne au moment de la copie : $(cat "${copie%.sql}.commit")" || rm -f "${copie%.sql}.commit"
 
 echo "2. .env et fichiers envoyés..."
 if [ -f .env ]; then cp .env "${copie%.sql}.env" && echo "   ${copie%.sql}.env"; fi

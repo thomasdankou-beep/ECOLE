@@ -1,6 +1,6 @@
 #!/bin/sh
 # Vérification du serveur avant une mise à jour. LECTURE SEULE : ne modifie aucun fichier, aucune donnée, aucun service.
-# - code en ligne (dernier commit, branche, fichiers modifiés), services, disque, sauvegardes ;
+# - code en ligne (dernier commit, branche, fichiers modifiés), services et réponse de l'API, disque, sauvegardes ;
 # - réglages du fichier .env dont la prochaine version a besoin (présent ou absent, jamais la valeur d'un secret) ;
 # - base : migrations, écoles, volumes par école, comptes Super Admin, lignes par table, taille.
 # La base est ouverte en lecture seule (default_transaction_read_only) : toute écriture y serait refusée.
@@ -17,6 +17,7 @@ git status --short </dev/null | head -10
 
 echo "== Services"
 docker compose ps --format '{{.Service}} : {{.Status}}' </dev/null
+echo "réponse de l'API : $(docker compose exec -T api node -e "fetch('http://localhost:4000/api/v1/health').then(r => console.log(r.status === 200 ? 'oui' : 'erreur ' + r.status)).catch(() => console.log('NON'))" </dev/null 2>&1 | tail -1)"
 
 echo "== Disque et fichiers envoyés"
 df -h / | tail -1
