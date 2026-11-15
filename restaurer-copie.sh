@@ -18,15 +18,17 @@ BASE=${BASE:-erp}
 copie=${1:-}
 [ -n "$copie" ] || { echo "Indiquez la copie à restaurer, par exemple : ./restaurer-copie.sh ~/copie-avant-g5-20261116-0900.sql"; exit 1; }
 [ -s "$copie" ] || { echo "Copie introuvable ou vide : $copie"; exit 1; }
-tail -n 5 "$copie" | grep -q "PostgreSQL database dump complete" || { echo "Copie incomplète (fin absente) : $copie. Rien n'a été changé."; exit 1; }
+tail -n 20 "$copie" | grep -q "PostgreSQL database dump complete" || { echo "Copie incomplète (fin absente) : $copie. Rien n'a été changé."; exit 1; }
 
 printf 'La base %s va être REMPLACÉE par %s. Tapez RESTAURER pour continuer : ' "$BASE" "$copie"
 read -r reponse
 [ "$reponse" = RESTAURER ] || { echo "Abandon : rien n'a été changé."; exit 1; }
 
 etat="$HOME/copie-avant-restauration-$(date +%Y%m%d-%H%M).sql"
-pg pg_dump -U postgres "$BASE" > "$etat" </dev/null
-tail -n 5 "$etat" | grep -q "PostgreSQL database dump complete" || { echo "La copie de l'état actuel a échoué : rien n'a été changé."; exit 1; }
+umask 077
+if ! pg pg_dump -U postgres "$BASE" > "$etat" </dev/null || ! tail -n 20 "$etat" | grep -q "PostgreSQL database dump complete"; then
+  echo "La copie de l'état actuel a échoué : rien n'a été changé."; exit 1
+fi
 echo "État actuel copié : $etat"
 
 dc stop api web

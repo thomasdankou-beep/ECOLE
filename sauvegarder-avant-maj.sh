@@ -1,7 +1,8 @@
 #!/bin/sh
 # Sauvegarde avant une mise à jour, VÉRIFIÉE :
 # 1. copie de la base (pg_dump) dans ~/copie-avant-<nom>-AAAAMMJJ-HHMM.sql, refusée si elle est incomplète ;
-# 2. fichiers envoyés et .env, par sauvegarder.sh s'il est présent ;
+# 2. copie du .env à côté (…-HHMM.env), puis fichiers envoyés par sauvegarder.sh s'il est présent
+#    (une erreur de sauvegarder.sh est signalée, sans arrêter la vérification de la copie de la base) ;
 # 3. la copie est restaurée dans une base TEMPORAIRE (erp_verif), comparée table par table avec la base en ligne,
 #    puis la base temporaire est supprimée.
 # La base en ligne n'est jamais modifiée et le site reste ouvert.
@@ -21,15 +22,20 @@ nom=${1:-maj}
 copie="$HOME/copie-avant-$nom-$(date +%Y%m%d-%H%M).sql"
 
 echo "1. Copie de la base $BASE..."
-pg pg_dump -U postgres "$BASE" > "$copie.tmp" </dev/null
-if ! tail -n 5 "$copie.tmp" | grep -q "PostgreSQL database dump complete"; then
+umask 077
+if ! pg pg_dump -U postgres "$BASE" > "$copie.tmp" </dev/null || ! tail -n 20 "$copie.tmp" | grep -q "PostgreSQL database dump complete"; then
   rm -f "$copie.tmp"; echo "ÉCHEC : copie incomplète, rien n'est gardé. Ne pas faire la mise à jour."; exit 1
 fi
 mv "$copie.tmp" "$copie"
 echo "   $copie ($(du -h "$copie" | cut -f1))"
 
-echo "2. Fichiers envoyés et .env..."
-if [ -x ./sauvegarder.sh ]; then ./sauvegarder.sh </dev/null; else echo "   sauvegarder.sh absent : fichiers envoyés et .env NON copiés"; fi
+echo "2. .env et fichiers envoyés..."
+if [ -f .env ]; then cp .env "${copie%.sql}.env" && echo "   ${copie%.sql}.env"; fi
+if [ -x ./sauvegarder.sh ]; then
+  ./sauvegarder.sh </dev/null || echo "   ATTENTION : sauvegarder.sh s'est arrêté sur une erreur (voir ci-dessus). La copie de la base de l'étape 1 reste valable."
+else
+  echo "   sauvegarder.sh absent : fichiers envoyés NON copiés (ils ne changent pas avec la mise à jour)"
+fi
 
 echo "3. Vérification de la copie (base temporaire $VERIF)..."
 LIGNES="SELECT table_name || ' ' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I', table_name), false, true, '')))[1]::text
