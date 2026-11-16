@@ -14,7 +14,7 @@ try {
 process.env.DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://erp_app:erp_app_dev@localhost:5432/erp_test';
 process.env.DATABASE_ADMIN_URL = process.env.TEST_DATABASE_ADMIN_URL ?? 'postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test';
 process.env.DATABASE_PLATFORM_URL = process.env.TEST_DATABASE_PLATFORM_URL ?? 'postgresql://erp_platform:erp_platform_dev@localhost:5432/erp_test';
-// Lot G1 : rôles des groupes scolaires (aucun service ne s'y connecte encore ; les tests vérifient leurs droits).
+// Rôles des groupes scolaires : erp_group sert la console des groupes (lot G2) ; erp_stats n'a encore aucun droit.
 process.env.DATABASE_GROUP_URL = process.env.TEST_DATABASE_GROUP_URL ?? 'postgresql://erp_group:erp_group_dev@localhost:5432/erp_test';
 process.env.DATABASE_STATS_URL = process.env.TEST_DATABASE_STATS_URL ?? 'postgresql://erp_stats:erp_stats_dev@localhost:5432/erp_test';
 // Base jetable, vidée à chaque lancement, pour jouer la migration des groupes sur des écoles fictives déjà en place.

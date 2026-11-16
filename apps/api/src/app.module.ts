@@ -33,6 +33,9 @@ import { NotificationsController } from './modules/notifications/notifications.c
 import { NotificationsService } from './modules/notifications/notifications.service';
 import { PlatformController, PlatformDb, PlatformGuard, PlatformService } from './modules/platform/platform';
 import { PlatformGroupsController, PlatformGroupsService } from './modules/platform/groups';
+import { GroupAuthController, GroupAuthService, GroupGuard, GroupHostGuard } from './modules/group/group-auth';
+import { GroupConsoleController, GroupConsoleService } from './modules/group/group-console';
+import { GroupDb } from './modules/group/group-db';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReportCardsController } from './modules/report-cards/report-cards.controller';
@@ -61,8 +64,13 @@ class CoreModule {}
   imports: [
     CoreModule,
     JwtModule.register({}),
-    // Limitation des tentatives (CDC §6.1) ; désactivée seulement pour les tests automatisés.
-    ThrottlerModule.forRoot({ throttlers: [{ ttl: 60000, limit: 300 }], skipIf: () => process.env.NODE_ENV === 'test' }),
+    // Limitation des tentatives (CDC §6.1) ; désactivée seulement pour les tests automatisés. Message en français
+    // (il s'affiche tel quel sur les pages de connexion), au lieu de « ThrottlerException: Too Many Requests ».
+    ThrottlerModule.forRoot({
+      throttlers: [{ ttl: 60000, limit: 300 }],
+      skipIf: () => process.env.NODE_ENV === 'test',
+      errorMessage: 'Trop de demandes en peu de temps : patientez une minute, puis réessayez.',
+    }),
   ],
   controllers: [
     // Facturation de Cahiora (lots G5a et G5g).
@@ -70,7 +78,7 @@ class CoreModule {}
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
-    InternshipsController, PlatformController, PlatformGroupsController, HonorsController,
+    InternshipsController, PlatformController, PlatformGroupsController, HonorsController, GroupAuthController, GroupConsoleController,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
@@ -80,6 +88,8 @@ class CoreModule {}
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,
+    // Console des groupes (lot G2) : connexion à la base avec le rôle dédié erp_group.
+    GroupDb, GroupHostGuard, GroupGuard, GroupAuthService, GroupConsoleService,
   ],
 })
 export class AppModule {}

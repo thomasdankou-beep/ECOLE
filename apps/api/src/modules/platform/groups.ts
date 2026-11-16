@@ -1,12 +1,17 @@
 import {
-  BadRequestException, Body, ConflictException, Controller, Delete, Get, Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Req, UseGuards,
+  BadRequestException, Body, ConflictException, Controller, Delete, Get, Header, Injectable, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Req, UseGuards,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Prisma } from '@prisma/client';
-import { IsEmail, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from 'class-validator';
+import { GroupStatus, Prisma } from '@prisma/client';
+import { IsEmail, IsEnum, IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateIf } from 'class-validator';
 import type { Request } from 'express';
 import { Public } from '../../common/auth';
 import { COUNTRY_CODES } from '../../common/country';
+import { config } from '../../config';
+import {
+  ACCOUNT_VIEW, accountView, createGroupAccount, GROUP_ROLE_LABELS, GroupAccountDto, GroupAccountUpdateDto, groupConsoleUrl, resetGroupAccount, revokeSessions,
+} from '../group/group-accounts';
+import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { groupLog, PlatformActor, platformLog, schoolLogInTx } from './group-journal';
 import { checkSameCurrency } from './group-rules';
 import { PlatformDb, PlatformGuard } from './platform';
@@ -53,6 +58,17 @@ export class DetachSchoolDto {
   @IsString(MOTIF) @MinLength(5, MOTIF) @MaxLength(300, MOTIF) motif: string;
 }
 
+/** Suspendre ou rétablir l'accès d'un groupe à sa console (lot G2), avec un motif. Sans effet sur ses écoles. */
+export class GroupStatusDto {
+  @IsEnum(GroupStatus, { message: 'État inconnu' }) status: GroupStatus;
+  @IsString(MOTIF) @MinLength(5, MOTIF) @MaxLength(300, MOTIF) motif: string;
+}
+
+/** Remettre l'accès d'un compte de groupe (téléphone et codes perdus) : identité vérifiée hors de Cahiora, motif écrit. */
+export class ResetGroupAccountDto {
+  @IsString(MOTIF) @MinLength(5, MOTIF) @MaxLength(300, MOTIF) motif: string;
+}
+
 /** Champ facultatif : absent = inchangé, vide = effacé. */
 const opt = (v: string | null | undefined) => (v === undefined ? undefined : v?.trim() || null);
 const FIELDS = ['name', 'legalName', 'promoter', 'phone', 'email', 'address', 'country', 'taxId', 'notes'] as const;
@@ -60,15 +76,19 @@ type School = { id: string; name: string; country: string; currency: string; gro
 
 @Injectable()
 export class PlatformGroupsService {
+  private sms = createSmsProvider(config.smsProvider);
   constructor(private db: PlatformDb) {}
 
   /** Groupes avec leurs écoles (nom, adresse, état, date de rattachement), sans aucune donnée des écoles. */
   async list() {
     const groups = await this.db.schoolGroup.findMany({
       orderBy: [{ name: 'asc' }, { createdAt: 'asc' }],
-      include: { tenants: { select: { id: true, name: true, slug: true, status: true, groupJoinedAt: true }, orderBy: { name: 'asc' } } },
+      include: {
+        tenants: { select: { id: true, name: true, slug: true, status: true, groupJoinedAt: true }, orderBy: { name: 'asc' } },
+        _count: { select: { accounts: { where: { active: true } } } },
+      },
     });
-    return groups.map(({ tenants, ...g }) => ({ ...g, schools: tenants }));
+    return groups.map(({ tenants, _count, ...g }) => ({ ...g, schools: tenants, activeAccounts: _count.accounts }));
   }
 
   create(actor: PlatformActor, dto: GroupDto) {
@@ -110,11 +130,13 @@ export class PlatformGroupsService {
   async remove(actor: PlatformActor, id: string) {
     try {
       return await this.db.$transaction(async (tx) => {
-        const g = await tx.schoolGroup.findUnique({ where: { id }, include: { _count: { select: { tenants: true } } } });
+        const g = await tx.schoolGroup.findUnique({ where: { id }, include: { _count: { select: { tenants: true, accounts: true } } } });
         if (!g) throw new NotFoundException('Groupe introuvable');
         if (g._count.tenants > 0) {
           throw new ConflictException(`Ce groupe a encore ${g._count.tenants} école${g._count.tenants > 1 ? 's' : ''} : rattachez-les d’abord à un autre groupe ou détachez-les`);
         }
+        // Les comptes de la console ne sont jamais effacés (traçabilité) : un groupe qui en a gardé ne se supprime pas.
+        if (g._count.accounts > 0) throw new ConflictException('Ce groupe a des comptes de console : il ne peut pas être supprimé. Suspendez plutôt son accès.');
         await groupLog(tx, actor, [{ groupId: id, action: 'group.deleted', data: { name: g.name } }]);
         await tx.schoolGroup.delete({ where: { id } });
         await platformLog(tx, actor, 'platform.group.deleted', null, { groupId: id, name: g.name });
@@ -122,7 +144,7 @@ export class PlatformGroupsService {
       });
     } catch (e) {
       // Une école rattachée entre-temps : la clé étrangère (ON DELETE RESTRICT) refuse la suppression.
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') throw new ConflictException('Ce groupe a encore des écoles');
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2003') throw new ConflictException('Ce groupe a encore des écoles ou des comptes');
       throw e;
     }
   }
@@ -154,6 +176,87 @@ export class PlatformGroupsService {
       await groupLog(tx, actor, [{ groupId: target.id, action: 'group.created_for_school', data: { tenantId: t.id, tenantName: t.name } }]);
       return this.move(tx, actor, t, target, dto.motif, 'detached');
     });
+  }
+
+  /** Suspendre l'accès d'un groupe à sa console (sessions fermées aussitôt) ou le rétablir. Les écoles ne sont pas touchées. */
+  setStatus(actor: PlatformActor, id: string, dto: GroupStatusDto) {
+    return this.db.$transaction(async (tx) => {
+      const g = await tx.schoolGroup.findUnique({ where: { id }, select: { id: true, name: true, status: true } });
+      if (!g) throw new NotFoundException('Groupe introuvable');
+      if (g.status === dto.status) throw new BadRequestException(dto.status === 'SUSPENDED' ? 'L’accès de ce groupe est déjà suspendu' : 'L’accès de ce groupe est déjà actif');
+      await tx.schoolGroup.update({ where: { id }, data: { status: dto.status } });
+      const closed = dto.status === 'SUSPENDED'
+        ? (await tx.groupSession.updateMany({ where: { groupId: id, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: 'groupe suspendu' } })).count
+        : 0;
+      const what = dto.status === 'SUSPENDED' ? 'suspended' : 'reactivated';
+      // Le groupe voit que son accès a changé, jamais le motif (journal de la plateforme seulement).
+      await groupLog(tx, actor, [{ groupId: id, action: `group.${what}` }]);
+      await platformLog(tx, actor, `platform.group.${what}`, null, { groupId: id, groupName: g.name, motif: dto.motif.trim(), sessionsClosed: closed });
+      return { id, status: dto.status, sessionsClosed: closed };
+    });
+  }
+
+  /** Comptes de la console d'un groupe, sans mot de passe, secret ni code. */
+  async accounts(groupId: string) {
+    if (!(await this.db.schoolGroup.findUnique({ where: { id: groupId }, select: { id: true } }))) throw new NotFoundException('Groupe introuvable');
+    const rows = await this.db.groupAccount.findMany({ where: { groupId }, select: ACCOUNT_VIEW, orderBy: [{ active: 'desc' }, { lastName: 'asc' }] });
+    return rows.map(accountView);
+  }
+
+  private async groupName(tx: Prisma.TransactionClient, groupId: string) {
+    return (await tx.schoolGroup.findUnique({ where: { id: groupId }, select: { name: true } }))?.name ?? null;
+  }
+
+  private async sendCredentials(phone: string | null, password: string) {
+    if (!phone) return;
+    await sendQuietly(this.sms, phone, `Votre accès à la console de votre groupe Cahiora : ${groupConsoleUrl()}. Identifiant : ${phone}. Mot de passe provisoire : ${password}. Changez-le à la première connexion.`);
+  }
+
+  /** Premier compte d'un groupe (ou tout autre) : mot de passe provisoire montré une seule fois et envoyé par SMS. */
+  async createAccount(actor: PlatformActor, groupId: string, dto: GroupAccountDto) {
+    const r = await this.db.$transaction(async (tx) => {
+      const created = await createGroupAccount(tx, groupId, dto);
+      const data = { accountId: created.account.id, name: `${created.account.firstName} ${created.account.lastName}`, role: GROUP_ROLE_LABELS[created.account.role] };
+      await groupLog(tx, actor, [{ groupId, action: 'group.account_created', data }]);
+      await platformLog(tx, actor, 'platform.group.account_created', null, { groupId, groupName: await this.groupName(tx, groupId), ...data });
+      return created;
+    });
+    await this.sendCredentials(r.account.phone, r.temporaryPassword);
+    return { account: accountView(r.account), temporaryPassword: r.temporaryPassword };
+  }
+
+  /** Changer le rôle d'un compte, le désactiver (sessions fermées aussitôt) ou le réactiver. */
+  updateAccount(actor: PlatformActor, groupId: string, accountId: string, dto: GroupAccountUpdateDto) {
+    if (dto.role === undefined && dto.active === undefined) throw new BadRequestException('Rien à modifier');
+    return this.db.$transaction(async (tx) => {
+      const before = await tx.groupAccount.findFirst({ where: { id: accountId, groupId }, select: { role: true, active: true } });
+      if (!before) throw new NotFoundException('Compte introuvable');
+      const a = await tx.groupAccount.update({ where: { id: accountId }, data: { role: dto.role, active: dto.active }, select: ACCOUNT_VIEW });
+      const closed = dto.active === false ? await revokeSessions(tx, accountId, 'compte désactivé par Cahiora') : 0;
+      const changes: Record<string, unknown> = {};
+      if (dto.role !== undefined && dto.role !== before.role) changes.role = GROUP_ROLE_LABELS[dto.role];
+      if (dto.active !== undefined && dto.active !== before.active) changes.active = dto.active;
+      const data = { accountId, name: `${a.firstName} ${a.lastName}`, ...changes, sessionsClosed: closed };
+      await groupLog(tx, actor, [{ groupId, action: 'group.account_updated', data }]);
+      await platformLog(tx, actor, 'platform.group.account_updated', null, { groupId, groupName: await this.groupName(tx, groupId), ...data });
+      return accountView(a);
+    });
+  }
+
+  /**
+   * Remettre l'accès d'un compte de groupe dont le titulaire a perdu son téléphone et ses codes (ou le seul responsable
+   * général bloqué) : nouveau mot de passe provisoire, nouvelle double authentification à la connexion suivante.
+   */
+  async resetAccount(actor: PlatformActor, groupId: string, accountId: string, dto: ResetGroupAccountDto) {
+    const r = await this.db.$transaction(async (tx) => {
+      const out = await resetGroupAccount(tx, groupId, accountId, 'accès remis par Cahiora');
+      const data = { accountId, name: `${out.account.firstName} ${out.account.lastName}`, sessionsClosed: out.sessionsClosed };
+      await groupLog(tx, actor, [{ groupId, action: 'group.account_reset', data }]);
+      await platformLog(tx, actor, 'platform.group.account_reset', null, { groupId, groupName: await this.groupName(tx, groupId), ...data, motif: dto.motif.trim() });
+      return out;
+    });
+    await this.sendCredentials(r.account.phone, r.temporaryPassword);
+    return { account: accountView({ ...r.account, mustChangePassword: true, totpEnabled: false, lockedUntil: null }), temporaryPassword: r.temporaryPassword };
   }
 
   /** L'école est verrouillée jusqu'à la fin de la transaction : deux changements simultanés ne se mélangent pas. */
@@ -209,4 +312,23 @@ export class PlatformGroupsController {
 
   @Post('platform/tenants/:id/detach') @UseGuards(PlatformGuard)
   detach(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DetachSchoolDto) { return this.s.detach(this.actor(req), id, dto); }
+
+  @Post('platform/groups/:id/status') @UseGuards(PlatformGuard)
+  status(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: GroupStatusDto) { return this.s.setStatus(this.actor(req), id, dto); }
+
+  @Get('platform/groups/:id/accounts') @UseGuards(PlatformGuard)
+  accounts(@Param('id', ParseUUIDPipe) id: string) { return this.s.accounts(id); }
+
+  @Post('platform/groups/:id/accounts') @UseGuards(PlatformGuard) @Header('Cache-Control', 'no-store')
+  createAccount(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: GroupAccountDto) { return this.s.createAccount(this.actor(req), id, dto); }
+
+  @Patch('platform/groups/:id/accounts/:aid') @UseGuards(PlatformGuard)
+  updateAccount(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Param('aid', ParseUUIDPipe) aid: string, @Body() dto: GroupAccountUpdateDto) {
+    return this.s.updateAccount(this.actor(req), id, aid, dto);
+  }
+
+  @Post('platform/groups/:id/accounts/:aid/reset') @UseGuards(PlatformGuard) @Header('Cache-Control', 'no-store')
+  resetAccount(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Param('aid', ParseUUIDPipe) aid: string, @Body() dto: ResetGroupAccountDto) {
+    return this.s.resetAccount(this.actor(req), id, aid, dto);
+  }
 }

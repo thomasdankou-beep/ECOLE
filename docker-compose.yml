@@ -44,6 +44,8 @@ services:
       DATABASE_ADMIN_URL: postgresql://erp_owner:${ERP_OWNER_PASSWORD}@postgres:5432/erp
       # Super Admin : rôle dédié, sans droits de propriétaire (SEC-009).
       DATABASE_PLATFORM_URL: postgresql://erp_platform:${ERP_PLATFORM_PASSWORD:?à définir dans .env (relancer ./installer-serveur.sh ou ./demarrer.sh)}@postgres:5432/erp
+      # Console des groupes (lot G2) : rôle dédié, cloisonné sur le groupe de la session, sans aucun droit sur les tables d'école.
+      DATABASE_GROUP_URL: postgresql://erp_group:${ERP_GROUP_PASSWORD:?à définir dans .env (relancer ./installer-serveur.sh ou ./demarrer.sh)}@postgres:5432/erp
       REDIS_URL: redis://redis:6379
       PORT: 4000
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}

@@ -1,10 +1,11 @@
 #!/bin/sh
 # Rôles de base des groupes scolaires (lot G1), sur le modèle de role-plateforme.sh :
-# - erp_group : console du groupe (lot G2), lecture seule de son propre groupe ;
+# - erp_group : console du groupe (lot G2) : son propre groupe seulement (fiche, écoles, comptes, journal) ;
 # - erp_stats : calcul des chiffres agrégés (lots G3 et G5), aucun droit sur aucune table pour l'instant.
 # Crée chaque rôle s'il n'existe pas, lui donne le mot de passe du fichier .env (ERP_GROUP_PASSWORD,
 # ERP_STATS_PASSWORD), puis ses droits si la base est déjà migrée (fonction grant_group_roles()).
-# Aucun service ne s'y connecte encore. Appelé par installer-serveur.sh et demarrer.sh, PostgreSQL démarré.
+# L'API se connecte avec erp_group pour la console des groupes (lot G2, DATABASE_GROUP_URL dans docker-compose.yml).
+# Appelé par installer-serveur.sh et demarrer.sh, PostgreSQL démarré.
 # Ne modifie aucune donnée.
 set -e
 cd "$(dirname "$0")/../.."
