@@ -86,7 +86,7 @@ cd ecole
 ./installer-serveur.sh
 ```
 
-Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès que le DNS envoie le domaine et `*.domaine` vers le serveur : `./installer-serveur.sh --domaine exemple.com` passe en HTTPS, chaque école sur `<identifiant>.exemple.com`.
+Le script installe Docker si besoin, crée `.env` avec des secrets de production aléatoires (jamais remplacés ensuite), sert le site en http sur l’adresse IP du serveur (port 80) et ne charge aucune donnée de démonstration. Le relancer met le site à jour sans toucher aux données ; si le code ne peut pas être récupéré (modification locale, réseau), il s’arrête sans rien reconstruire ni redémarrer, et après un retour arrière (`git checkout <commit>`) il garde la version choisie. Ensuite : créer le compte Super Admin (`docker compose exec api npm run platform:admin -- vous@exemple.bj "Votre nom"`). Dès que le DNS envoie le domaine et `*.domaine` vers le serveur : `./installer-serveur.sh --domaine exemple.com` passe en HTTPS, chaque école sur `<identifiant>.exemple.com`.
 
 ### Téléphone perdu : récupérer un compte à double authentification
 

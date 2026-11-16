@@ -132,3 +132,14 @@ jobs:
           name: rapport-navigateur
           path: tools/qualite/rapport-e2e
           retention-days: 7
+
+  installateur:
+    name: Script d'installation du serveur
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Git réel sur des dépôts temporaires ; Docker, curl et systemctl simulés : rien n'est installé ni démarré.
+      - name: Essais de installer-serveur.sh (échec de récupération du code, retour arrière, compte Super Admin)
+        run: bash tools/qualite/installateur/essais-installateur.sh
