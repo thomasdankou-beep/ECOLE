@@ -1,0 +1,43 @@
+# Essais de la copie hebdomadaire hors du serveur (copie-hors-serveur.sh) sur une base PostgreSQL d'essai.
+# Rien n'est envoyé vers le serveur de production.
+name: Copie hors du serveur
+
+on:
+  push:
+    branches: ['claude/**', main, develop, 'feature/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: copie-hors-serveur-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  copie:
+    name: Copie chiffrée, relecture et refus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      # Client PostgreSQL 16 comme sur le serveur : une copie faite par un pg_dump plus récent peut ne pas se relire en 16.
+      - name: Client PostgreSQL 16
+        run: |
+          test -x /usr/lib/postgresql/16/bin/pg_dump || { sudo apt-get update -q && sudo apt-get install -yq postgresql-client-16; }
+          echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/16/bin/pg_dump --version
+      - name: Essais de copie-hors-serveur.sh
+        run: bash tools/qualite/copie-hors-serveur/essais-copie.sh
