@@ -32,8 +32,24 @@ if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
 fi
 
 if [ -d .git ]; then
-  echo "Récupération de la dernière version du code..."
-  git pull --ff-only || echo "Attention : le code n'a pas pu être mis à jour, la version actuelle est utilisée."
+  if branche=$(git symbolic-ref --quiet --short HEAD); then
+    echo "Récupération de la dernière version du code (branche $branche)..."
+    if ! git pull --ff-only; then
+      echo ""
+      echo "ÉCHEC : le code n'a pas pu être récupéré (voir le message de git ci-dessus)."
+      echo "Mise à jour ARRÊTÉE : rien n'a été reconstruit ni redémarré ; le site continue avec la version $(git rev-parse --short HEAD)."
+      echo "Ne forcez rien : envoyez ce message à la personne qui suit le serveur."
+      exit 1
+    fi
+  else
+    # Retour arrière : une version précise a été choisie (git checkout <commit>). On la garde telle quelle.
+    echo "Version fixée sur $(git rev-parse --short HEAD) (retour arrière) : le code n'est pas mis à jour."
+    precedente=$(git rev-parse --abbrev-ref '@{-1}' 2>/dev/null || true)
+    if [ -n "$precedente" ] && [ "$precedente" != HEAD ]; then
+      echo "Pour reprendre les mises à jour plus tard : git checkout $precedente && ./installer-serveur.sh"
+    fi
+  fi
+  echo "Code utilisé : $(git log -1 --format='%h du %ad, %s' --date=short)"
 fi
 
 secret() { openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -93,8 +109,15 @@ for i in $(seq 1 60); do
   if curl -fsS -o /dev/null "http://localhost:${port}/"; then
     echo ""
     echo "SITE EN LIGNE : $(grep '^WEB_ORIGIN=' .env | cut -d= -f2-)"
-    echo "Étape suivante, créer votre compte Super Admin :"
-    echo "  docker compose exec api npm run platform:admin -- votre@email \"Votre nom\""
+    # L'étape du Super Admin n'est proposée que s'il n'existe encore aucun compte.
+    admins=$(docker compose exec -T postgres psql -X -At -U postgres -d erp -c "SELECT count(*) FROM platform_admins" </dev/null 2>/dev/null || true)
+    case "$admins" in
+      '' | *[!0-9]* | 0)
+        echo "Étape suivante, créer votre compte Super Admin :"
+        echo "  docker compose exec api npm run platform:admin -- votre@email \"Votre nom\"" ;;
+      *)
+        echo "Comptes Super Admin déjà créés : $admins. Contrôle conseillé : ./verifier-serveur.sh" ;;
+    esac
     exit 0
   fi
   sleep 5
