@@ -1,4 +1,4 @@
-import { BadRequestException, Body, ConflictException, Controller, Get, Header, Injectable, Post } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Get, Header, Injectable, Optional, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Prisma } from '@prisma/client';
@@ -8,6 +8,7 @@ import { Actor, Can, CurrentActor, WholeSchool } from '../../common/auth';
 import { localDay } from '../../common/country';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { daysLeft, STATUS_LABELS, subscriptionKindLabel, SubscriptionStatus } from './billing-rules';
+import { BillingDocumentsService } from './documents';
 
 /**
  * Abonnement Cahiora vu par la direction (lot G5a) : état, dates de gratuité, calendrier de facturation, tarif en
@@ -37,7 +38,7 @@ function acceptanceMessage(e: unknown) {
 
 @Injectable()
 export class SchoolSubscriptionService {
-  constructor(private db: PrismaService, private audit: AuditService) {}
+  constructor(private db: PrismaService, private audit: AuditService, @Optional() private documents?: BillingDocumentsService) {}
 
   private async read(tx: Tx, tenantId: string) {
     const t = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { currency: true, timezone: true } });
@@ -82,8 +83,16 @@ export class SchoolSubscriptionService {
   /**
    * Acceptation des conditions commerciales en vigueur (§4, étape 2) par la direction de tout l'établissement. La base
    * refait chaque contrôle, fige le tarif du jour et inscrit l'acceptation dans l'historique, dans la même transaction.
+   * Ensuite, le document provisoire de la fin de la gratuité part aussitôt s'il est calculable (lot G5c, D-G5-1) ; sinon
+   * la tâche planifiée le reprendra. L'acceptation ne dépend jamais de lui.
    */
   async accept(actor: Actor, dto: AcceptTermsDto) {
+    const r = await this.acceptTerms(actor, dto);
+    await this.documents?.forTenant(actor.tenantId);
+    return r;
+  }
+
+  private acceptTerms(actor: Actor, dto: AcceptTermsDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       const { today, s } = await this.read(tx, actor.tenantId);
       if (!s) throw new ConflictException('Aucun abonnement n’est encore ouvert pour votre établissement');

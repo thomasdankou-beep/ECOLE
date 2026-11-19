@@ -43,12 +43,14 @@ model Tenant {
   updatedAt     DateTime     @updatedAt
 
   /// Facturation de Cahiora (lot G5a) : zone de la plateforme, jamais lue par le rôle des écoles.
-  subscription     Subscription?
-  billingCalendars BillingCalendar[]
+  subscription         Subscription?
+  billingCalendars     BillingCalendar[]
   /// Prestations complémentaires (lot G5g) : tarifs particuliers, remises et gratuités propres à l'établissement.
-  serviceRates     ServiceRate[]
+  serviceRates         ServiceRate[]
   /// Comptages des élèves facturables (lot G5b) : des nombres seulement, la liste nominative reste dans l'école.
-  billingCounts    BillingCount[]
+  billingCounts        BillingCount[]
+  /// Lignes des documents provisoires de Cahiora (lot G5c) qui concernent l'établissement.
+  billingDocumentLines BillingDocumentLine[]
 
   @@index([groupId])
   @@map("tenants")
@@ -64,26 +66,28 @@ enum TenantStatus {
 /// propre fiche, sans les notes internes (Row Level Security sur app.group_id, migration groupes_g1).
 /// Un groupe qui a des écoles ne peut pas être supprimé.
 model SchoolGroup {
-  id        String         @id @default(uuid()) @db.Uuid
-  name      String
+  id               String            @id @default(uuid()) @db.Uuid
+  name             String
   /// Raison sociale du promoteur (facultative).
-  legalName String?
-  promoter  String?
-  phone     String?
-  email     String?
-  address   String?
-  country   String         @default("BJ")
+  legalName        String?
+  promoter         String?
+  phone            String?
+  email            String?
+  address          String?
+  country          String            @default("BJ")
   /// Identifiant fiscal (facultatif).
-  taxId     String?
+  taxId            String?
   /// Suspendu par le Super Admin : les comptes du groupe perdent aussitôt l'accès à leur console (lot G2).
   /// Sans effet sur les écoles.
-  status    GroupStatus    @default(ACTIVE)
+  status           GroupStatus       @default(ACTIVE)
   /// Notes internes de la plateforme, jamais visibles par le groupe ni par les écoles.
-  notes     String?
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
-  tenants   Tenant[]
-  accounts  GroupAccount[]
+  notes            String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  tenants          Tenant[]
+  accounts         GroupAccount[]
+  /// Documents provisoires de Cahiora adressés au groupe, client de la facturation (lot G5c).
+  billingDocuments BillingDocument[]
 
   @@map("school_groups")
 }
@@ -422,14 +426,15 @@ model PlatformAlert {
 /// dans un devis ou une facture que si quelqu'un l'y ajoute (lot G5c). Son nom, sa description, son mode de prix et
 /// son activation sont des versions datées ; ses prix, remises, tarifs particuliers et gratuités, des règles datées.
 model Service {
-  id            String           @id @default(uuid()) @db.Uuid
+  id            String                @id @default(uuid()) @db.Uuid
   /// Code stable tiré du premier nom (FORMATION_ET_PRISE_EN_MAIN), pour les documents et les journaux.
-  code          String           @unique
-  createdById   String?          @db.Uuid
+  code          String                @unique
+  createdById   String?               @db.Uuid
   createdByName String
-  createdAt     DateTime         @default(now())
+  createdAt     DateTime              @default(now())
   versions      ServiceVersion[]
   rates         ServiceRate[]
+  documentLines BillingDocumentLine[]
 
   @@map("services")
 }
@@ -544,15 +549,15 @@ enum BillingCountStage {
 /// l'année, éléments à vérifier, exclusions et empreinte de la liste, jamais un nom. En ajout seul, une seule ligne par
 /// établissement, année, type, date et étape : une tâche relancée ne crée jamais de doublon.
 model BillingCount {
-  id              String             @id @default(uuid()) @db.Uuid
-  tenantId        String             @map("tenant_id") @db.Uuid
-  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  id              String               @id @default(uuid()) @db.Uuid
+  tenantId        String               @map("tenant_id") @db.Uuid
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   yearLabel       String
-  academicYearId  String             @db.Uuid
-  academicYear    AcademicYear       @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  academicYearId  String               @db.Uuid
+  academicYear    AcademicYear         @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
   kind            BillingCountKind
   /// Jour de référence, compté jusqu'à minuit dans le fuseau de l'établissement.
-  referenceDate   DateTime           @db.Date
+  referenceDate   DateTime             @db.Date
   stage           BillingCountStage
   /// Version du calendrier de facturation qui a donné la date (comptages du calendrier).
   calendarVersion Int?
@@ -571,11 +576,13 @@ model BillingCount {
   at              DateTime
   knownAt         DateTime
   /// Dernier jour de la vérification par la direction (comptage provisoire seulement).
-  reviewUntil     DateTime?          @db.Date
+  reviewUntil     DateTime?            @db.Date
   timeZone        String
-  createdAt       DateTime           @default(now())
+  createdAt       DateTime             @default(now())
   items           BillingCountItem[]
   corrections     CountCorrection[]
+  /// Ligne du document d'abonnement qui facture ce comptage figé (lot G5c) : une seule.
+  documentLine    BillingDocumentLine?
 
   @@unique([tenantId, yearLabel, kind, referenceDate, stage])
   @@index([tenantId, createdAt])
@@ -646,10 +653,96 @@ model CountCorrection {
   decidedByName   String?
   decidedAt       DateTime?
   decisionNote    String?
+  /// Ligne d'avoir émise pour cette exclusion après un document (lot G5c) : une seule.
+  creditLine      BillingDocumentLine?
 
   @@index([tenantId, enrollmentId])
   @@index([countId])
   @@map("count_corrections")
+}
+
+/// Document provisoire de Cahiora (lot G5c) : proforma de l'abonnement (première facture, complément d'une
+/// régularisation, relevé à 0 F), avoir, devis ou proforma de prestations ; jamais une facture fiscale (cahier des
+/// charges G5 §16 ; factures fiscales au lot G5f). Le client est le groupe (compte client) ; une ligne par
+/// établissement. Zone de la plateforme, en ajout seul (déclencheur forbid_change) ; émis par la seule fonction
+/// issue_billing_document, qui refait les contrôles et les calculs.
+model BillingDocument {
+  id                String                @id @default(uuid()) @db.Uuid
+  groupId           String                @map("group_id") @db.Uuid
+  group             SchoolGroup           @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  kind              BillingDocumentKind
+  /// Référence provisoire « PROV-… », jamais un numéro de facture.
+  reference         String                @unique
+  currency          String
+  issueDate         DateTime              @db.Date
+  /// Échéance : dernier jour de grâce pour la première facture (D-G5-30) ; ailleurs INFORMATION MANQUANTE.
+  dueDate           DateTime?             @db.Date
+  total             Int
+  yearLabel         String?
+  /// Avoir : document d'abonnement touché ; proforma de prestations : devis repris.
+  relatedDocumentId String?               @db.Uuid
+  related           BillingDocument?      @relation("BillingDocumentRelated", fields: [relatedDocumentId], references: [id], onDelete: Restrict)
+  relatedBy         BillingDocument[]     @relation("BillingDocumentRelated")
+  /// Instantané au jour de l'émission : client, établissements, tarif, décisions en vigueur, mention.
+  data              Json
+  /// system (tâche planifiée) ou platform (Super Admin).
+  createdByKind     String
+  createdById       String?               @db.Uuid
+  createdByName     String
+  createdAt         DateTime              @default(now())
+  lines             BillingDocumentLine[]
+
+  @@index([groupId, issueDate])
+  @@map("billing_documents")
+}
+
+/// Ligne d'un document provisoire : abonnement d'un établissement à la date d'un comptage figé (calcul complet),
+/// avoir après une exclusion validée, ou prestation. En ajout seul.
+model BillingDocumentLine {
+  id             String                @id @default(uuid()) @db.Uuid
+  documentId     String                @db.Uuid
+  document       BillingDocument       @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  tenantId       String                @map("tenant_id") @db.Uuid
+  tenant         Tenant                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  position       Int
+  label          String
+  amount         Int
+  countId        String?               @unique @db.Uuid
+  count          BillingCount?         @relation(fields: [countId], references: [id], onDelete: Restrict)
+  countKind      BillingCountKind?
+  referenceDate  DateTime?             @db.Date
+  pupils         Int?
+  pupilsChange   Int?
+  pricePerPupil  Int?
+  minimum        Int?
+  minimumApplied Boolean?
+  fullYear       Int?
+  shareMonths    Int?
+  shareOf        Int?
+  yearAmount     Int?
+  alreadyBilled  Int?
+  relatedLineId  String?               @db.Uuid
+  relatedLine    BillingDocumentLine?  @relation("BillingDocumentLineRelated", fields: [relatedLineId], references: [id], onDelete: Restrict)
+  credits        BillingDocumentLine[] @relation("BillingDocumentLineRelated")
+  correctionId   String?               @unique @db.Uuid
+  correction     CountCorrection?      @relation(fields: [correctionId], references: [id], onDelete: Restrict)
+  serviceId      String?               @db.Uuid
+  service        Service?              @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  serviceName    String?
+  quantity       Int?
+  unitPrice      Int?
+  priceBasis     String?
+
+  @@unique([documentId, position])
+  @@index([tenantId])
+  @@map("billing_document_lines")
+}
+
+enum BillingDocumentKind {
+  SUBSCRIPTION
+  CREDIT_NOTE
+  SERVICE_QUOTE
+  SERVICE_PROFORMA
 }
 
 model Site {

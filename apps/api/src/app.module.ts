@@ -16,6 +16,8 @@ import { RecoveryController, RecoveryService } from './modules/auth/recovery';
 import { BillingController, BillingService } from './modules/billing/billing';
 import { BillingJobsController, BillingJobsService } from './modules/billing/billing-jobs';
 import { CountsController, CountsService } from './modules/billing/counts';
+import { BillingDocumentsController, BillingDocumentsService, SchoolBillingDocumentsController } from './modules/billing/documents';
+import { ServiceDocumentsController, ServiceDocumentsService } from './modules/billing/service-documents';
 import { SchoolSubscriptionController, SchoolSubscriptionService } from './modules/billing/subscription-school';
 import { ServicesController, ServicesService } from './modules/billing/services';
 import { CommunicationController, CommunicationService, PublicService } from './modules/communication/communication';
@@ -74,8 +76,9 @@ class CoreModule {}
     }),
   ],
   controllers: [
-    // Facturation de Cahiora (lots G5a, G5b et G5g).
-    BillingController, BillingJobsController, SchoolSubscriptionController, ServicesController, CountsController,
+    // Facturation de Cahiora (lots G5a, G5b, G5c et G5g).
+    BillingController, BillingJobsController, SchoolSubscriptionController, ServicesController, CountsController, BillingDocumentsController, SchoolBillingDocumentsController,
+    ServiceDocumentsController,
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
     FinanceController, PaymentsController, CommunicationController, NotificationsController, DashboardController, FilesController,
@@ -84,8 +87,8 @@ class CoreModule {}
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
-    // Facturation de Cahiora (lots G5a, G5b et G5g).
-    BillingService, BillingJobsService, SchoolSubscriptionService, ServicesService, CountsService,
+    // Facturation de Cahiora (lots G5a, G5b, G5c et G5g).
+    BillingService, BillingJobsService, SchoolSubscriptionService, ServicesService, CountsService, BillingDocumentsService, ServiceDocumentsService,
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,
