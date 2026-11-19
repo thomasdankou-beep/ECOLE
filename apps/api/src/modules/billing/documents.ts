@@ -345,7 +345,8 @@ export class BillingDocumentsService {
       documents: docs.map((d) => ({
         id: d.id, kind: d.kind, label: documentLabel(d.kind, d.total), reference: d.reference, group: d.group, currency: d.currency, issueDate: iso(d.issueDate),
         dueDate: iso(d.dueDate), total: d.total, yearLabel: d.yearLabel, relatedDocumentId: d.relatedDocumentId, createdByName: d.createdByName, createdAt: d.createdAt,
-        establishments: [...new Set(d.lines.map((l) => l.tenantId))].length, title: (d.data as Record<string, unknown>)?.title ?? null,
+        establishments: [...new Set(d.lines.map((l) => l.tenantId))].length, tenantIds: [...new Set(d.lines.map((l) => l.tenantId))],
+        title: (d.data as Record<string, unknown>)?.title ?? null,
       })),
       plans,
     };

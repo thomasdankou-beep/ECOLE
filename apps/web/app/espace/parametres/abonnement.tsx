@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, FileText } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
 import { Badge, Button, Empty, ErrorNote, useToast } from '@/components/ui';
 import { api } from '@/lib/api';
@@ -9,7 +9,8 @@ import { useApi } from '@/lib/use-api';
 
 /**
  * Abonnement Cahiora vu par la direction (lot G5a) : état, période gratuite, tarif en vigueur, calendrier de facturation,
- * historique, et acceptation des conditions commerciales à la fin de l'essai ou du pilote. Aucun paiement ici.
+ * historique, et acceptation des conditions commerciales à la fin de l'essai ou du pilote ; documents provisoires de
+ * Cahiora (lot G5c), jamais une facture fiscale, pour une école indépendante (D-G5-19). Aucun paiement ici.
  */
 
 type Status = 'TRIAL' | 'PILOT' | 'AWAITING_ACCEPTANCE' | 'AWAITING_PAYMENT' | 'ACTIVE' | 'LIMITED';
@@ -26,6 +27,17 @@ type Data = {
   calendars: { yearLabel: string; version: number; startDate: string; endDate: string; preparationFrom: string | null; initialCountDate: string; firstRegularizationDate: string; finalRegularizationDate: string; renewalDate: string | null; formula: string }[];
   history: { kind: string; label: string; actorName: string; createdAt: string }[];
 };
+type DocKind = 'SUBSCRIPTION' | 'CREDIT_NOTE' | 'SERVICE_QUOTE' | 'SERVICE_PROFORMA';
+type DocLine = {
+  id: string; position: number; label: string; amount: number; countKind: string | null; referenceDate: string | null; pupils: number | null; pupilsChange: number | null;
+  pricePerPupil: number | null; minimum: number | null; minimumApplied: boolean | null; shareMonths: number | null; shareOf: number | null; yearAmount: number | null;
+  alreadyBilled: number | null; serviceName: string | null; quantity: number | null; unitPrice: number | null;
+};
+type Doc = {
+  id: string; kind: DocKind; label: string; reference: string; currency: string; issueDate: string; dueDate: string | null; total: number; yearLabel: string | null;
+  relatedDocumentId: string | null; data: Record<string, unknown> | null; lines: DocLine[];
+};
+type Docs = { mention: string; groupPending: string | null; documents: Doc[] };
 
 const TONE: Record<Status, 'info' | 'good' | 'warn' | 'bad' | 'accent'> = {
   TRIAL: 'info', PILOT: 'accent', AWAITING_ACCEPTANCE: 'warn', AWAITING_PAYMENT: 'warn', ACTIVE: 'good', LIMITED: 'bad',
@@ -33,6 +45,8 @@ const TONE: Record<Status, 'info' | 'good' | 'warn' | 'bad' | 'accent'> = {
 const frDate = (d: string | null | undefined) => (d ? new Date(`${d.slice(0, 10)}T00:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : '—');
 const money = (n: number, currency: string) => `${new Intl.NumberFormat('fr-FR').format(n).replace(/[  ]/g, ' ')} ${currency === 'XOF' || currency === 'XAF' ? 'FCFA' : currency}`;
 const daysText = (n: number) => `${n} jour${n > 1 ? 's' : ''}`;
+const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
+const KIND_TONE: Record<DocKind, 'info' | 'good' | 'accent' | 'warn'> = { SUBSCRIPTION: 'info', CREDIT_NOTE: 'good', SERVICE_QUOTE: 'accent', SERVICE_PROFORMA: 'warn' };
 
 export function Abonnement({ openCounts }: { openCounts?: () => void }) {
   const q = useApi<Data>('/settings/subscription');
@@ -43,6 +57,7 @@ export function Abonnement({ openCounts }: { openCounts?: () => void }) {
           <div className="grid content-start gap-4">
             <Etat d={d} />
             {d.subscription?.status === 'AWAITING_ACCEPTANCE' && <Acceptation d={d} reload={q.reload} />}
+            <Documents />
           </div>
           <div className="grid content-start gap-4">
             <Tarif d={d} />
@@ -192,5 +207,63 @@ function Historique({ d }: { d: Data }) {
         </ul>
       )}
     </Section>
+  );
+}
+
+/** Documents provisoires de Cahiora (lot G5c) : proformas et relevés de l'abonnement, avoirs, devis et proformas de prestations. */
+function Documents() {
+  const q = useApi<Docs>('/settings/billing-documents');
+  return (
+    <Section title="Documents de Cahiora">
+      <Loader {...q}>
+        {(d) => (
+          <div className="grid gap-3">
+            <p className="rounded-lg bg-warn-soft p-2 text-sm font-bold">{d.mention}</p>
+            {d.groupPending ? <p className="text-sm text-muted">{d.groupPending}</p> : d.documents.length === 0 ? (
+              <p className="text-sm text-muted">Aucun document pour le moment. Cahiora prépare un document à partir de chaque comptage figé de vos élèves.</p>
+            ) : (
+              <ul className="grid gap-2" aria-label="Documents de Cahiora">
+                {d.documents.map((doc) => <DocumentItem key={doc.id} doc={doc} related={d.documents.find((x) => x.id === doc.relatedDocumentId) ?? null} />)}
+              </ul>
+            )}
+            <p className="text-xs text-muted">Un document émis ne change plus. Aucun paiement ici.</p>
+          </div>
+        )}
+      </Loader>
+    </Section>
+  );
+}
+
+function DocumentItem({ doc, related }: { doc: Doc; related: Doc | null }) {
+  const note = (k: string) => (typeof doc.data?.[k] === 'string' ? (doc.data[k] as string) : null);
+  const sign = doc.kind === 'CREDIT_NOTE' ? '− ' : '';
+  return (
+    <li className="grid gap-1 rounded-lg border border-line p-3 text-sm">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <span className="min-w-0"><Badge tone={KIND_TONE[doc.kind]}>{doc.label}</Badge><span className="mt-1 block font-mono text-xs">{doc.reference}</span></span>
+        <b className="text-base">{sign}{money(doc.total, doc.currency)}</b>
+      </div>
+      <span className="text-muted">Le {frDate(doc.issueDate)}{doc.dueDate ? ` · échéance le ${frDate(doc.dueDate)}` : ''}{doc.yearLabel ? ` · année ${doc.yearLabel}` : ''}</span>
+      {related && <span>{doc.kind === 'CREDIT_NOTE' ? 'Sur' : 'Reprend'} {related.label.toLowerCase()} {related.reference}</span>}
+      <details>
+        <summary className="inline-flex cursor-pointer items-center gap-1 font-bold text-brand"><FileText className="size-4" /> Détail</summary>
+        <ul className="mt-2 grid gap-2">
+          {doc.lines.map((l) => (
+            <li key={l.id} className="grid gap-0.5 rounded-lg bg-sunk p-2">
+              <span className="flex flex-wrap justify-between gap-2"><b className="min-w-0">{l.label}</b><b>{sign}{money(l.amount, doc.currency)}</b></span>
+              {l.quantity !== null && <span className="text-xs text-muted">{l.quantity} × {money(l.unitPrice ?? 0, doc.currency)}</span>}
+              {l.pupils !== null && (
+                <span className="text-xs text-muted">
+                  {pupilsText(l.pupils)}{l.pupilsChange ? ` (${l.pupilsChange > 0 ? '+' : ''}${l.pupilsChange})` : ''}{l.referenceDate ? ` au ${frDate(l.referenceDate)}` : ''} × {money(l.pricePerPupil ?? 0, doc.currency)},
+                  minimum {money(l.minimum ?? 0, doc.currency)}{l.minimumApplied ? ' (appliqué)' : ''}{l.shareMonths ? `, part ${l.shareMonths}/${l.shareOf}` : ''} : {money(l.yearAmount ?? 0, doc.currency)} pour l’année, {money(l.alreadyBilled ?? 0, doc.currency)} déjà demandés
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+        {note('validity') && <p className="mt-2 text-warn">{note('validity')}</p>}
+        {note('due') && <p className="mt-2 text-warn">{note('due')}</p>}
+      </details>
+    </li>
   );
 }

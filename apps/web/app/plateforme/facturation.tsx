@@ -4,14 +4,15 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Bell, CalendarDays, History, Play, Plus, Users } from 'lucide-react';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
+import { Documents } from './documents';
 import { CodeField, frDate, money, useSubmit } from './facturation-outils';
 import { Prestations } from './prestations';
 
 /**
  * Commercial et facturation (lot G5a) : vue d'ensemble, abonnements, établissements clients et leurs calendriers,
  * paramètres tarifaires datés et conditions commerciales ; prestations complémentaires (lot G5g, ./prestations.tsx) ;
- * comptages des élèves de chaque établissement, en nombres seulement (lot G5b).
- * Les autres rubriques arrivent avec les lots G5b à G5h.
+ * comptages des élèves de chaque établissement, en nombres seulement (lot G5b) ; documents provisoires, exclusions à
+ * décider, devis et proformas de prestations (lot G5c, ./documents.tsx). Les autres rubriques arrivent avec les lots G5d à G5h.
  * Chaque opération financière demande un code actuel de l'application d'authentification.
  */
 
@@ -55,7 +56,6 @@ type Event = { id: string; kind: string; label: string; createdAt: string; actor
 
 type Section = 'ensemble' | 'abonnements' | 'etablissements' | 'documents' | 'paiements' | 'avoirs' | 'prestations' | 'parrainage' | 'partenaires' | 'sms' | 'rapports' | 'parametres';
 const LATER: Partial<Record<Section, [string, string]>> = {
-  documents: ['G5c', 'Proformas, documents de régularisation et avoirs, toujours provisoires tant que les informations fiscales manquent (G5f pour les factures fiscales).'],
   paiements: ['G5d', 'Saisie et vérification des paiements, statuts, reçus provisoires.'],
   avoirs: ['G5d', 'Trop-perçus en crédits, utilisation, demandes de remboursement.'],
   parrainage: ['G5h', 'Codes de parrainage, écoles filleules et crédits de 5 000 FCFA après le premier paiement confirmé.'],
@@ -103,6 +103,7 @@ export function Facturation() {
       {section === 'ensemble' && <Ensemble />}
       {section === 'abonnements' && <Abonnements />}
       {section === 'etablissements' && <Etablissements />}
+      {section === 'documents' && <Documents />}
       {section === 'prestations' && <Prestations />}
       {section === 'parametres' && <Parametres open={setSection} />}
       {later && <Empty title={`Prévu au lot ${later[0]}`}>{later[1]}</Empty>}
