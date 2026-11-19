@@ -128,24 +128,62 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   await shot(page, '3-abonnements-historique');
   await page.keyboard.press('Escape');
 
-  // Établissements clients : un calendrier propre à l'établissement, saisi à la main.
+  // Établissements clients : un calendrier propre à l'établissement (correction C0 du 19 novembre 2026).
   await rubrique(page, 'Commercial et facturation', 'Établissements clients');
-  await page.getByRole('button', { name: `Calendrier de facturation de ${ecole}` }).click();
+  const ouvrirCalendrier = () => page.getByRole('button', { name: `Calendrier de facturation de ${ecole}` }).click();
+  await ouvrirCalendrier();
   const cal = page.getByRole('dialog');
+  const enregistrer = cal.getByRole('button', { name: 'Enregistrer cette version' });
   await cal.getByLabel(/^Année scolaire/).fill('2026-2027');
-  await cal.getByLabel('Formule des dates proposées').selectOption('MANUEL');
+  // Formule B (choisie par défaut) : dates proposées pour toute rentrée et toute fin, recalculées quand l'une change.
+  await cal.getByLabel('Début de l’année scolaire').fill('2026-09-14');
+  await cal.getByLabel('Fin de l’année scolaire').fill('2027-08-14');
+  await expect(cal.getByLabel('Comptage initial')).toHaveValue('2026-11-30');
+  await expect(cal.getByLabel('Première régularisation')).toHaveValue('2027-05-31');
+  await expect(cal.getByLabel('Régularisation finale')).toHaveValue('2027-08-14');
+  await cal.getByLabel('Fin de l’année scolaire').fill('2027-07-09');
+  await expect(cal.getByLabel('Première régularisation')).toHaveValue('2027-04-30');
+  await expect(cal.getByLabel('Régularisation finale')).toHaveValue('2027-07-09');
+  // Année de 6 mois ou moins : la formule ne s'applique pas (décision CAL-1), les dates se saisissent à la main.
+  await cal.getByLabel('Début de l’année scolaire').fill('2027-02-01');
+  await cal.getByLabel('Fin de l’année scolaire').fill('2027-07-31');
+  await expect(cal.getByText('La formule B ne s’applique pas à une année de 6 mois ou moins', { exact: false })).toBeVisible();
+  await expect(enregistrer).toBeDisabled();
+  await shot(page, '4a-calendrier-annee-courte');
+  await cal.getByRole('button', { name: 'Saisir les dates à la main' }).click();
+  await expect(cal.getByLabel('Formule des dates proposées')).toHaveValue('MANUEL');
+  await expect(enregistrer).toBeEnabled();
+  // Retour à la formule B, puis la première régularisation avancée à la main : la version sera « ajustée », avec son motif.
   await cal.getByLabel('Début de l’année scolaire').fill('2026-09-14');
   await cal.getByLabel('Fin de l’année scolaire').fill('2027-07-09');
-  await cal.getByLabel('Comptage initial').fill('2026-11-30');
-  await cal.getByLabel('Première régularisation').fill('2027-04-30');
-  await cal.getByLabel('Régularisation finale').fill('2027-07-09');
-  await cal.getByLabel('Motif').fill('Calendrier fictif saisi par le test de navigateur');
+  await cal.getByLabel('Formule des dates proposées').selectOption('B');
+  await expect(cal.getByLabel('Première régularisation')).toHaveValue('2027-04-30');
+  await cal.getByLabel('Première régularisation').fill('2027-04-15');
+  await expect(cal.getByText('cette version sera enregistrée comme « formule B, ajustée »', { exact: false })).toBeVisible();
+  await cal.getByLabel('Motif').fill('Première régularisation avancée avant les congés (test de navigateur)');
   await cal.getByLabel('Code de votre application d’authentification').fill(await code(page));
-  await shot(page, '4-calendrier-saisie');
-  await cal.getByRole('button', { name: 'Enregistrer cette version' }).click();
+  await shot(page, '4-calendrier-ajuste');
+  await enregistrer.click();
   await expect(cal).toBeHidden();
   // Dans la fiche de cet établissement : d'autres établissements fictifs peuvent avoir le même calendrier.
-  await expect(page.locator('li', { hasText: ecole }).getByText(/2026-2027 \(version 1, dates saisies\)/)).toBeVisible();
+  const fiche = page.locator('li', { hasText: ecole });
+  await expect(fiche.getByText(/2026-2027 \(version 1, formule B, provisoire, ajustée\)/)).toBeVisible();
+  await expect(fiche.getByText('Motif de l’ajustement : Première régularisation avancée avant les congés (test de navigateur)')).toBeVisible();
+
+  // Une autre année, aux dates saisies à la main.
+  await ouvrirCalendrier();
+  await cal.getByLabel(/^Année scolaire/).fill('2027-2028');
+  await cal.getByLabel('Formule des dates proposées').selectOption('MANUEL');
+  await cal.getByLabel('Début de l’année scolaire').fill('2027-09-13');
+  await cal.getByLabel('Fin de l’année scolaire').fill('2028-07-07');
+  await cal.getByLabel('Comptage initial').fill('2027-11-30');
+  await cal.getByLabel('Première régularisation').fill('2028-04-28');
+  await cal.getByLabel('Régularisation finale').fill('2028-07-07');
+  await cal.getByLabel('Motif').fill('Calendrier fictif saisi par le test de navigateur');
+  await cal.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await enregistrer.click();
+  await expect(cal).toBeHidden();
+  await expect(fiche.getByText(/2027-2028 \(version 1, dates saisies\)/)).toBeVisible();
 
   // Journal de la plateforme (rechargé) : l'ouverture de l'essai y figure.
   await page.reload();

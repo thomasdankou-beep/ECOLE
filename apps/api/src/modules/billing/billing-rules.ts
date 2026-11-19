@@ -134,7 +134,8 @@ export const CALENDAR_FIELDS: { key: keyof CalendarDates; label: string }[] = [
  *   régularisation finale le dernier jour (septembre à juin : 30 novembre, 31 mars, 30 juin) ;
  * - A, en proportion : comptage initial à la fin du 3e mois, première régularisation à 70 % de l'année,
  *   régularisation finale le dernier jour.
- * Le Super Admin peut ensuite ajuster chaque date, avec un motif.
+ * Le Super Admin peut ensuite ajuster chaque date, avec un motif. Pour l'écran, passer par calendarProposal, qui dit
+ * aussi quand la formule ne s'applique pas.
  */
 export function proposeCalendar(startDate: string, endDate: string, formula: 'A' | 'B') {
   const [sy, sm] = parts(startDate);
@@ -144,6 +145,75 @@ export function proposeCalendar(startDate: string, endDate: string, formula: 'A'
     ? lastDayOfMonth(ey, em - 1 - 3)
     : addDays(startDate, Math.round(0.7 * daysBetween(startDate, endDate)));
   return { initialCountDate, firstRegularizationDate, finalRegularizationDate: endDate };
+}
+
+/**
+ * Une année de 6 mois ou moins n'a pas de dates proposées : aucune formule n'y donne un calendrier valide (vérifié sur
+ * 636 années), et la décision CAL-1 de Dankou du 19 novembre 2026 (option A) veut que le Super Admin y saisisse les
+ * dates à la main, avec un motif.
+ */
+export const SHORT_YEAR_MONTHS = 6;
+
+/** Mois de l'année scolaire, du mois de la rentrée au mois de la fin, les deux comptés (septembre à juin : 10). */
+export function monthsSpanned(startDate: string, endDate: string) {
+  const [sy, sm] = parts(startDate);
+  const [ey, em] = parts(endDate);
+  return (ey - sy) * 12 + em - sm + 1;
+}
+
+/** Erreur du début ou de la fin d'une année, ou null (mêmes messages que calendarErrors). */
+export function yearDatesError(startDate: unknown, endDate: unknown): string | null {
+  if (!isDay(startDate)) return 'Début de l’année scolaire : date invalide';
+  if (!isDay(endDate)) return 'Fin de l’année scolaire : date invalide';
+  if (endDate <= startDate) return 'La fin de l’année doit suivre son début';
+  if (daysBetween(startDate, endDate) > 550) return 'Une année scolaire dure au plus 18 mois';
+  return null;
+}
+
+export interface CalendarProposal {
+  /** La formule donne un calendrier valide pour cette année. */
+  applies: boolean;
+  /** Pourquoi elle ne s'applique pas, pour l'écran ; null quand elle s'applique. */
+  message: string | null;
+  initialCountDate: string | null;
+  firstRegularizationDate: string | null;
+  finalRegularizationDate: string | null;
+}
+
+/**
+ * Dates proposées par une formule pour n'importe quelle année (correction C0 : plus seulement pour l'année scolaire
+ * enregistrée par l'école). Les dates de l'année doivent être valides (yearDatesError). Quand la formule ne
+ * s'applique pas, aucune date n'est proposée et le message dit quoi faire.
+ */
+export function calendarProposal(startDate: string, endDate: string, formula: 'A' | 'B'): CalendarProposal {
+  const none = { initialCountDate: null, firstRegularizationDate: null, finalRegularizationDate: null };
+  const manual = 'choisissez « Dates saisies à la main » et indiquez le motif';
+  if (monthsSpanned(startDate, endDate) <= SHORT_YEAR_MONTHS) {
+    return { applies: false, message: `La formule ${formula} ne s’applique pas à une année de 6 mois ou moins (du mois de la rentrée au mois de la fin) : ${manual}`, ...none };
+  }
+  const p = proposeCalendar(startDate, endDate, formula);
+  if (calendarErrors({ startDate, endDate, ...p }).length) {
+    return { applies: false, message: `La formule ${formula} ne donne pas de dates valides pour cette année : ${manual}`, ...none };
+  }
+  return { applies: true, message: null, ...p };
+}
+
+/** Propositions des deux formules pour une année, ou null si son début ou sa fin ne va pas. */
+export function calendarProposals(startDate: string, endDate: string): Record<'A' | 'B', CalendarProposal> | null {
+  if (yearDatesError(startDate, endDate)) return null;
+  return { B: calendarProposal(startDate, endDate, 'B'), A: calendarProposal(startDate, endDate, 'A') };
+}
+
+/**
+ * Version proposée par une formule dont une des trois dates calculées a été changée à la main (correction C0) : elle
+ * reste « formule B », marquée « ajustée », avec son motif. Le début de la préparation et le renouvellement ne viennent
+ * d'aucune formule et n'y comptent pas. Si la définition d'une formule change un jour, elle prendra un autre nom, pour
+ * que les versions déjà enregistrées gardent leur marque.
+ */
+export function isAdjusted(c: CalendarDates, formula: string) {
+  if (formula !== 'A' && formula !== 'B') return false;
+  const p = proposeCalendar(c.startDate, c.endDate, formula);
+  return p.initialCountDate !== c.initialCountDate || p.firstRegularizationDate !== c.firstRegularizationDate || p.finalRegularizationDate !== c.finalRegularizationDate;
 }
 
 /** Erreurs d'un calendrier saisi (messages pour l'écran), dans l'ordre des champs. */
