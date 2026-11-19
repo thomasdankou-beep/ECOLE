@@ -1,5 +1,5 @@
 import { AmountDecisions, Closed, DECISIONS, firstDueDate, isClosed, Line } from './amounts-rules';
-import { CountFact, EstablishmentFacts, groupPlan, LineFact, nextLine, NextLine, PlannedEstablishment } from './documents-rules';
+import { CountFact, creditLine, creditLineLabel, EstablishmentFacts, groupPlan, LineFact, nextLine, NextLine, PlannedEstablishment } from './documents-rules';
 
 /**
  * Prochain document de l'abonnement (lot G5c, étape 2), sans base : quel comptage figé donne le document suivant, avec
@@ -95,7 +95,7 @@ describe('Documents G5c : prochain document d’un établissement', () => {
     expect(dues).toEqual([160_000, 10_000, 2_500]);
   });
 
-  it('un avoir validé compte dans le déjà demandé ; l’écart d’élèves part du dernier document d’abonnement', () => {
+  it('un avoir validé compte dans le déjà demandé ; l’écart d’élèves part du dernier document, avoir compris', () => {
     const trial = count('TRIAL_END', '2026-11-18', 0);
     const initial = count('INITIAL', '2027-11-30', 100, Y2.label);
     const march = count('FIRST_REGULARIZATION', '2028-03-31', 108, Y2.label);
@@ -106,7 +106,8 @@ describe('Documents G5c : prochain document d’un établissement', () => {
     // Exemple de l'école B (plan du 13 novembre) : deux inscriptions exclues, avoir de 1 000 F validé.
     lines.push({ ...sub(initial, first), documentKind: 'CREDIT_NOTE', countId: null, amount: 1_000, pupils: 98, createdAt: new Date('2028-01-12T12:00:00Z') });
     const l = readyLine(nextLine(facts({ counts: [trial, initial, march], lines }), DECISIONS));
-    expect(l).toMatchObject({ alreadyBilled: 49_000, amount: 54_000, due: 5_000, pupilsChange: 8 });
+    // 108 élèves en mars, 98 après l'avoir : 10 élèves de plus, 5 000 F.
+    expect(l).toMatchObject({ alreadyBilled: 49_000, amount: 54_000, due: 5_000, pupilsChange: 10 });
   });
 
   it('test 15 : un tarif différent de celui du premier document de l’année ferme le calcul (TARIF) ; l’année suivante le reprend', () => {
@@ -171,5 +172,57 @@ describe('Documents G5c : document du client', () => {
   it('groupe de plusieurs établissements à la même date : fermé tant que D-G5-32 (élève transféré) n’est pas tranché', () => {
     const plan = groupPlan([planned('A', at('2027-11-30', 200)), planned('B', at('2027-11-30', 100))]);
     expect(plan).toMatchObject({ state: 'CLOSED', closed: { decision: 'D-G5-32', message: expect.stringContaining('groupe de 2 établissements') } });
+  });
+});
+
+describe('Documents G5c : avoir après l’exclusion validée d’une inscription erronée (règle du 13 novembre, D-G5-13 B)', () => {
+  const whole = { pricePerPupil: 500, minimum: 40_000, shareMonths: null, shareOf: null };
+
+  it('année entière : déjà demandé moins le montant recalculé sans l’élève ; l’écart d’élèves suit le dernier document', () => {
+    // 250 élèves demandés (125 000 F), une inscription erronée exclue : 249 élèves, 124 500 F, avoir de 500 F.
+    expect(creditLine({ related: whole, pupils: 249, previousPupils: 250, alreadyBilled: 125_000 }, DECISIONS)).toMatchObject({
+      state: 'READY', amount: 500, pupilsChange: -1, alreadyBilled: 125_000, year: { pupils: 249, fullYear: 124_500, amount: 124_500, share: null },
+    });
+  });
+
+  it('au minimum, rien ne change : aucun avoir (79 élèves demandés au minimum, 78 après l’exclusion)', () => {
+    expect(creditLine({ related: whole, pupils: 78, previousPupils: 79, alreadyBilled: 40_000 }, DECISIONS)).toMatchObject({
+      state: 'NONE', message: 'Au minimum annuel, rien ne change : aucun avoir', year: { minimumApplied: true, amount: 40_000 },
+    });
+    // 81 élèves (40 500 F) puis 79 : l'avoir s'arrête au minimum (500 F, pas 1 000 F).
+    expect(creditLine({ related: whole, pupils: 79, previousPupils: 81, alreadyBilled: 40_500 }, DECISIONS)).toMatchObject({ state: 'READY', amount: 500 });
+  });
+
+  it('première année : la part du document touché s’applique ; une part qui ne tombe pas juste attend l’arrondi', () => {
+    const p810 = { ...whole, shareMonths: 8, shareOf: 10 };
+    // 300 élèves à 8/10 : 120 000 F ; 299 : 119 600 F ; avoir de 400 F.
+    expect(creditLine({ related: p810, pupils: 299, previousPupils: 300, alreadyBilled: 120_000 }, DECISIONS)).toMatchObject({
+      state: 'READY', amount: 400, year: { share: { months: 8, of: 10 }, amount: 119_600 },
+    });
+    const p911 = { ...whole, shareMonths: 9, shareOf: 11 };
+    expect(creditLine({ related: p911, pupils: 100, previousPupils: 101, alreadyBilled: 41_318 }, DECISIONS)).toMatchObject({ state: 'CLOSED', closed: { decision: 'ARRONDI' } });
+    // 101 élèves à 9/11 au franc inférieur : 41 318 F ; 100 : 40 909 F ; avoir de 409 F.
+    expect(creditLine({ related: p911, pupils: 100, previousPupils: 101, alreadyBilled: 41_318 }, { ...DECISIONS, rounding: 'FLOOR' })).toMatchObject({
+      state: 'READY', amount: 409, year: { amount: 40_909, rounded: true },
+    });
+  });
+
+  it('un élève déjà retiré par un avoir ne donne rien de plus', () => {
+    expect(creditLine({ related: whole, pupils: 249, previousPupils: 249, alreadyBilled: 124_500 }, DECISIONS)).toMatchObject({
+      state: 'NONE', message: 'Rien n’a été demandé en plus pour cet élève : aucun avoir',
+    });
+    expect(creditLineLabel('École fictive', 'FIRST_REGULARIZATION', '2027-03-31')).toBe('École fictive · Avoir après exclusion d’une inscription erronée (première régularisation du 31 mars 2027)');
+  });
+
+  it('le document suivant part de l’avoir : écart d’élèves avec l’avoir, déjà demandé net des avoirs', () => {
+    const trial = count('TRIAL_END', '2026-11-18', 300);
+    const march = count('FIRST_REGULARIZATION', '2027-03-31', 309, Y1.label);
+    const first = readyLine(nextLine(facts({ counts: [trial] }), SCHOOL));
+    const lines: LineFact[] = [sub(trial, first)];
+    // Exclusion validée après le premier document : avoir de 400 F (299 élèves).
+    lines.push({ ...sub(trial, first), documentKind: 'CREDIT_NOTE', countId: null, amount: 400, pupils: 299, createdAt: new Date('2026-12-01T12:00:00Z') });
+    // Le comptage d'initial n'existe pas dans cet exemple : la régularisation de mars suit directement.
+    const next = readyLine(nextLine(facts({ counts: [trial, march], lines }), SCHOOL));
+    expect(next).toMatchObject({ pupils: 309, pupilsChange: 10, alreadyBilled: 119_600, amount: 123_600, due: 4_000 });
   });
 });

@@ -13,6 +13,7 @@ import { PrismaService, Tx } from '../../common/prisma.service';
 import { FilesService, MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
 import { PlatformDb } from '../platform/platform';
 import { billableRows, BillableRow, endOfSchoolDay, enrollmentEpisodes } from '../students/enrollments';
+import { exclusionDeadline } from './amounts-rules';
 import { frDay, isDay } from './billing-rules';
 import { AlreadyDone, jobOnce, notifyDirection, systemJournals } from './billing-tasks';
 import {
@@ -276,10 +277,17 @@ export class CountsService {
         include: { enrollment: { select: { student: { select: { matricule: true, firstName: true, lastName: true } } } } },
       });
       const exclusionOf = (enrollmentId: string) => corrections.find((k) => k.kind === 'EXCLUSION' && k.enrollmentId === enrollmentId && k.status !== 'REFUSED') ?? null;
+      // Documents émis (lot G5c) : une exclusion qui touche un document se demande jusqu'à 30 jours après le dernier
+      // document qui a demandé l'élève (D-G5-14 A), et c'est le Super Admin qui la décide (D-G5-13 B).
+      const documentOf = await this.billedBy(tx, all.filter((r) => r.yearLabel === c.yearLabel), [...ids, ...corrections.map((k) => k.enrollmentId)]);
       const person = (enrollmentId: string, i: { classId: string; siteId: string | null; counted: boolean; basis: CountBasis; departureDate: string | null }) => {
         const e = enrollments.get(enrollmentId);
         const dup = duplicates.filter((x) => x.studentId === e?.student.id || x.otherId === e?.student.id);
         const exclusion = exclusionOf(enrollmentId);
+        const documentDate = documentOf(enrollmentId);
+        const until = documentDate ? exclusionDeadline(documentDate) : null;
+        // Comptage figé : exclusion encore possible jusqu'à 30 jours après le document (sans limite avant lui).
+        const afterFreeze = count.stage === 'FROZEN' && i.counted && (!until || today <= until);
         return {
           enrollmentId, studentId: e?.student.id ?? null, matricule: e?.student.matricule ?? '', name: e ? `${e.student.lastName} ${e.student.firstName}` : '',
           className: classes.get(i.classId) ?? 'Classe supprimée', siteName: i.siteId ? sites.get(i.siteId) ?? null : null,
@@ -287,7 +295,9 @@ export class CountsService {
           enrollmentStatus: e?.status ?? null, cancelReason: e?.status === 'CANCELLED' ? e.cancelReason : null,
           duplicate: dup.some((x) => x.status === 'SAME') ? 'SAME' : dup.length ? 'PENDING' : null,
           exclusion: exclusion && { id: exclusion.id, status: exclusion.status },
-          canExclude: count.reviewOpen && e?.status === 'CANCELLED' && !exclusion,
+          canExclude: (count.reviewOpen || afterFreeze) && e?.status === 'CANCELLED' && !exclusion,
+          exclusionUntil: count.reviewOpen ? count.reviewUntil : afterFreeze ? until : null,
+          documentDate, decider: documentDate ? 'PLATFORM' as const : 'SCHOOL' as const,
           canDate: count.reviewOpen && DEPARTURE_BASES.includes(i.basis),
           auditDay: live?.audit.get(enrollmentId) ?? (i.basis === 'DEPARTURE_AUDIT' ? i.departureDate : null),
           stillCounted: live ? liveIds.has(enrollmentId) : null,
@@ -304,12 +314,37 @@ export class CountsService {
         },
         corrections: corrections.map((k) => ({
           id: k.id, kind: k.kind, enrollmentId: k.enrollmentId, matricule: k.enrollment.student.matricule, name: `${k.enrollment.student.lastName} ${k.enrollment.student.firstName}`,
-          countId: k.countId, status: k.status, departureDate: iso(k.departureDate), justification: k.justification,
+          countId: k.countId, status: k.status, departureDate: iso(k.departureDate), justification: k.justification, decidedByKind: k.decidedByKind,
+          decider: k.kind === 'EXCLUSION' && k.status === 'PENDING' ? (documentOf(k.enrollmentId) ? 'PLATFORM' as const : 'SCHOOL' as const) : null,
           fileUrl: k.fileKey ? this.files.signedUrl(k.fileKey) : null, requestedByName: k.requestedByName, requestedAt: k.requestedAt,
           decidedByName: k.decidedByName, decidedAt: k.decidedAt, decisionNote: k.decisionNote,
         })),
       };
     });
+  }
+
+  /**
+   * Dernier document d'abonnement qui a demandé chaque inscription (lot G5c) : elle est comptée dans un comptage figé de
+   * l'année au plus tard à la date du comptage de ce document. null : aucun document émis ne la touche.
+   */
+  private async billedBy(tx: Tx, yearCounts: CountRecord[], enrollmentIds: string[]) {
+    const docs = (await tx.$queryRaw<{ count_id: string; year_label: string; reference_date: Date; issue_date: Date }[]>`SELECT * FROM current_tenant_count_documents()`)
+      .filter((x) => yearCounts.some((c) => c.yearLabel === x.year_label)).map((x) => ({ date: iso(x.reference_date)!, issued: iso(x.issue_date)! }));
+    const frozen = new Map(yearCounts.filter((c) => c.stage === 'FROZEN').map((c) => [c.id, c.referenceDate]));
+    const first = new Map<string, string>();
+    if (docs.length && frozen.size && enrollmentIds.length) {
+      const counted = await tx.billingCountItem.findMany({
+        where: { countId: { in: [...frozen.keys()] }, enrollmentId: { in: [...new Set(enrollmentIds)] }, counted: true }, select: { enrollmentId: true, countId: true },
+      });
+      for (const x of counted) {
+        const day = frozen.get(x.countId)!;
+        if (!first.has(x.enrollmentId) || day < first.get(x.enrollmentId)!) first.set(x.enrollmentId, day);
+      }
+    }
+    return (enrollmentId: string) => {
+      const since = first.get(enrollmentId);
+      return since ? docs.filter((x) => x.date >= since).map((x) => x.issued).sort().at(-1) ?? null : null;
+    };
   }
 
   /**
@@ -331,7 +366,10 @@ export class CountsService {
     return { since: localDay(timeZone, ep.start), auditDay: auditDepartureDays([row], logs, now, timeZone).get(e.id) ?? null };
   }
 
-  /** Demande de correction pendant la vérification (D-G5-14 A), avec un justificatif facultatif (photo ou PDF). */
+  /**
+   * Demande de correction pendant la vérification, ou exclusion sur un comptage figé jusqu'à 30 jours après le document
+   * concerné (D-G5-14 A), avec un justificatif facultatif (photo ou PDF). La base contrôle chaque délai.
+   */
   async requestCorrection(actor: Actor, countId: string, dto: CountCorrectionDto, file?: { buffer: Buffer; mimetype: string; size: number }) {
     if (dto.kind === 'DEPARTURE_DATE' && !(dto.departureDate && isDay(dto.departureDate))) throw new BadRequestException('Date de départ : date invalide');
     if (dto.kind === 'EXCLUSION' && dto.departureDate) throw new BadRequestException('Une exclusion ne porte pas de date de départ');
@@ -364,7 +402,7 @@ export class CountsService {
     }));
   }
 
-  /** Décision sur une demande d'exclusion (D-G5-13 B : la direction, tant qu'aucun document émis n'est touché). */
+  /** Décision sur une demande d'exclusion (D-G5-13 B : la direction, tant qu'aucun document émis n'est touché ; sinon le Super Admin). */
   decide(actor: Actor, id: string, dto: CountDecisionDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       try {

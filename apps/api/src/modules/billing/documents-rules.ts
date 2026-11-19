@@ -1,6 +1,6 @@
 import {
   AmountDecisions, billableCounts, billingLine, Closed, FREE_END_KINDS, firstPaidDayAfter, groupDocument, groupTransfers, isClosed, Line, LineInput,
-  pendingDecision, SchoolYear, Tariff, yearTariff,
+  pendingDecision, SchoolYear, Tariff, yearAmount, YearAmount, yearTariff,
 } from './amounts-rules';
 import { frDay } from './billing-rules';
 import { COUNT_KIND_LABELS, CountKind } from './counts-rules';
@@ -19,12 +19,17 @@ export interface CountFact {
   stage: string;
   date: string;
   yearLabel: string;
-  /** Élèves facturables de l'année à cette date (cumul du comptage, exclusions validées retirées). */
+  /**
+   * Élèves facturables de l'année à cette date : cumul du comptage figé, moins les exclusions validées depuis (la base
+   * le calcule, billing_counts_billable ; le comptage figé lui-même ne change jamais).
+   */
   cumulative: number;
 }
 
 /** Ligne déjà émise pour l'établissement : abonnement ou avoir. */
 export interface LineFact {
+  id?: string;
+  documentId?: string;
   documentKind: 'SUBSCRIPTION' | 'CREDIT_NOTE';
   yearLabel: string;
   countId: string | null;
@@ -64,6 +69,8 @@ export type NextLine =
 
 const byDate = (a: LineFact, b: LineFact) => (a.referenceDate ?? '').localeCompare(b.referenceDate ?? '') || a.createdAt.getTime() - b.createdAt.getTime();
 const total = (rows: LineFact[]) => rows.reduce((s, l) => s + l.amount, 0);
+/** Élèves du dernier document de l'année, abonnement ou avoir (un avoir suit la ligne qu'il touche). */
+const previousPupils = (ofYear: LineFact[]) => [...ofYear].sort(byDate).at(-1)?.pupils ?? 0;
 
 /** Prochaine ligne d'abonnement d'un établissement, ou la raison pour laquelle il n'y en a pas. */
 export function nextLine(e: EstablishmentFacts, decisions: AmountDecisions): NextLine {
@@ -85,7 +92,7 @@ export function nextLine(e: EstablishmentFacts, decisions: AmountDecisions): Nex
   const firstOfYear = subscription[0];
   const tariff = yearTariff(firstOfYear ? { pricePerPupil: firstOfYear.pricePerPupil!, minimum: firstOfYear.minimum! } : null, e.tariff);
   const input: LineInput = {
-    kind: next.kind, date: next.date, year, pupils: next.cumulative, previousPupils: subscription.at(-1)?.pupils ?? 0,
+    kind: next.kind, date: next.date, year, pupils: next.cumulative, previousPupils: previousPupils(ofYear),
     tariff: isClosed(tariff) ? e.tariff : tariff, firstPaidDay, alreadyBilled: total(subscription) - total(credits),
     keptShare: firstPaidDay && firstOfYear?.shareMonths && firstOfYear.shareOf ? { months: firstOfYear.shareMonths, of: firstOfYear.shareOf } : null,
   };
@@ -144,3 +151,47 @@ export function groupPlan(establishments: PlannedEstablishment[]): GroupPlan {
 
 /** Libellé d'une ligne d'abonnement : l'établissement et la date du comptage. */
 export const subscriptionLineLabel = (establishment: string, kind: CountKind, date: string) => `${establishment} · ${COUNT_KIND_LABELS[kind]} du ${frDay(date)}`;
+
+// ---------------------------------------------------------------- Avoir après une exclusion
+
+/** Ce qu'il faut pour l'avoir d'un établissement et d'une année. */
+export interface CreditInput {
+  /** Ligne touchée : celle de l'établissement dans son dernier document d'abonnement de l'année (prix, minimum, part). */
+  related: { pricePerPupil: number; minimum: number; shareMonths: number | null; shareOf: number | null };
+  /** Élèves facturables du comptage de cette ligne, l'exclusion validée retirée. */
+  pupils: number;
+  /** Élèves du dernier document ou avoir de l'année. */
+  previousPupils: number;
+  /** Déjà demandé pour l'établissement et l'année : documents émis, moins les avoirs. */
+  alreadyBilled: number;
+}
+
+export type CreditPlan =
+  | { state: 'NONE'; message: string; year: YearAmount }
+  | { state: 'CLOSED'; closed: Closed }
+  | { state: 'READY'; year: YearAmount; pupilsChange: number; alreadyBilled: number; amount: number };
+
+/**
+ * Avoir après l'exclusion validée d'une inscription erronée qui touche un document émis (règle du 13 novembre 2026,
+ * D-G5-13 B) : déjà demandé moins le montant de l'année recalculé sans l'élève, avec les prix et la part du dernier
+ * document de l'année. Au minimum, rien ne change : aucun avoir. Jamais un remboursement : l'avoir réduit ce qui est
+ * dû (son imputation viendra avec les paiements, lot G5d). La base refait ce calcul (issue_billing_document).
+ */
+export function creditLine(input: CreditInput, decisions: AmountDecisions): CreditPlan {
+  const { related } = input;
+  const share = related.shareMonths && related.shareOf ? { months: related.shareMonths, of: related.shareOf } : null;
+  const year = yearAmount(input.pupils, { pricePerPupil: related.pricePerPupil, minimum: related.minimum }, share, decisions.rounding);
+  if (isClosed(year)) return { state: 'CLOSED', closed: year };
+  const amount = input.alreadyBilled - year.amount;
+  if (amount <= 0) {
+    return {
+      state: 'NONE', year,
+      message: year.minimumApplied ? 'Au minimum annuel, rien ne change : aucun avoir' : 'Rien n’a été demandé en plus pour cet élève : aucun avoir',
+    };
+  }
+  return { state: 'READY', year, pupilsChange: input.pupils - input.previousPupils, alreadyBilled: input.alreadyBilled, amount };
+}
+
+/** Libellé d'une ligne d'avoir : l'établissement et le comptage du document touché. */
+export const creditLineLabel = (establishment: string, kind: CountKind, date: string) =>
+  `${establishment} · Avoir après exclusion d’une inscription erronée (${COUNT_KIND_LABELS[kind].toLowerCase()} du ${frDay(date)})`;

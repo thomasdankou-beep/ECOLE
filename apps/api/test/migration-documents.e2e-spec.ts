@@ -54,6 +54,10 @@ describe('Lot G5c · migration des documents provisoires sur une base qui a déj
     return out;
   };
   let before: Record<string, unknown[]> = {};
+  /** Fonctions de demande et de décision des corrections du lot G5b, telles qu'avant la migration (le retour arrière les remet). */
+  const g5bFunctions = () => db.$queryRaw<{ name: string; def: string }[]>`
+    SELECT p.proname AS name, pg_get_functiondef(p.oid) AS def FROM pg_proc p WHERE p.proname IN ('request_count_correction', 'decide_count_correction') ORDER BY 1`;
+  let g5bBefore: { name: string; def: string }[] = [];
   const xi = { group: '', count: '' };
 
   beforeAll(async () => {
@@ -123,6 +127,7 @@ describe('Lot G5c · migration des documents provisoires sur une base qui a déj
         ${END_OF_DAY}::timestamptz, ${END_OF_DAY}::timestamptz, DATE '2026-11-19')`;
     xi.count = count.count_id;
     before = await snapshot();
+    g5bBefore = await g5bFunctions();
     // Puis la migration des documents, seule.
     cpSync(join(PRISMA, 'migrations', G5C), join(dir, 'migrations', G5C), { recursive: true });
     deploy();
@@ -159,11 +164,18 @@ describe('Lot G5c · migration des documents provisoires sur une base qui a déj
       SELECT r AS role, p.proname AS fn, has_function_privilege(r, p.oid, 'EXECUTE') AS ok
       FROM unnest(ARRAY['erp_app', 'erp_group', 'erp_stats', 'erp_platform']) AS r,
            pg_proc p WHERE p.proname IN ('issue_billing_document', 'billing_already_billed', 'billing_year_amount', 'current_tenant_billing_documents',
-                                         'current_tenant_sees_billing_documents')
+                                         'current_tenant_sees_billing_documents', 'billing_counts_billable', 'billing_count_billable', 'billing_enrollment_document',
+                                         'decide_count_exclusion_platform', 'platform_count_exclusions', 'current_tenant_count_documents',
+                                         'request_count_correction', 'decide_count_correction')
       ORDER BY 1, 2`;
     expect(fns.filter((f) => f.ok).map((f) => `${f.role}:${f.fn}`)).toEqual([
-      'erp_app:current_tenant_billing_documents', 'erp_app:current_tenant_sees_billing_documents', 'erp_platform:billing_already_billed', 'erp_platform:issue_billing_document',
+      'erp_app:current_tenant_billing_documents', 'erp_app:current_tenant_count_documents', 'erp_app:current_tenant_sees_billing_documents',
+      'erp_app:decide_count_correction', 'erp_app:request_count_correction',
+      'erp_platform:billing_already_billed', 'erp_platform:billing_counts_billable', 'erp_platform:decide_count_exclusion_platform', 'erp_platform:issue_billing_document',
+      'erp_platform:platform_count_exclusions',
     ]);
+    // Les fonctions de demande et de décision du lot G5b sont remplacées (délai de 30 jours, décision du Super Admin).
+    expect((await g5bFunctions()).map((f) => f.def)).not.toEqual(g5bBefore.map((f) => f.def));
     const triggers = await db.$queryRaw<{ t: string; name: string }[]>`
       SELECT tgrelid::regclass::text AS t, tgname AS name FROM pg_trigger WHERE NOT tgisinternal AND tgrelid::regclass::text = ANY(${DOCUMENTS}) ORDER BY 1, 2`;
     expect(triggers.map((x) => `${x.t}:${x.name}`)).toEqual([
@@ -212,7 +224,12 @@ describe('Lot G5c · migration des documents provisoires sur une base qui a déj
     expect(await exists()).toBeNull();
     for (const t of DOCUMENTS) expect(await db.$queryRaw`SELECT to_regclass(${'public.' + t})::text AS t`).toEqual([{ t: null }]);
     expect(await db.$queryRaw`SELECT proname FROM pg_proc WHERE proname IN ('issue_billing_document', 'billing_already_billed', 'billing_year_amount',
-      'current_tenant_billing_documents', 'current_tenant_sees_billing_documents', 'grant_platform_documents_role')`).toEqual([]);
+      'current_tenant_billing_documents', 'current_tenant_sees_billing_documents', 'grant_platform_documents_role', 'billing_counts_billable', 'billing_count_billable',
+      'billing_enrollment_document', 'decide_count_exclusion_platform', 'platform_count_exclusions', 'current_tenant_count_documents')`).toEqual([]);
+    // Les fonctions du lot G5b sont revenues telles qu'elles étaient, avec leurs droits.
+    expect(await g5bFunctions()).toEqual(g5bBefore);
+    expect(await db.$queryRaw`SELECT has_function_privilege('erp_app', 'request_count_correction(uuid, text, uuid, date, text, text, text, integer, uuid, text, text, date)', 'EXECUTE') AS ok`)
+      .toEqual([{ ok: true }]);
     expect(await db.$queryRaw`SELECT typname FROM pg_type WHERE typname = 'BillingDocumentKind'`).toEqual([]);
     expect(await db.$queryRaw`SELECT 1 FROM _prisma_migrations WHERE migration_name = ${G5C}`).toEqual([]);
     const after = await snapshot();

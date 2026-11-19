@@ -1,16 +1,26 @@
-import { Controller, Get, Header, Injectable, Logger, NotFoundException, Param, ParseUUIDPipe, UseGuards } from '@nestjs/common';
+import {
+  BadRequestException, Body, Controller, Get, Header, Injectable, Logger, NotFoundException, Param, ParseUUIDPipe, Post, Req, UseGuards,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Prisma } from '@prisma/client';
+import { IsIn, IsOptional, IsString, IsUUID, Length, MaxLength } from 'class-validator';
+import type { Request } from 'express';
 import { Actor, Can, CurrentActor, Public } from '../../common/auth';
 import { localDay, money } from '../../common/country';
 import { PrismaService } from '../../common/prisma.service';
+import { FilesService } from '../files/files.service';
+import { PlatformActor } from '../platform/group-journal';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
-import { AmountDecisions, DECISIONS, FREE_END_KINDS, firstDueDate, GRACE_DAYS, Line, OPEN_DECISIONS, SchoolYear } from './amounts-rules';
-import { PLATFORM_TZ } from './billing';
+import { AmountDecisions, DECISIONS, exclusionDeadline, FREE_END_KINDS, firstDueDate, GRACE_DAYS, Line, OPEN_DECISIONS, SchoolYear } from './amounts-rules';
+import { BillingService, PLATFORM_TZ } from './billing';
 import { addDays, frDay, isDay } from './billing-rules';
 import { notifyDirection, SYSTEM } from './billing-tasks';
 import { COUNT_KIND_LABELS, CountKind } from './counts-rules';
-import { CountFact, EstablishmentFacts, GroupPlan, groupPlan, LineFact, nextLine, NextLine, PlannedEstablishment, subscriptionLineLabel } from './documents-rules';
+import {
+  CountFact, CreditPlan, creditLine, creditLineLabel, EstablishmentFacts, GroupPlan, groupPlan, LineFact, nextLine, NextLine, PlannedEstablishment,
+  subscriptionLineLabel,
+} from './documents-rules';
 
 /**
  * Documents provisoires de l'abonnement Cahiora (lot G5c, étape 2), cahier des charges G5 du 14 novembre 2026 :
@@ -44,6 +54,24 @@ export const DOCUMENT_KIND_LABELS = {
 
 type DocumentKind = 'SUBSCRIPTION' | 'CREDIT_NOTE' | 'SERVICE_QUOTE' | 'SERVICE_PROFORMA';
 type IssueRow = { document_id: string; document_reference: string; document_total: number };
+type ExclusionRow = {
+  tenant_id: string; correction_id: string; status: 'PENDING' | 'VALIDATED' | 'REFUSED'; count_id: string; count_kind: CountKind; reference_date: Date; year_label: string;
+  matricule: string; class_name: string | null; cancel_reason: string | null; justification: string; file_key: string | null; file_mime: string | null;
+  requested_by_name: string; requested_at: Date; decided_by_name: string | null; decided_at: Date | null; decision_note: string | null; document_date: Date | null;
+};
+
+const CODE = { message: 'Code de votre application d’authentification : 6 chiffres' };
+
+/**
+ * Décision du Super Admin sur une exclusion qui touche un document émis (D-G5-13 B), confirmée par un code actuel de
+ * son application d'authentification : une validation peut émettre un avoir (opération financière, lot G5a).
+ */
+export class ExclusionDecisionDto {
+  @IsUUID('all', { message: 'Établissement invalide' }) tenantId: string;
+  @IsIn(['VALIDATED', 'REFUSED'], { message: 'Décision inconnue' }) decision: 'VALIDATED' | 'REFUSED';
+  @IsOptional() @IsString() @MaxLength(500, { message: 'Motif : 500 caractères au plus' }) note?: string;
+  @IsString(CODE) @Length(6, 8, CODE) code: string;
+}
 type SchoolRow = {
   document_id: string; kind: DocumentKind; reference: string; currency: string; issue_date: Date; due_date: Date | null; total: number; year_label: string | null;
   related_document_id: string | null; data: Prisma.JsonValue; created_at: Date; line_id: string; position: number; label: string; amount: number; count_kind: CountKind | null;
@@ -91,6 +119,14 @@ function nextView(n: NextLine) {
   return { state: 'READY' as const, line: lineView(n.line) };
 }
 
+/** Avoir calculé, tel que le montre le Super Admin avant de décider. */
+function creditView(p: CreditPlan) {
+  if (p.state === 'CLOSED') return { state: p.state, decision: p.closed.decision, message: p.closed.message };
+  const year = { pupils: p.year.pupils, fullYear: p.year.fullYear, share: p.year.share, amount: p.year.amount, minimumApplied: p.year.minimumApplied, rounded: p.year.rounded };
+  if (p.state === 'NONE') return { state: p.state, message: p.message, year, amount: 0 };
+  return { state: p.state, year, alreadyBilled: p.alreadyBilled, amount: p.amount };
+}
+
 /** Ce qui attend pour un client : son prochain document, ou ce qui l'empêche. */
 function planView(group: { id: string; name: string }, plan: GroupPlan) {
   const establishments = plan.establishments.map((e) => ({ tenantId: e.tenantId, name: e.name, next: nextView(e.next) }));
@@ -111,7 +147,7 @@ export class BillingDocumentsService {
    */
   decisions: AmountDecisions = DECISIONS;
 
-  constructor(private platform: PlatformDb, private db: PrismaService) {}
+  constructor(private platform: PlatformDb, private db: PrismaService, private files: FilesService, private billing: BillingService) {}
 
   // ---------------------------------------------------------------- Données d'un client
 
@@ -131,8 +167,8 @@ export class BillingDocumentsService {
             billingDocumentLines: {
               where: { document: { kind: { in: ['SUBSCRIPTION', 'CREDIT_NOTE'] } } },
               select: {
-                countId: true, referenceDate: true, amount: true, pupils: true, pricePerPupil: true, minimum: true, shareMonths: true, shareOf: true,
-                document: { select: { kind: true, yearLabel: true, createdAt: true } },
+                id: true, documentId: true, countId: true, referenceDate: true, amount: true, pupils: true, pricePerPupil: true, minimum: true, shareMonths: true,
+                shareOf: true, document: { select: { kind: true, yearLabel: true, createdAt: true } },
               },
             },
           },
@@ -144,10 +180,16 @@ export class BillingDocumentsService {
     for (const t of g.tenants) {
       const { tariff, blocked } = acceptedTariff(t.subscription?.status, t.subscription?.acceptedTariff, t.currency);
       const lastFreeDay = (t.subscription?.events ?? []).map((e) => (e.data as Record<string, unknown> | null)?.lastFreeDay).filter(isDay).sort().pop() ?? null;
-      const counts: CountFact[] = t.billingCounts.map((c) => ({ id: c.id, kind: c.kind, stage: c.stage, date: iso(c.referenceDate)!, yearLabel: c.yearLabel, cumulative: c.cumulative }));
+      // Élèves facturables de chaque comptage figé, exclusions validées depuis retirées (calculés par la base).
+      const billable = new Map((await this.platform.$queryRaw<{ count_id: string; billable: number }[]>`SELECT * FROM billing_counts_billable(${t.id}::uuid)`)
+        .map((r) => [r.count_id, r.billable]));
+      const counts: CountFact[] = t.billingCounts.map((c) => ({
+        id: c.id, kind: c.kind, stage: c.stage, date: iso(c.referenceDate)!, yearLabel: c.yearLabel, cumulative: billable.get(c.id) ?? c.cumulative,
+      }));
       const lines: LineFact[] = t.billingDocumentLines.map((l) => ({
-        documentKind: l.document.kind as LineFact['documentKind'], yearLabel: l.document.yearLabel!, countId: l.countId, referenceDate: iso(l.referenceDate), amount: l.amount,
-        pupils: l.pupils, pricePerPupil: l.pricePerPupil, minimum: l.minimum, shareMonths: l.shareMonths, shareOf: l.shareOf, createdAt: l.document.createdAt,
+        id: l.id, documentId: l.documentId, documentKind: l.document.kind as LineFact['documentKind'], yearLabel: l.document.yearLabel!, countId: l.countId,
+        referenceDate: iso(l.referenceDate), amount: l.amount, pupils: l.pupils, pricePerPupil: l.pricePerPupil, minimum: l.minimum, shareMonths: l.shareMonths,
+        shareOf: l.shareOf, createdAt: l.document.createdAt,
       }));
       // Dates de l'année : dernière version du calendrier de facturation, sinon l'année scolaire de l'école.
       const years: Record<string, SchoolYear> = {};
@@ -332,6 +374,137 @@ export class BillingDocumentsService {
     };
   }
 
+  // ---------------------------------------------------------------- Exclusions qui touchent un document (D-G5-13 B)
+
+  /**
+   * Avoir d'un établissement pour une année : ligne de son dernier document d'abonnement, élèves facturables de son
+   * comptage (exclusions validées retirées ; `pending` : la demande encore en attente est retirée aussi, pour l'aperçu),
+   * déjà demandé. La base refait ce calcul à l'émission.
+   */
+  private async creditFor(tx: Prisma.TransactionClient, tenantId: string, yearLabel: string, pending: boolean) {
+    const order: Prisma.BillingDocumentLineOrderByWithRelationInput[] = [{ referenceDate: 'desc' }, { document: { createdAt: 'desc' } }];
+    const related = await tx.billingDocumentLine.findFirst({
+      where: { tenantId, document: { kind: 'SUBSCRIPTION', yearLabel } }, orderBy: order,
+      select: {
+        id: true, documentId: true, countId: true, countKind: true, referenceDate: true, pricePerPupil: true, minimum: true, shareMonths: true, shareOf: true,
+        document: { select: { reference: true } },
+      },
+    });
+    if (!related?.countId || !related.countKind || !related.referenceDate || related.pricePerPupil === null || related.minimum === null) return null;
+    const last = await tx.billingDocumentLine.findFirst({ where: { tenantId, document: { kind: { in: ['SUBSCRIPTION', 'CREDIT_NOTE'] }, yearLabel } }, orderBy: order, select: { pupils: true } });
+    const [b] = await tx.$queryRaw<{ billable: number }[]>`SELECT billable FROM billing_counts_billable(${tenantId}::uuid) WHERE count_id = ${related.countId}::uuid`;
+    const [a] = await tx.$queryRaw<{ billed: number }[]>`SELECT billing_already_billed(${tenantId}::uuid, ${yearLabel}) AS billed`;
+    const plan = creditLine({
+      related: { pricePerPupil: related.pricePerPupil, minimum: related.minimum, shareMonths: related.shareMonths, shareOf: related.shareOf },
+      pupils: Math.max(0, b.billable - (pending ? 1 : 0)), previousPupils: last?.pupils ?? 0, alreadyBilled: a.billed,
+    }, this.decisions);
+    return { related: { ...related, countKind: related.countKind, referenceDate: iso(related.referenceDate)! }, plan };
+  }
+
+  /** Demandes d'exclusion du ressort du Super Admin, et l'avoir que donnerait chaque demande en attente. */
+  async platformExclusions() {
+    const rows = await this.platform.$queryRaw<ExclusionRow[]>`SELECT * FROM platform_count_exclusions()`;
+    const tenants = new Map((await this.platform.tenant.findMany({
+      where: { id: { in: [...new Set(rows.map((r) => r.tenant_id))] } }, select: { id: true, name: true, currency: true },
+    })).map((t) => [t.id, t]));
+    const exclusions = [];
+    for (const r of rows) {
+      const t = tenants.get(r.tenant_id);
+      const documentDate = iso(r.document_date);
+      const credit = r.status === 'PENDING' ? await this.creditFor(this.platform, r.tenant_id, r.year_label, true) : null;
+      exclusions.push({
+        id: r.correction_id, tenant: { id: r.tenant_id, name: t?.name ?? '' }, currency: t?.currency ?? null, status: r.status, countKind: r.count_kind,
+        countLabel: COUNT_KIND_LABELS[r.count_kind], referenceDate: iso(r.reference_date), yearLabel: r.year_label, matricule: r.matricule, className: r.class_name,
+        cancelReason: r.cancel_reason, justification: r.justification, fileUrl: r.file_key ? this.files.signedUrl(r.file_key) : null,
+        requestedByName: r.requested_by_name, requestedAt: r.requested_at, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note,
+        documentDate, requestDeadline: documentDate ? exclusionDeadline(documentDate) : null,
+        preview: credit && { related: credit.related.document.reference, ...creditView(credit.plan) },
+      });
+    }
+    return { mention: PROVISIONAL_MENTION, waiting: exclusions.filter((x) => x.status === 'PENDING').length, exclusions };
+  }
+
+  /**
+   * Décision du Super Admin (D-G5-13 B) et, pour une exclusion validée, l'avoir provisoire dans la même transaction :
+   * rien n'est inscrit si l'un ou l'autre est refusé. Au minimum, la décision s'inscrit sans avoir.
+   */
+  async decideExclusion(admin: PlatformActor, id: string, dto: ExclusionDecisionDto, now = new Date()) {
+    if (dto.decision === 'REFUSED' && (dto.note?.trim().length ?? 0) < 5) throw new BadRequestException('Un refus exige un motif (5 caractères au moins)');
+    await this.billing.confirm(admin, dto.code);
+    try {
+      return await this.platform.$transaction(async (tx) => {
+        const [d] = await tx.$queryRaw<{ document_date: Date; year_label: string }[]>`
+          SELECT * FROM decide_count_exclusion_platform(${dto.tenantId}::uuid, ${id}::uuid, ${dto.decision}, ${dto.note?.trim() || null}, ${admin.id}::uuid,
+            ${admin.name}, ${admin.ip ?? null})`;
+        const t = await tx.tenant.findUniqueOrThrow({
+          where: { id: dto.tenantId }, select: { id: true, name: true, currency: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
+        });
+        let credit: { documentId: string; reference: string; total: number } | null = null;
+        let message: string | null = null;
+        if (dto.decision === 'VALIDATED') {
+          const c = await this.creditFor(tx, t.id, d.year_label, false);
+          if (!c) throw new BadRequestException('Aucun document d’abonnement à corriger pour cette année');
+          if (c.plan.state === 'CLOSED') throw new BadRequestException(c.plan.closed.message);
+          if (c.plan.state === 'NONE') message = c.plan.message;
+          else credit = await this.issueCredit(tx, t, d.year_label, c.related, c.plan, id, admin, now);
+        }
+        const action = dto.decision === 'VALIDATED' ? 'billing.count_exclusion_validated' : 'billing.count_exclusion_refused';
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+        await tx.auditLog.createMany({
+          data: [{
+            tenantId: t.id, userId: null, userName: `Super Admin de la plateforme (${admin.name})`, action, entity: 'CountCorrection', entityId: id,
+            data: { decidedBy: 'platform', note: dto.note?.trim() || null, credit: credit && { reference: credit.reference, total: credit.total } } as Prisma.InputJsonValue,
+          }],
+        });
+        // La direction est prévenue ; le montant de l'avoir seulement si elle voit les documents (école indépendante, D-G5-19).
+        const sees = t.group._count.tenants === 1;
+        const body = dto.decision === 'REFUSED'
+          ? `Le Super Admin de Cahiora a refusé l’exclusion demandée : ${dto.note!.trim()}`
+          : credit && sees
+            ? `Le Super Admin de Cahiora a validé l’exclusion demandée. Avoir provisoire ${credit.reference} de ${money(credit.total, t.currency)}, dans Paramètres › Abonnement Cahiora. ${PROVISIONAL_MENTION}`
+            : `Le Super Admin de Cahiora a validé l’exclusion demandée.${message ? ` ${message}.` : ''}`;
+        await notifyDirection(tx, t.id, action, dto.decision === 'VALIDATED' ? 'Exclusion validée par Cahiora' : 'Exclusion refusée par Cahiora', body);
+        return { status: dto.decision, credit, message };
+      }, { timeout: 60000 });
+    } catch (e) {
+      const m = cahioraMessage(e);
+      if (m) throw new BadRequestException(m);
+      throw e;
+    }
+  }
+
+  private async issueCredit(
+    tx: Prisma.TransactionClient, t: { id: string; name: string; currency: string; group: { id: string; name: string } }, yearLabel: string,
+    related: { id: string; documentId: string; countKind: CountKind; referenceDate: string; document: { reference: string } }, plan: Extract<CreditPlan, { state: 'READY' }>,
+    correctionId: string, admin: PlatformActor, now: Date,
+  ) {
+    const issueDay = localDay(PLATFORM_TZ, now);
+    const y = plan.year;
+    const line = {
+      tenantId: t.id, label: creditLineLabel(t.name, related.countKind, related.referenceDate), amount: plan.amount, pupils: y.pupils, pupilsChange: plan.pupilsChange,
+      pricePerPupil: y.pricePerPupil, minimum: y.minimum, minimumApplied: y.minimumApplied, fullYear: y.fullYear, shareMonths: y.share?.months ?? null,
+      shareOf: y.share?.of ?? null, yearAmount: y.amount, alreadyBilled: plan.alreadyBilled, relatedLineId: related.id, correctionId,
+    };
+    const data = {
+      title: `Avoir provisoire · abonnement Cahiora ${yearLabel}`,
+      mention: PROVISIONAL_MENTION,
+      client: { groupId: t.group.id, name: t.group.name },
+      establishments: [{ tenantId: t.id, name: t.name }],
+      reason: 'Exclusion validée d’une inscription annulée pour erreur de saisie (D-G5-13 B)',
+      related: { documentId: related.documentId, reference: related.document.reference, countKind: related.countKind, countDate: related.referenceDate },
+      tariff: { currency: t.currency, pricePerPupil: y.pricePerPupil, minimum: y.minimum },
+      rounded: y.rounded ? 'FLOOR' : null,
+    };
+    const [r] = await tx.$queryRaw<IssueRow[]>`
+      SELECT * FROM issue_billing_document(${t.group.id}::uuid, 'CREDIT_NOTE', ${t.currency}, ${issueDay}::date, NULL::date, ${yearLabel}, ${related.documentId}::uuid,
+        ${JSON.stringify(data)}::jsonb, ${JSON.stringify([line])}::jsonb, 'platform', ${admin.id}::uuid, ${admin.name})`;
+    await documentJournals(tx, t.group, r.document_id, 'billing.credit_note_issued', {
+      documentId: r.document_id, reference: r.document_reference, kind: 'CREDIT_NOTE', total: r.document_total, yearLabel, issueDate: issueDay,
+      relatedDocumentId: related.documentId,
+    }, [{ tenant: { id: t.id, name: t.name }, data: { pupils: y.pupils, amount: plan.amount, correctionId } }], admin);
+    return { documentId: r.document_id, reference: r.document_reference, total: r.document_total };
+  }
+
   // ---------------------------------------------------------------- Direction de l'établissement
 
   /**
@@ -405,6 +578,15 @@ export class BillingDocumentsController {
 
   @Get('platform/billing/documents/:id') @Header('Cache-Control', 'no-store')
   one(@Param('id', ParseUUIDPipe) id: string) { return this.s.platformDocument(id); }
+
+  /** Exclusions qui touchent un document émis : le Super Admin les décide (D-G5-13 B). */
+  @Get('platform/billing/exclusions') @Header('Cache-Control', 'no-store')
+  exclusions() { return this.s.platformExclusions(); }
+
+  @Post('platform/billing/exclusions/:id/decision') @Throttle({ default: { limit: 20, ttl: 60000 } })
+  decide(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ExclusionDecisionDto) {
+    return this.s.decideExclusion((req as unknown as { platformAdmin: PlatformActor }).platformAdmin, id, dto);
+  }
 }
 
 @ApiTags('Paramètres')

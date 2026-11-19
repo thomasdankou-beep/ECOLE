@@ -5,6 +5,9 @@
 -- Le client d'un document est le groupe (compte client, lot G1) : une école indépendante est un groupe d'un seul
 -- établissement ; une ligne par établissement (décision du 11 novembre 2026).
 -- Ajout seul : un document émis et ses lignes ne se modifient ni ne s'effacent, même par le propriétaire de la base.
+-- Exclusions après un document (D-G5-13 B, D-G5-14 A) : les fonctions de demande et de décision des corrections du
+-- lot G5b sont remplacées (une exclusion se demande encore jusqu'à 30 jours après le document concerné, et le Super Admin
+-- décide celle qui touche un document émis) ; l'avoir qui en suit est émis par issue_billing_document.
 -- Aucune donnée existante n'est modifiée, aucun document n'est créé ici : l'API les émet par issue_billing_document,
 -- qui refait les contrôles et les calculs.
 -- Tout s'applique en une seule transaction : en cas d'erreur, rien n'est changé.
@@ -166,14 +169,17 @@ $$;
 -- - abonnement : comptage figé de l'établissement et de l'année, une seule fois (jamais facturé deux fois : test 8),
 --   conditions commerciales acceptées (D-G5-1), fin de la dernière période gratuite seulement pour un comptage de fin
 --   d'essai ou de pilote (une période gratuite n'est jamais facturée), même date pour toutes les lignes (des dates
---   différentes attendent D-G5-31), un établissement une seule fois, élèves = cumul du comptage figé, montant de
---   l'année, déjà demandé, écart d'élèves et complément recalculés (D-G5-10 A) ;
--- - avoir : une ligne, qui touche une ligne d'un document d'abonnement du même client et de la même année, pour une
---   exclusion validée de l'établissement, une seule fois ; montant = déjà demandé moins le montant de l'année recalculé
---   (13 novembre 2026, D-G5-13 B) ;
+--   différentes attendent D-G5-31), un établissement une seule fois, élèves = cumul du comptage figé moins les
+--   exclusions validées depuis, montant de l'année, déjà demandé, écart d'élèves (avec le document ou l'avoir précédent)
+--   et complément recalculés (D-G5-10 A) ;
+-- - avoir : une ligne, pour une exclusion validée par le Super Admin après le document touché (D-G5-13 B), une seule
+--   fois ; elle touche la ligne de l'établissement dans son dernier document d'abonnement de l'année, avec ses prix et sa
+--   part ; élèves = élèves facturables de ce comptage, exclusions validées retirées ; montant = déjà demandé moins le
+--   montant de l'année recalculé, au moins 1 (au minimum, rien ne change : aucun avoir) ; règle du 13 novembre 2026 ;
 -- - devis et proformas de prestations : prestation du catalogue, quantité, prix unitaire, montant = quantité × prix ;
 --   une proforma peut reprendre un devis du même client.
--- Total = somme des lignes. Référence provisoire « PROV-… », jamais un numéro de facture (G5f).
+-- Un document lié (avoir, proforma d'un devis) n'est jamais daté avant le document qu'il reprend. Total = somme des
+-- lignes. Référence provisoire « PROV-… », jamais un numéro de facture (G5f).
 CREATE OR REPLACE FUNCTION issue_billing_document(
   p_group uuid, p_kind text, p_currency text, p_issue date, p_due date, p_year text, p_related uuid, p_data jsonb, p_lines jsonb,
   p_by_kind text, p_by_id uuid, p_by_name text)
@@ -234,6 +240,9 @@ BEGIN
        OR (v_kind = 'SERVICE_PROFORMA' AND rel.kind <> 'SERVICE_QUOTE')
        OR v_kind IN ('SUBSCRIPTION', 'SERVICE_QUOTE') THEN
       RAISE EXCEPTION 'CAHIORA: ce document ne peut pas être lié à celui-ci';
+    END IF;
+    IF p_issue < rel."issueDate" THEN
+      RAISE EXCEPTION 'CAHIORA: un document n''est jamais daté avant le document auquel il est lié';
     END IF;
   ELSIF v_kind = 'CREDIT_NOTE' THEN
     RAISE EXCEPTION 'CAHIORA: un avoir touche toujours un document émis';
@@ -301,12 +310,12 @@ BEGIN
       ELSIF v_date <> c."referenceDate" THEN
         RAISE EXCEPTION 'CAHIORA: établissements facturés à des dates différentes : en attente de la décision D-G5-31';
       END IF;
-      IF l.pupils <> c.cumulative THEN
-        RAISE EXCEPTION 'CAHIORA: ligne % : élèves facturables différents du comptage figé', l.n;
+      IF l.pupils <> billing_count_billable(c.id) THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : élèves facturables différents du comptage figé (exclusions validées retirées)', l.n;
       END IF;
       v_prev := NULL;
       SELECT x.pupils INTO v_prev FROM billing_document_lines x JOIN billing_documents d ON d.id = x."documentId"
-       WHERE x.tenant_id = l."tenantId" AND d."yearLabel" = p_year AND d.kind = 'SUBSCRIPTION'
+       WHERE x.tenant_id = l."tenantId" AND d."yearLabel" = p_year AND d.kind IN ('SUBSCRIPTION', 'CREDIT_NOTE')
        ORDER BY x."referenceDate" DESC, d."createdAt" DESC LIMIT 1;
       IF l."pupilsChange" <> l.pupils - coalesce(v_prev, 0) THEN
         RAISE EXCEPTION 'CAHIORA: ligne % : écart d''élèves faux', l.n;
@@ -323,13 +332,39 @@ BEGIN
       IF NOT FOUND OR rl."documentId" <> p_related OR rl.tenant_id <> l."tenantId" THEN
         RAISE EXCEPTION 'CAHIORA: ligne % : ligne touchée inconnue', l.n;
       END IF;
+      -- L'avoir corrige le dernier document d'abonnement de l'établissement pour l'année, avec ses prix et sa part.
+      IF EXISTS (SELECT 1 FROM billing_document_lines x JOIN billing_documents d ON d.id = x."documentId"
+                 WHERE x.tenant_id = l."tenantId" AND d."yearLabel" = p_year AND d.kind = 'SUBSCRIPTION' AND x.id <> rl.id
+                   AND (x."referenceDate" > rl."referenceDate" OR (x."referenceDate" = rl."referenceDate" AND d."createdAt" > rel."createdAt"))) THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : un avoir touche le dernier document d''abonnement de l''établissement pour l''année', l.n;
+      END IF;
+      IF l."pricePerPupil" <> rl."pricePerPupil" OR l.minimum <> rl.minimum OR l."shareMonths" IS DISTINCT FROM rl."shareMonths"
+         OR l."shareOf" IS DISTINCT FROM rl."shareOf" THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : prix, minimum et part de la ligne touchée attendus', l.n;
+      END IF;
       PERFORM set_config('app.tenant_id', l."tenantId"::text, true);
       SELECT * INTO k FROM count_corrections x WHERE x.id = l."correctionId";
-      IF NOT FOUND OR k.tenant_id <> l."tenantId" OR k.kind <> 'EXCLUSION' OR k.status <> 'VALIDATED' THEN
-        RAISE EXCEPTION 'CAHIORA: ligne % : exclusion validée de cet établissement attendue', l.n;
+      IF NOT FOUND OR k.tenant_id <> l."tenantId" OR k.kind <> 'EXCLUSION' OR k.status <> 'VALIDATED' OR k."decidedByKind" IS DISTINCT FROM 'platform'
+         OR k."decidedAt" < rel."createdAt" THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : exclusion de cet établissement validée par le Super Admin après ce document attendue', l.n;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM billing_count_items i JOIN billing_counts f ON f.id = i."countId"
+                     WHERE i."enrollmentId" = k."enrollmentId" AND i.counted AND f.tenant_id = l."tenantId" AND f."yearLabel" = p_year
+                       AND f.stage = 'FROZEN' AND f."referenceDate" <= rl."referenceDate") THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : cette exclusion ne touche pas ce document', l.n;
       END IF;
       IF EXISTS (SELECT 1 FROM billing_document_lines x WHERE x."correctionId" = k.id) THEN
         RAISE EXCEPTION 'CAHIORA: ligne % : cette exclusion a déjà son avoir', l.n;
+      END IF;
+      IF l.pupils <> billing_count_billable(rl."countId") THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : élèves facturables après l''exclusion faux', l.n;
+      END IF;
+      v_prev := NULL;
+      SELECT x.pupils INTO v_prev FROM billing_document_lines x JOIN billing_documents d ON d.id = x."documentId"
+       WHERE x.tenant_id = l."tenantId" AND d."yearLabel" = p_year AND d.kind IN ('SUBSCRIPTION', 'CREDIT_NOTE')
+       ORDER BY x."referenceDate" DESC, d."createdAt" DESC LIMIT 1;
+      IF l."pupilsChange" <> l.pupils - coalesce(v_prev, 0) THEN
+        RAISE EXCEPTION 'CAHIORA: ligne % : écart d''élèves faux', l.n;
       END IF;
       IF l.amount <> v_billed - l."yearAmount" THEN
         RAISE EXCEPTION 'CAHIORA: ligne % : montant de l''avoir faux', l.n;
@@ -400,19 +435,355 @@ CREATE OR REPLACE FUNCTION current_tenant_billing_documents() RETURNS TABLE (
   ORDER BY d."issueDate" DESC, d."createdAt" DESC, l.position
 $$;
 
+-- ---------------------------------------------------------------- Exclusions après un document, avoirs
+-- Décisions de Dankou du 19 novembre 2026 : D-G5-13 B (la direction valide une exclusion tant qu'aucun document émis
+-- n'est touché, puis le Super Admin) et D-G5-14 A (pendant la vérification d'un comptage, ou jusqu'à 30 jours après le
+-- document concerné) ; règle du 13 novembre 2026 : après un document émis, un avoir validé par le Super Admin ; au
+-- minimum, rien ne change ; aucun remboursement automatique. Les fonctions de demande et de décision du lot G5b sont
+-- remplacées ici (le script de retour arrière remet celles du lot G5b).
+
+-- Élèves facturables de chaque comptage figé d'un établissement, à cet instant : inscriptions comptées dans les
+-- comptages figés de l'année jusqu'à sa date, moins toutes les exclusions validées, même après le comptage. Un comptage
+-- figé ne change jamais : une exclusion validée ensuite retire l'élève de ce que demandent ses documents.
+CREATE OR REPLACE FUNCTION billing_counts_billable(p_tenant uuid) RETURNS TABLE (count_id uuid, billable integer)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  RETURN QUERY
+    SELECT c.id, (SELECT count(DISTINCT i."enrollmentId")::integer
+                    FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
+                   WHERE b.tenant_id = c.tenant_id AND b."yearLabel" = c."yearLabel" AND b.stage = 'FROZEN' AND b."referenceDate" <= c."referenceDate"
+                     AND i.counted
+                     AND NOT EXISTS (SELECT 1 FROM count_corrections k
+                                      WHERE k."enrollmentId" = i."enrollmentId" AND k.kind = 'EXCLUSION' AND k.status = 'VALIDATED'))
+    FROM billing_counts c
+    WHERE c.tenant_id = p_tenant AND c.stage = 'FROZEN';
+END $$;
+
+-- Le même nombre pour un seul comptage figé (NULL s'il n'est pas figé).
+CREATE OR REPLACE FUNCTION billing_count_billable(p_count uuid) RETURNS integer
+  LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT x.billable FROM billing_counts c CROSS JOIN LATERAL billing_counts_billable(c.tenant_id) x WHERE c.id = p_count AND x.count_id = p_count
+$$;
+
+-- Date du dernier document d'abonnement qui a demandé cette inscription (comptée dans un comptage figé de l'année au
+-- plus tard à la date du comptage de ce document), ou NULL : aucun document émis n'est touché.
+CREATE OR REPLACE FUNCTION billing_enrollment_document(p_tenant uuid, p_enrollment uuid, p_year text) RETURNS date
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_first date;
+BEGIN
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  SELECT min(b."referenceDate") INTO v_first
+    FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
+   WHERE i."enrollmentId" = p_enrollment AND i.counted AND b.tenant_id = p_tenant AND b."yearLabel" = p_year AND b.stage = 'FROZEN';
+  IF v_first IS NULL THEN
+    RETURN NULL;
+  END IF;
+  RETURN (SELECT max(d."issueDate") FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId"
+           WHERE l.tenant_id = p_tenant AND d.kind = 'SUBSCRIPTION' AND d."yearLabel" = p_year AND l."referenceDate" >= v_first);
+END $$;
+
+-- Demande de correction par la direction de tout l'établissement courant (remplace celle du lot G5b) :
+-- - pendant la vérification d'un comptage provisoire : EXCLUSION d'une inscription annulée pour erreur de saisie (règle
+--   du 13 novembre 2026), avec sa justification, qui attend une décision ; DEPARTURE_DATE d'un départ enregistré avant
+--   l'historique des inscriptions (D-G5-16 A), qui vaut aussitôt ;
+-- - après, sur un comptage figé (D-G5-14 A) : EXCLUSION seulement, d'une inscription comptée dans ce comptage ou avant,
+--   jusqu'à 30 jours après le dernier document qui l'a demandée (sans limite tant qu'aucun document ne l'a demandée).
+-- Jamais pour un départ réel : l'inscription doit être annulée. La demande est inscrite dans les journaux de la
+-- plateforme (avec le matricule, sans la justification) et du groupe (sans le matricule) ; l'API trace le journal de
+-- l'école.
+CREATE OR REPLACE FUNCTION request_count_correction(
+  p_count uuid, p_kind text, p_enrollment uuid, p_departure date, p_justification text, p_file_key text, p_file_mime text, p_file_size integer,
+  p_user uuid, p_user_name text, p_ip text, p_today date) RETURNS uuid
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_tenant uuid := app_current_tenant();
+  v_now timestamp := timezone('UTC', now());
+  v_id uuid := gen_random_uuid();
+  v_status "CountCorrectionStatus";
+  v_action text;
+  v_document date;
+  b record;
+  e record;
+BEGIN
+  IF v_tenant IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: école courante absente';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM user_roles r JOIN users u ON u.id = r."userId"
+    WHERE r."userId" = p_user AND r.tenant_id = v_tenant AND r.role = 'DIRECTION' AND r."siteId" IS NULL AND u.status = 'ACTIVE'
+  ) THEN
+    RAISE EXCEPTION 'CAHIORA: seule la direction de tout l''établissement corrige un comptage';
+  END IF;
+  IF p_kind NOT IN ('EXCLUSION', 'DEPARTURE_DATE') THEN
+    RAISE EXCEPTION 'CAHIORA: type de correction inconnu';
+  END IF;
+  IF length(btrim(coalesce(p_justification, ''))) < 5 THEN
+    RAISE EXCEPTION 'CAHIORA: la justification est obligatoire (5 caractères au moins)';
+  END IF;
+  SELECT * INTO b FROM billing_counts WHERE id = p_count AND tenant_id = v_tenant;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'CAHIORA: comptage introuvable';
+  END IF;
+  IF b.stage = 'PROVISIONAL' THEN
+    IF b."reviewUntil" < p_today OR EXISTS (
+      SELECT 1 FROM billing_counts f WHERE f.tenant_id = v_tenant AND f."yearLabel" = b."yearLabel" AND f.kind = b.kind AND f."referenceDate" = b."referenceDate" AND f.stage = 'FROZEN'
+    ) THEN
+      RAISE EXCEPTION 'CAHIORA: la vérification de ce comptage est terminée';
+    END IF;
+  ELSIF p_kind <> 'EXCLUSION' THEN
+    RAISE EXCEPTION 'CAHIORA: la vérification de ce comptage est terminée : seule une exclusion se demande encore (D-G5-14 A)';
+  END IF;
+  SELECT en.id, en.status, st.matricule INTO e FROM enrollments en JOIN students st ON st.id = en."studentId"
+   WHERE en.id = p_enrollment AND en.tenant_id = v_tenant AND en."academicYearId" = b."academicYearId";
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'CAHIORA: inscription introuvable pour l''année de ce comptage';
+  END IF;
+  -- Verrou de l'inscription : deux demandes envoyées en même temps ne passent pas toutes les deux.
+  PERFORM 1 FROM enrollments WHERE id = p_enrollment FOR UPDATE;
+  IF p_kind = 'EXCLUSION' THEN
+    IF e.status <> 'CANCELLED' THEN
+      RAISE EXCEPTION 'CAHIORA: seule une inscription annulée pour erreur de saisie peut être exclue ; annulez-la d''abord, avec son motif (un départ réel ne s''exclut jamais)';
+    END IF;
+    IF p_departure IS NOT NULL THEN
+      RAISE EXCEPTION 'CAHIORA: une exclusion ne porte pas de date de départ';
+    END IF;
+    IF EXISTS (SELECT 1 FROM count_corrections k WHERE k."enrollmentId" = p_enrollment AND k.kind = 'EXCLUSION' AND k.status IN ('PENDING', 'VALIDATED')) THEN
+      RAISE EXCEPTION 'CAHIORA: une demande d''exclusion est déjà en cours ou validée pour cette inscription';
+    END IF;
+    v_document := billing_enrollment_document(v_tenant, p_enrollment, b."yearLabel");
+    IF b.stage = 'FROZEN' THEN
+      IF NOT EXISTS (SELECT 1 FROM billing_count_items i JOIN billing_counts f ON f.id = i."countId"
+                     WHERE i."enrollmentId" = p_enrollment AND i.counted AND f.tenant_id = v_tenant AND f."yearLabel" = b."yearLabel"
+                       AND f.stage = 'FROZEN' AND f."referenceDate" <= b."referenceDate") THEN
+        RAISE EXCEPTION 'CAHIORA: cette inscription n''est pas comptée dans ce comptage figé';
+      END IF;
+      IF v_document IS NOT NULL AND p_today > v_document + 30 THEN
+        RAISE EXCEPTION 'CAHIORA: délai passé : une exclusion se demande au plus tard 30 jours après le document concerné, émis le % (D-G5-14 A)',
+          to_char(v_document, 'DD/MM/YYYY');
+      END IF;
+    END IF;
+    v_status := 'PENDING';
+    v_action := 'billing.count_exclusion_requested';
+  ELSE
+    IF p_departure IS NULL THEN
+      RAISE EXCEPTION 'CAHIORA: la date de départ est obligatoire';
+    END IF;
+    IF p_departure > p_today THEN
+      RAISE EXCEPTION 'CAHIORA: la date de départ ne peut pas être dans le futur';
+    END IF;
+    IF e.status NOT IN ('TRANSFERRED', 'WITHDRAWN')
+       AND NOT EXISTS (SELECT 1 FROM enrollment_events v WHERE v."enrollmentId" = p_enrollment AND v.kind = 'REINSTATED') THEN
+      RAISE EXCEPTION 'CAHIORA: cette inscription n''a pas de départ enregistré avant l''historique des inscriptions';
+    END IF;
+    v_status := 'VALIDATED';
+    v_action := 'billing.count_departure_dated';
+  END IF;
+  INSERT INTO count_corrections (id, tenant_id, kind, "enrollmentId", "countId", "departureDate", justification, "fileKey", "fileMime", "fileSize", status,
+                                 "requestedById", "requestedByName", "requestedAt", "decidedByKind", "decidedById", "decidedByName", "decidedAt")
+    VALUES (v_id, v_tenant, p_kind::"CountCorrectionKind", p_enrollment, p_count, p_departure, btrim(p_justification), p_file_key, p_file_mime, p_file_size, v_status,
+            p_user, p_user_name, v_now,
+            CASE WHEN v_status = 'VALIDATED' THEN 'school' END, CASE WHEN v_status = 'VALIDATED' THEN p_user END,
+            CASE WHEN v_status = 'VALIDATED' THEN p_user_name END, CASE WHEN v_status = 'VALIDATED' THEN v_now END);
+  INSERT INTO platform_audit_logs (id, action, "tenantId", data, ip, "createdAt")
+    VALUES (gen_random_uuid(), v_action, v_tenant,
+            jsonb_build_object('countKind', b.kind, 'referenceDate', b."referenceDate", 'matricule', e.matricule, 'departureDate', p_departure, 'by', p_user_name,
+                               'documentDate', v_document), p_ip, v_now);
+  INSERT INTO group_audit_logs (id, group_id, "actorKind", "actorId", "actorName", action, data, "createdAt")
+    SELECT gen_random_uuid(), t.group_id, 'school', p_user, p_user_name, v_action,
+           jsonb_build_object('tenantName', t.name, 'countKind', b.kind, 'referenceDate', b."referenceDate"), v_now
+    FROM tenants t WHERE t.id = v_tenant;
+  -- Une exclusion qui touche un document émis attend le Super Admin (D-G5-13 B) : alerte de la plateforme.
+  IF p_kind = 'EXCLUSION' AND v_document IS NOT NULL THEN
+    INSERT INTO platform_alerts (id, tenant_id, kind, message, "dueDate", "createdAt")
+      SELECT gen_random_uuid(), v_tenant, 'COUNT_EXCLUSION_TO_DECIDE',
+             'Demande d''exclusion à décider : ' || t.name || ', inscription ' || e.matricule || ' déjà demandée par le document du '
+               || to_char(v_document, 'DD/MM/YYYY') || ' (D-G5-13 B)', NULL, v_now
+      FROM tenants t WHERE t.id = v_tenant;
+  END IF;
+  RETURN v_id;
+END $$;
+
+-- Décision de la direction de tout l'établissement courant sur une demande d'exclusion (remplace celle du lot G5b) :
+-- seulement tant qu'aucun document émis n'est touché (D-G5-13 B) ; sinon le Super Admin décide
+-- (decide_count_exclusion_platform). Un refus exige un motif. La décision est inscrite une seule fois. Même verrou que
+-- l'émission d'un document du client : une décision et un document ne se croisent jamais.
+CREATE OR REPLACE FUNCTION decide_count_correction(p_id uuid, p_decision text, p_note text, p_user uuid, p_user_name text, p_ip text) RETURNS text
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_tenant uuid := app_current_tenant();
+  v_now timestamp := timezone('UTC', now());
+  v_group uuid;
+  k record;
+  b record;
+  v_matricule text;
+BEGIN
+  IF v_tenant IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: école courante absente';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM user_roles r JOIN users u ON u.id = r."userId"
+    WHERE r."userId" = p_user AND r.tenant_id = v_tenant AND r.role = 'DIRECTION' AND r."siteId" IS NULL AND u.status = 'ACTIVE'
+  ) THEN
+    RAISE EXCEPTION 'CAHIORA: seule la direction de tout l''établissement décide d''une exclusion';
+  END IF;
+  IF p_decision NOT IN ('VALIDATED', 'REFUSED') THEN
+    RAISE EXCEPTION 'CAHIORA: décision inconnue';
+  END IF;
+  IF p_decision = 'REFUSED' AND length(btrim(coalesce(p_note, ''))) < 5 THEN
+    RAISE EXCEPTION 'CAHIORA: un refus exige un motif (5 caractères au moins)';
+  END IF;
+  SELECT t.group_id INTO v_group FROM tenants t WHERE t.id = v_tenant;
+  PERFORM pg_advisory_xact_lock(hashtext('cahiora-billing-document'), hashtext(v_group::text));
+  SELECT * INTO k FROM count_corrections WHERE id = p_id AND tenant_id = v_tenant FOR UPDATE;
+  IF NOT FOUND OR k.kind <> 'EXCLUSION' THEN
+    RAISE EXCEPTION 'CAHIORA: demande d''exclusion introuvable';
+  END IF;
+  IF k.status <> 'PENDING' THEN
+    RAISE EXCEPTION 'CAHIORA: cette demande a déjà reçu une décision';
+  END IF;
+  SELECT c.kind, c."referenceDate", c."yearLabel" INTO b FROM billing_counts c WHERE c.id = k."countId";
+  IF billing_enrollment_document(v_tenant, k."enrollmentId", b."yearLabel") IS NOT NULL THEN
+    RAISE EXCEPTION 'CAHIORA: cette exclusion touche un document déjà émis : le Super Admin de Cahiora la décide (D-G5-13 B)';
+  END IF;
+  UPDATE count_corrections
+     SET status = p_decision::"CountCorrectionStatus", "decidedByKind" = 'school', "decidedById" = p_user, "decidedByName" = p_user_name,
+         "decidedAt" = v_now, "decisionNote" = nullif(btrim(coalesce(p_note, '')), '')
+   WHERE id = p_id;
+  SELECT st.matricule INTO v_matricule FROM enrollments en JOIN students st ON st.id = en."studentId" WHERE en.id = k."enrollmentId";
+  INSERT INTO platform_audit_logs (id, action, "tenantId", data, ip, "createdAt")
+    VALUES (gen_random_uuid(), CASE WHEN p_decision = 'VALIDATED' THEN 'billing.count_exclusion_validated' ELSE 'billing.count_exclusion_refused' END, v_tenant,
+            jsonb_build_object('countKind', b.kind, 'referenceDate', b."referenceDate", 'matricule', v_matricule, 'by', p_user_name), p_ip, v_now);
+  INSERT INTO group_audit_logs (id, group_id, "actorKind", "actorId", "actorName", action, data, "createdAt")
+    SELECT gen_random_uuid(), t.group_id, 'school', p_user, p_user_name,
+           CASE WHEN p_decision = 'VALIDATED' THEN 'billing.count_exclusion_validated' ELSE 'billing.count_exclusion_refused' END,
+           jsonb_build_object('tenantName', t.name, 'countKind', b.kind, 'referenceDate', b."referenceDate"), v_now
+    FROM tenants t WHERE t.id = v_tenant;
+  RETURN p_decision;
+END $$;
+
+-- Décision du Super Admin sur une demande d'exclusion qui touche un document émis (D-G5-13 B), rôle de la plateforme
+-- seulement. Un refus exige un motif. Rend la date du dernier document touché et l'année : l'API émet l'avoir dans la
+-- même transaction (issue_billing_document refait le calcul) ; au minimum, aucun avoir. Journaux de la plateforme (avec
+-- le matricule) et du groupe (sans) ; l'API trace le journal de l'école.
+CREATE OR REPLACE FUNCTION decide_count_exclusion_platform(
+  p_tenant uuid, p_id uuid, p_decision text, p_note text, p_admin uuid, p_admin_name text, p_ip text)
+  RETURNS TABLE (document_date date, year_label text)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_now timestamp := timezone('UTC', now());
+  v_group uuid;
+  v_name text;
+  v_document date;
+  v_matricule text;
+  v_action text;
+  k record;
+  b record;
+BEGIN
+  IF p_tenant IS NULL OR p_id IS NULL OR coalesce(btrim(p_admin_name), '') = '' THEN
+    RAISE EXCEPTION 'CAHIORA: décision incomplète';
+  END IF;
+  IF p_decision NOT IN ('VALIDATED', 'REFUSED') THEN
+    RAISE EXCEPTION 'CAHIORA: décision inconnue';
+  END IF;
+  IF p_decision = 'REFUSED' AND length(btrim(coalesce(p_note, ''))) < 5 THEN
+    RAISE EXCEPTION 'CAHIORA: un refus exige un motif (5 caractères au moins)';
+  END IF;
+  SELECT t.group_id, t.name INTO v_group, v_name FROM tenants t WHERE t.id = p_tenant;
+  IF v_group IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: établissement introuvable';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext('cahiora-billing-document'), hashtext(v_group::text));
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  SELECT * INTO k FROM count_corrections x WHERE x.id = p_id AND x.tenant_id = p_tenant FOR UPDATE;
+  IF NOT FOUND OR k.kind <> 'EXCLUSION' THEN
+    RAISE EXCEPTION 'CAHIORA: demande d''exclusion introuvable';
+  END IF;
+  IF k.status <> 'PENDING' THEN
+    RAISE EXCEPTION 'CAHIORA: cette demande a déjà reçu une décision';
+  END IF;
+  SELECT c.kind, c."referenceDate", c."yearLabel" INTO b FROM billing_counts c WHERE c.id = k."countId";
+  v_document := billing_enrollment_document(p_tenant, k."enrollmentId", b."yearLabel");
+  IF v_document IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: cette exclusion ne touche aucun document émis : la direction de l''établissement la décide (D-G5-13 B)';
+  END IF;
+  UPDATE count_corrections
+     SET status = p_decision::"CountCorrectionStatus", "decidedByKind" = 'platform', "decidedById" = p_admin, "decidedByName" = btrim(p_admin_name),
+         "decidedAt" = v_now, "decisionNote" = nullif(btrim(coalesce(p_note, '')), '')
+   WHERE id = p_id;
+  SELECT st.matricule INTO v_matricule FROM enrollments en JOIN students st ON st.id = en."studentId" WHERE en.id = k."enrollmentId";
+  v_action := CASE WHEN p_decision = 'VALIDATED' THEN 'billing.count_exclusion_validated' ELSE 'billing.count_exclusion_refused' END;
+  INSERT INTO platform_audit_logs (id, "adminId", action, "tenantId", data, ip, "createdAt")
+    VALUES (gen_random_uuid(), p_admin, v_action, p_tenant,
+            jsonb_build_object('countKind', b.kind, 'referenceDate', b."referenceDate", 'matricule', v_matricule, 'by', btrim(p_admin_name),
+                               'decidedBy', 'platform', 'documentDate', v_document), p_ip, v_now);
+  INSERT INTO group_audit_logs (id, group_id, "actorKind", "actorId", "actorName", action, data, "createdAt")
+    VALUES (gen_random_uuid(), v_group, 'platform', p_admin, 'Super Admin Cahiora (' || btrim(p_admin_name) || ')', v_action,
+            jsonb_build_object('tenantName', v_name, 'countKind', b.kind, 'referenceDate', b."referenceDate"), v_now);
+  RETURN QUERY SELECT v_document, b."yearLabel"::text;
+END $$;
+
+-- Demandes d'exclusion du ressort du Super Admin (D-G5-13 B), tous établissements : en attente et touchant un document
+-- émis, ou déjà décidées par lui. Matricule, classe, motif de l'annulation, justification et justificatif, jamais le
+-- nom de l'élève (rôle de la plateforme seulement).
+CREATE OR REPLACE FUNCTION platform_count_exclusions() RETURNS TABLE (
+  tenant_id uuid, correction_id uuid, status text, count_id uuid, count_kind text, reference_date date, year_label text, matricule text,
+  class_name text, cancel_reason text, justification text, file_key text, file_mime text, requested_by_name text, requested_at timestamp,
+  decided_by_name text, decided_at timestamp, decision_note text, document_date date)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_tenant uuid;
+BEGIN
+  FOR v_tenant IN
+    SELECT DISTINCT l.tenant_id FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId" WHERE d.kind = 'SUBSCRIPTION' ORDER BY 1
+  LOOP
+    PERFORM set_config('app.tenant_id', v_tenant::text, true);
+    RETURN QUERY
+      SELECT x.tenant_id, x.id, x.status, x.count_id, x.count_kind, x.reference_date, x.year_label, x.matricule, x.class_name, x.cancel_reason,
+             x.justification, x.file_key, x.file_mime, x.requested_by_name, x.requested_at, x.decided_by_name, x.decided_at, x.decision_note, x.document_date
+      FROM (
+        SELECT k.tenant_id, k.id, k.status::text AS status, b.id AS count_id, b.kind::text AS count_kind, b."referenceDate" AS reference_date,
+               b."yearLabel" AS year_label, st.matricule, cl.name AS class_name, en."cancelReason" AS cancel_reason, k.justification,
+               k."fileKey" AS file_key, k."fileMime" AS file_mime, k."requestedByName" AS requested_by_name, k."requestedAt" AS requested_at,
+               k."decidedByName" AS decided_by_name, k."decidedAt" AS decided_at, k."decisionNote" AS decision_note, k."decidedByKind" AS decided_by_kind,
+               billing_enrollment_document(v_tenant, k."enrollmentId", b."yearLabel") AS document_date
+        FROM count_corrections k
+        JOIN billing_counts b ON b.id = k."countId"
+        JOIN enrollments en ON en.id = k."enrollmentId"
+        JOIN students st ON st.id = en."studentId"
+        LEFT JOIN classes cl ON cl.id = en."classId"
+        WHERE k.tenant_id = v_tenant AND k.kind = 'EXCLUSION'
+      ) x
+      WHERE x.decided_by_kind = 'platform' OR (x.status = 'PENDING' AND x.document_date IS NOT NULL)
+      ORDER BY x.requested_at DESC;
+  END LOOP;
+END $$;
+
+-- Documents d'abonnement qui touchent les comptages de l'école courante : comptage, année, date du comptage et date du
+-- document, rien d'autre (ni montant, ni client) ; l'API en tire jusqu'à quand une exclusion se demande et qui la décide.
+CREATE OR REPLACE FUNCTION current_tenant_count_documents() RETURNS TABLE (count_id uuid, year_label text, reference_date date, issue_date date)
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT l."countId", d."yearLabel", l."referenceDate", d."issueDate"
+  FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId"
+  WHERE l.tenant_id = app_current_tenant() AND d.kind = 'SUBSCRIPTION'
+  ORDER BY l."referenceDate", d."createdAt"
+$$;
+
 REVOKE ALL ON FUNCTION billing_already_billed(uuid, text), billing_year_amount(integer, integer, integer, integer, integer),
   issue_billing_document(uuid, text, text, date, date, text, uuid, jsonb, jsonb, text, uuid, text), current_tenant_sees_billing_documents(),
-  current_tenant_billing_documents() FROM PUBLIC;
+  current_tenant_billing_documents(), billing_counts_billable(uuid), billing_count_billable(uuid), billing_enrollment_document(uuid, uuid, text),
+  decide_count_exclusion_platform(uuid, uuid, text, text, uuid, text, text), platform_count_exclusions(), current_tenant_count_documents() FROM PUBLIC;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_app') THEN
-    GRANT EXECUTE ON FUNCTION current_tenant_sees_billing_documents(), current_tenant_billing_documents() TO erp_app;
+    GRANT EXECUTE ON FUNCTION current_tenant_sees_billing_documents(), current_tenant_billing_documents(), current_tenant_count_documents() TO erp_app;
   END IF;
 END $$;
 
 -- Rôle de la plateforme : droits des documents dans une fonction à part, comme ceux des lots G5a, G5g et G5b ;
--- infra/postgres/role-plateforme.sh l'appelle à chaque installation. Lecture des documents et émission par la seule
--- fonction ci-dessus ; aucune écriture directe.
+-- infra/postgres/role-plateforme.sh l'appelle à chaque installation. Lecture des documents, émission et décision des
+-- exclusions qui touchent un document par les seules fonctions ci-dessus ; aucune écriture directe.
 CREATE OR REPLACE FUNCTION grant_platform_documents_role() RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_platform') THEN
@@ -421,7 +792,8 @@ BEGIN
   END IF;
   GRANT SELECT ON billing_documents, billing_document_lines TO erp_platform;
   GRANT EXECUTE ON FUNCTION billing_already_billed(uuid, text),
-    issue_billing_document(uuid, text, text, date, date, text, uuid, jsonb, jsonb, text, uuid, text) TO erp_platform;
+    issue_billing_document(uuid, text, text, date, date, text, uuid, jsonb, jsonb, text, uuid, text), billing_counts_billable(uuid),
+    decide_count_exclusion_platform(uuid, uuid, text, text, uuid, text, text), platform_count_exclusions() TO erp_platform;
 END $$;
 
 SELECT grant_platform_documents_role();

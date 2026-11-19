@@ -20,12 +20,15 @@ import { authenticator } from 'otplib';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
-import { localDay } from '../src/common/country';
+import { localDay, money } from '../src/common/country';
 import { PrismaService } from '../src/common/prisma.service';
 import { AmountDecisions, DECISIONS, isClosed, Line } from '../src/modules/billing/amounts-rules';
+import { BillingService } from '../src/modules/billing/billing';
 import { BillingJobsService } from '../src/modules/billing/billing-jobs';
 import { addDays, frDay, lastDayOfMonth, monthsSpanned } from '../src/modules/billing/billing-rules';
 import { CountsService } from '../src/modules/billing/counts';
+import { COUNT_KIND_LABELS } from '../src/modules/billing/counts-rules';
+import { FilesService } from '../src/modules/files/files.service';
 import { BillingDocumentsService, PROVISIONAL_MENTION } from '../src/modules/billing/documents';
 import { nextLine } from '../src/modules/billing/documents-rules';
 import { PlatformDb } from '../src/modules/platform/platform';
@@ -55,6 +58,7 @@ const O = {} as School; // école indépendante sans abonnement
 const G1 = {} as School; // trois établissements d'un même groupe
 const G2 = {} as School;
 const G3 = {} as School;
+const L = {} as School; // école indépendante : exclusion avant tout document, puis au minimum
 const sa = { id: '', name: 'Super Admin documents (fictif)', email: `g5c-${stamp}@test.local`, cookie: '', secret: '' };
 
 const [ty, tm] = T.split('-').map(Number);
@@ -63,6 +67,9 @@ const R = d(-3);
 const FINAL = d(100);
 let termsId = '';
 let trialEnd = '';
+type Pupil = { studentId: string; enrollmentId: string; m: string };
+let kFirst: Pupil[] = []; // 90 élèves de K à la rentrée (le premier part le T-5)
+let kLate: Pupil[] = []; // 11 arrivées du T-5
 
 function inTenant<X>(tenantId: string, fn: (tx: Prisma.TransactionClient) => Promise<X>, client = admin) {
   return client.$transaction(async (tx) => {
@@ -118,15 +125,24 @@ async function newSchool(s: School, key: string, group: { id: string; name: stri
   if (secretariat) s.secretariat = await login(s.slug, '+2290190008002');
 }
 
-/** `n` élèves fictifs de K inscrits le jour `day` (inscription et ligne d'historique) ; renvoie leurs inscriptions. */
-async function enrol(n: number, day: string, classId: string) {
-  return inTenant(K.id, async (tx) => {
+/** Classe fictive d'un établissement (niveau et site compris). */
+function newClass(s: School) {
+  return inTenant(s.id, async (tx) => {
+    const level = await tx.level.create({ data: { tenantId: s.id, name: '6e', cycle: 'COLLEGE', position: 1 } });
+    const site = await tx.site.create({ data: { tenantId: s.id, name: 'Site fictif' } });
+    return tx.class.create({ data: { tenantId: s.id, academicYearId: s.yearId, siteId: site.id, levelId: level.id, name: '6e fictive' } });
+  });
+}
+
+/** `n` élèves fictifs d'un établissement (K par défaut) inscrits le jour `day` (inscription et ligne d'historique). */
+async function enrol(n: number, day: string, classId: string, s: School = K): Promise<Pupil[]> {
+  return inTenant(s.id, async (tx) => {
     const rows = Array.from({ length: n }, () => ({ studentId: randomUUID(), enrollmentId: randomUUID(), m: randomUUID().slice(0, 8) }));
-    await tx.student.createMany({ data: rows.map((r) => ({ id: r.studentId, tenantId: K.id, matricule: `G5C-${stamp}-${r.m}`, firstName: 'Élève', lastName: `FICTIF${r.m.toUpperCase()}` })) });
+    await tx.student.createMany({ data: rows.map((r) => ({ id: r.studentId, tenantId: s.id, matricule: `G5C-${stamp}-${r.m}`, firstName: 'Élève', lastName: `FICTIF${r.m.toUpperCase()}` })) });
     await tx.enrollment.createMany({
-      data: rows.map((r) => ({ id: r.enrollmentId, tenantId: K.id, studentId: r.studentId, classId, academicYearId: K.yearId, enrolledAt: morning(day), type: 'NEW' as const })),
+      data: rows.map((r) => ({ id: r.enrollmentId, tenantId: s.id, studentId: r.studentId, classId, academicYearId: s.yearId, enrolledAt: morning(day), type: 'NEW' as const })),
     });
-    await tx.enrollmentEvent.createMany({ data: rows.map((r) => ({ tenantId: K.id, enrollmentId: r.enrollmentId, kind: 'ENROLLED', data: { classId, type: 'NEW' }, createdAt: morning(day) })) });
+    await tx.enrollmentEvent.createMany({ data: rows.map((r) => ({ tenantId: s.id, enrollmentId: r.enrollmentId, kind: 'ENROLLED', data: { classId, type: 'NEW' }, createdAt: morning(day) })) });
     return rows;
   });
 }
@@ -153,7 +169,7 @@ async function computed(groupId: string, decisions: AmountDecisions) {
 type JsonLine = Awaited<ReturnType<typeof computed>>[number];
 
 /** Émission directe par le rôle de la plateforme, comme l'API (fonction issue_billing_document). */
-function issue(groupId: string, lines: Partial<JsonLine>[], o: { kind?: string; year?: string; due?: string | null; issueDay?: string; related?: string | null } = {}) {
+function issue(groupId: string, lines: object[], o: { kind?: string; year?: string; due?: string | null; issueDay?: string; related?: string | null } = {}) {
   const data = { mention: PROVISIONAL_MENTION, test: 'G5c' };
   return platform().$queryRaw<{ document_id: string; document_reference: string; document_total: number }[]>`
     SELECT * FROM issue_billing_document(${groupId}::uuid, ${o.kind ?? 'SUBSCRIPTION'}, 'XOF', ${o.issueDay ?? T}::date, ${o.due ?? null}::date, ${o.year ?? year.label},
@@ -182,16 +198,12 @@ beforeAll(async () => {
   await pf.post('/auth/2fa/enable', { code: await code(), setupToken: setup.body.setupToken }).expect(201);
 
   // Élèves fictifs de K : 90 à la rentrée ; l'un part le T-5, onze arrivent le T-5 (après l'essai, avant la régularisation).
-  const klass = await inTenant(K.id, async (tx) => {
-    const level = await tx.level.create({ data: { tenantId: K.id, name: '6e', cycle: 'COLLEGE', position: 1 } });
-    const site = await tx.site.create({ data: { tenantId: K.id, name: 'Site fictif' } });
-    return tx.class.create({ data: { tenantId: K.id, academicYearId: K.yearId, siteId: site.id, levelId: level.id, name: '6e fictive' } });
-  });
-  const first = await enrol(90, year.start, klass.id);
-  await enrol(11, d(-5), klass.id);
+  const klass = await newClass(K);
+  kFirst = await enrol(90, year.start, klass.id);
+  kLate = await enrol(11, d(-5), klass.id);
   await inTenant(K.id, async (tx) => {
-    await tx.enrollment.update({ where: { id: first[0].enrollmentId }, data: { status: 'WITHDRAWN', exitDate: new Date(`${d(-5)}T00:00:00Z`), exitReason: 'Départ fictif' } });
-    await tx.enrollmentEvent.create({ data: { tenantId: K.id, enrollmentId: first[0].enrollmentId, kind: 'WITHDRAWN', data: { exitDate: d(-5), reason: 'Départ fictif' }, createdAt: morning(d(-5)) } });
+    await tx.enrollment.update({ where: { id: kFirst[0].enrollmentId }, data: { status: 'WITHDRAWN', exitDate: new Date(`${d(-5)}T00:00:00Z`), exitReason: 'Départ fictif' } });
+    await tx.enrollmentEvent.create({ data: { tenantId: K.id, enrollmentId: kFirst[0].enrollmentId, kind: 'WITHDRAWN', data: { exitDate: d(-5), reason: 'Départ fictif' }, createdAt: morning(d(-5)) } });
   });
 });
 
@@ -258,7 +270,7 @@ describe('Lot G5c · documents provisoires de l’abonnement (données fictives)
 
   it('première demande, avec les propositions de Dankou : un seul document même lancé deux fois en même temps, échéance à la fin de la grâce', async () => {
     const twins = [0, 1].map(() => {
-      const s = new BillingDocumentsService(app.get(PlatformDb), app.get(PrismaService));
+      const s = new BillingDocumentsService(app.get(PlatformDb), app.get(PrismaService), app.get(FilesService), app.get(BillingService));
       s.decisions = PROPOSED;
       return s;
     });
@@ -474,5 +486,282 @@ describe('Lot G5c · documents provisoires de l’abonnement (données fictives)
     const text = JSON.stringify(await admin.groupAuditLog.findMany({ where: { groupId: K.groupId, action: 'billing.document_issued' } }));
     expect(text).not.toMatch(/FICTIF[0-9A-F]{8}/);
     expect(await admin.platformAlert.count({ where: { tenantId: K.id, kind: { startsWith: 'DOCUMENT' } } })).toBe(0);
+  });
+});
+
+/** Jour au format des messages de la base (JJ/MM/AAAA). */
+const dmy = (day: string) => day.split('-').reverse().join('/');
+const dayOf = (x: Date | null) => x?.toISOString().slice(0, 10) ?? null;
+const message = (r: request.Response) => JSON.stringify(r.body.message);
+const cancel = (s: School, p: Pupil) => as(s.direction).post(`/students/${p.studentId}/enrollment/cancel`, { reason: 'Inscription saisie en double (fictive)' });
+const exclusion = (p: Pupil) => ({ kind: 'EXCLUSION', enrollmentId: p.enrollmentId, justification: 'Élève saisi deux fois : voir le registre (fictif)' });
+const frozen = (s: School, kind: 'TRIAL_END' | 'FIRST_REGULARIZATION' | 'FINAL_REGULARIZATION') =>
+  admin.billingCount.findFirstOrThrow({ where: { tenantId: s.id, kind, stage: 'FROZEN' } });
+const billed = async (s: School) =>
+  (await platform().$queryRaw<{ billed: number }[]>`SELECT billing_already_billed(${s.id}::uuid, ${year.label}) AS billed`)[0].billed;
+const correction = (s: School, id: string) => inTenant(s.id, (tx) => tx.countCorrection.findUniqueOrThrow({ where: { id } }));
+const superAdmin = () => ({ id: sa.id, name: sa.name, ip: null });
+type Item = { enrollmentId: string };
+type Exclusion = { id: string; tenant: { id: string } };
+
+describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-13 B, D-G5-14 A ; données fictives)', () => {
+  let issued = ''; // date du dernier document de K : le relevé de la régularisation finale
+  let k1 = ''; // exclusion de K validée par le Super Admin, avec son avoir
+
+  it('D-G5-14 A et D-G5-13 B : une exclusion qui touche un document se demande jusqu’à 30 jours après lui ; seul le Super Admin la décide', async () => {
+    const docs = await docsOf(K.groupId);
+    expect(docs.map((x) => x.kind)).toEqual(['SUBSCRIPTION', 'SUBSCRIPTION', 'SUBSCRIPTION']);
+    issued = dayOf(docs[2].issueDate)!;
+    const trial = await frozen(K, 'TRIAL_END');
+    const url = `/settings/billing-counts/${trial.id}`;
+    const pupil = kFirst[1];
+    const item = async () => (await as(K.direction).get(url)).body.items.find((i: Item) => i.enrollmentId === pupil.enrollmentId);
+    // Une inscription encore active ne s'exclut pas, même sur un comptage figé.
+    expect(await item()).toMatchObject({ enrollmentStatus: 'ACTIVE', canExclude: false, documentDate: issued, decider: 'PLATFORM' });
+    expect(message(await as(K.direction).post(`${url}/corrections`, exclusion(pupil)))).toMatch(/annulez-la d'abord/);
+    expect((await cancel(K, pupil)).status).toBe(201);
+    // Comptage figé et documents émis : la demande reste possible jusqu'à 30 jours après le dernier document qui a demandé l'élève.
+    expect(await item()).toMatchObject({
+      enrollmentStatus: 'CANCELLED', exclusion: null, canExclude: true, documentDate: issued, exclusionUntil: addDays(issued, 30), decider: 'PLATFORM',
+    });
+    const r = await as(K.direction).post(`${url}/corrections`, exclusion(pupil));
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'PENDING' });
+    k1 = r.body.id;
+
+    // La direction ne la décide plus : un document émis est touché.
+    const own = await as(K.direction).post(`/settings/billing-counts/corrections/${k1}/decision`, { decision: 'VALIDATED' });
+    expect(own.status).toBe(400);
+    expect(message(own)).toMatch(/le Super Admin de Cahiora la décide \(D-G5-13 B\)/);
+    const view = (await as(K.direction).get(url)).body;
+    expect(view.corrections.find((k: { id: string }) => k.id === k1)).toMatchObject({ kind: 'EXCLUSION', status: 'PENDING', decider: 'PLATFORM', decidedByKind: null });
+    expect(await item()).toMatchObject({ exclusion: { id: k1, status: 'PENDING' }, canExclude: false });
+
+    // Le Super Admin est alerté, avec le matricule, jamais le nom de l'élève.
+    const alerts = await admin.platformAlert.findMany({ where: { tenantId: K.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' } });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].message).toBe(`Demande d'exclusion à décider : ${K.name}, inscription G5C-${stamp}-${pupil.m} déjà demandée par le document du ${dmy(issued)} (D-G5-13 B)`);
+  });
+
+  it('le Super Admin voit la demande et l’avoir qu’elle donnerait ; il décide avec son code ; l’avoir provisoire suit, sinon rien n’est inscrit', async () => {
+    const docs = await docsOf(K.groupId);
+    const last = docs[2];
+    const avoir = share(50_500) - share(50_000);
+    const list = await pf.get('/billing/exclusions');
+    expect(list.status).toBe(200);
+    expect(list.body.mention).toBe(PROVISIONAL_MENTION);
+    expect(list.body.waiting).toBeGreaterThanOrEqual(1);
+    const row = list.body.exclusions.find((x: Exclusion) => x.id === k1);
+    expect(row).toMatchObject({
+      tenant: { id: K.id, name: K.name }, currency: 'XOF', status: 'PENDING', countKind: 'TRIAL_END', referenceDate: trialEnd, yearLabel: year.label,
+      matricule: `G5C-${stamp}-${kFirst[1].m}`, className: '6e fictive', cancelReason: 'Inscription saisie en double (fictive)',
+      justification: 'Élève saisi deux fois : voir le registre (fictif)', fileUrl: null, documentDate: issued, requestDeadline: addDays(issued, 30),
+      preview: {
+        related: last.reference, state: 'READY', alreadyBilled: share(50_500), amount: avoir,
+        year: { pupils: 100, fullYear: 50_000, amount: share(50_000), minimumApplied: false, share: { months: months(), of: 11 } },
+      },
+    });
+    expect(row.requestedByName).toMatch(/DIRECTION k/);
+    // Le Super Admin ne voit jamais le nom d'un élève.
+    expect(JSON.stringify(list.body)).not.toMatch(/FICTIF[0-9A-F]{8}/);
+
+    const decide = (body: object) => pf.post(`/billing/exclusions/${k1}/decision`, body);
+    expect((await decide({ tenantId: K.id, decision: 'VALIDATED' })).status).toBe(400);
+    expect(message(await decide({ tenantId: K.id, decision: 'REFUSED', code: await code() }))).toMatch(/Un refus exige un motif/);
+    expect(message(await decide({ tenantId: O.id, decision: 'VALIDATED', code: await code() }))).toMatch(/demande d'exclusion introuvable/);
+    // Avoir refusé par la base (ici daté avant le relevé, qui est simulé plus tard dans l'année) : la décision n'est pas inscrite non plus.
+    expect(message(await decide({ tenantId: K.id, decision: 'VALIDATED', code: await code() }))).toMatch(/jamais daté avant le document auquel il est lié/);
+    expect(await correction(K, k1)).toMatchObject({ status: 'PENDING', decidedAt: null });
+    expect(await docsOf(K.groupId)).toHaveLength(3);
+
+    // Le lendemain du relevé : décision et avoir dans la même opération.
+    const done = await svc().decideExclusion(superAdmin(), k1, { tenantId: K.id, decision: 'VALIDATED', code: await code() }, at(addDays(issued, 1)));
+    expect(done).toMatchObject({ status: 'VALIDATED', message: null, credit: { total: avoir, reference: expect.stringMatching(/^PROV-[0-9A-F]{10}$/) } });
+    const credit = (await docsOf(K.groupId)).find((x) => x.kind === 'CREDIT_NOTE')!;
+    expect(credit).toMatchObject({
+      id: done.credit!.documentId, total: avoir, currency: 'XOF', dueDate: null, yearLabel: year.label, relatedDocumentId: last.id, createdByKind: 'platform',
+      createdById: sa.id, createdByName: sa.name,
+    });
+    expect(dayOf(credit.issueDate)).toBe(addDays(issued, 1));
+    expect(credit.data).toMatchObject({
+      title: `Avoir provisoire · abonnement Cahiora ${year.label}`, mention: PROVISIONAL_MENTION, client: { groupId: K.groupId, name: K.groupName },
+      establishments: [{ tenantId: K.id, name: K.name }], related: { documentId: last.id, reference: last.reference, countKind: 'FINAL_REGULARIZATION', countDate: FINAL },
+      tariff: { currency: 'XOF', pricePerPupil: 500, minimum: 40_000 }, rounded: 'FLOOR',
+    });
+    expect(credit.lines).toHaveLength(1);
+    expect(credit.lines[0]).toMatchObject({
+      tenantId: K.id, amount: avoir, countId: null, countKind: 'FINAL_REGULARIZATION', pupils: 100, pupilsChange: -1, pricePerPupil: 500, minimum: 40_000,
+      minimumApplied: false, fullYear: 50_000, shareMonths: months(), shareOf: 11, yearAmount: share(50_000), alreadyBilled: share(50_500),
+      relatedLineId: last.lines[0].id, correctionId: k1, serviceId: null,
+    });
+    expect(dayOf(credit.lines[0].referenceDate)).toBe(FINAL);
+    expect(credit.lines[0].label).toBe(`${K.name} · Avoir après exclusion d’une inscription erronée (${COUNT_KIND_LABELS.FINAL_REGULARIZATION.toLowerCase()} du ${frDay(FINAL)})`);
+    // Déjà demandé pour l'année : les documents moins l'avoir ; jamais un remboursement automatique.
+    expect(await billed(K)).toBe(share(50_000));
+    expect(await correction(K, k1)).toMatchObject({ status: 'VALIDATED', decidedByKind: 'platform', decidedById: sa.id, decidedByName: sa.name, decisionNote: null });
+    expect(message(await decide({ tenantId: K.id, decision: 'REFUSED', note: 'Changement d’avis (fictif)', code: await code() }))).toMatch(/déjà reçu une décision/);
+
+    // La direction (école indépendante) est prévenue dans l'application, avec l'avoir, et le voit avec ses documents.
+    const notes = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_exclusion_validated' } }));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ channel: 'IN_APP', title: 'Exclusion validée par Cahiora' });
+    expect(notes[0].body).toContain(`Avoir provisoire ${done.credit!.reference} de ${money(avoir, 'XOF')}`);
+    expect(notes[0].body).toContain(PROVISIONAL_MENTION);
+    const seen = (await as(K.direction).get('/settings/billing-documents')).body.documents;
+    expect(seen.find((x: { kind: string }) => x.kind === 'CREDIT_NOTE')).toMatchObject({
+      label: 'Avoir provisoire', reference: done.credit!.reference, total: avoir, relatedDocumentId: last.id, lines: [{ pupils: 100, pupilsChange: -1, amount: avoir }],
+    });
+    const trial = await frozen(K, 'TRIAL_END');
+    const view = (await as(K.direction).get(`/settings/billing-counts/${trial.id}`)).body;
+    expect(view.corrections.find((k: { id: string }) => k.id === k1)).toMatchObject({ status: 'VALIDATED', decidedByKind: 'platform', decidedByName: sa.name, decider: null });
+    expect(view.items.find((i: Item) => i.enrollmentId === kFirst[1].enrollmentId)).toMatchObject({ exclusion: { id: k1, status: 'VALIDATED' }, canExclude: false });
+    // Le comptage figé, lui, ne change jamais.
+    expect(await admin.billingCount.findUniqueOrThrow({ where: { id: trial.id } })).toMatchObject({ pupils: 90, cumulative: 90 });
+
+    // Journaux : la plateforme (avec le matricule), le groupe (sans), l'école ; la décision et l'avoir.
+    expect(await admin.platformAuditLog.count({ where: { tenantId: K.id, adminId: sa.id, action: 'billing.count_exclusion_validated' } })).toBe(1);
+    expect(await admin.platformAuditLog.count({ where: { tenantId: K.id, adminId: sa.id, action: 'billing.credit_note_issued' } })).toBe(1);
+    const group = await admin.groupAuditLog.findMany({ where: { groupId: K.groupId, action: { in: ['billing.count_exclusion_validated', 'billing.credit_note_issued'] } } });
+    expect(group.map((x) => `${x.actorKind}:${x.action}`).sort()).toEqual(['platform:billing.count_exclusion_validated', 'platform:billing.credit_note_issued']);
+    const school = await inTenant(K.id, (tx) => tx.auditLog.findMany({ where: { action: { in: ['billing.count_exclusion_validated', 'billing.credit_note_issued'] } } }));
+    expect(school.map((x) => x.action).sort()).toEqual(['billing.count_exclusion_validated', 'billing.credit_note_issued']);
+    expect(JSON.stringify(await admin.groupAuditLog.findMany({ where: { groupId: K.groupId } }))).not.toMatch(/FICTIF[0-9A-F]{8}|G5C-/);
+  });
+
+  it('la base refait le calcul de l’avoir : élèves, écart, montant, document touché, prix, exclusion, date ; un seul avoir par exclusion', async () => {
+    const trial = await frozen(K, 'TRIAL_END');
+    const pupil = kFirst[2];
+    expect((await cancel(K, pupil)).status).toBe(201);
+    const r = await as(K.direction).post(`/settings/billing-counts/${trial.id}/corrections`, exclusion(pupil));
+    expect(r.status).toBe(201);
+    const k2: string = r.body.id;
+    const docs = await docsOf(K.groupId);
+    const [first, , last] = docs;
+    const day = addDays(issued, 2);
+    const good = {
+      tenantId: K.id, label: 'Avoir fictif', amount: share(50_000) - share(49_500), pupils: 99, pupilsChange: -1, pricePerPupil: 500, minimum: 40_000,
+      minimumApplied: false, fullYear: 49_500, shareMonths: months(), shareOf: 11, yearAmount: share(49_500), alreadyBilled: share(50_000),
+      relatedLineId: last.lines[0].id, correctionId: k2,
+    };
+    const credit = (lines: object[], o: Parameters<typeof issue>[2] = {}) => issue(K.groupId, lines, { kind: 'CREDIT_NOTE', related: last.id, issueDay: day, ...o });
+    const refused = (lines: object[], pattern: RegExp, o: Parameters<typeof issue>[2] = {}) => expect(credit(lines, o)).rejects.toThrow(pattern);
+    // Exclusion encore en attente : pas d'avoir.
+    await refused([good], /exclusion de cet établissement validée par le Super Admin après ce document attendue/);
+    // La direction ne peut pas décider, la base non plus par son rôle ; le Super Admin, par la fonction de la plateforme.
+    await expect(inTenant(K.id, (tx) => tx.$queryRaw`SELECT * FROM decide_count_exclusion_platform(${K.id}::uuid, ${k2}::uuid, 'VALIDATED', NULL, ${sa.id}::uuid, ${sa.name}, NULL)`, appDb))
+      .rejects.toThrow(/permission denied/);
+    await expect(platform().$queryRaw`SELECT * FROM decide_count_exclusion_platform(${K.id}::uuid, ${k2}::uuid, 'MAYBE', NULL, ${sa.id}::uuid, ${sa.name}, NULL)`)
+      .rejects.toThrow(/décision inconnue/);
+    const [decided] = await platform().$queryRaw<{ document_date: Date; year_label: string }[]>`
+      SELECT * FROM decide_count_exclusion_platform(${K.id}::uuid, ${k2}::uuid, 'VALIDATED', NULL, ${sa.id}::uuid, ${sa.name}, NULL)`;
+    expect({ date: dayOf(decided.document_date), year: decided.year_label }).toEqual({ date: issued, year: year.label });
+
+    await refused([{ ...good, pupils: 100, pupilsChange: 0, fullYear: 50_000, yearAmount: share(50_000), amount: 1 }], /élèves facturables après l'exclusion faux/);
+    await refused([{ ...good, pupilsChange: -2 }], /écart d'élèves faux/);
+    await refused([{ ...good, amount: good.amount + 1 }], /montant de l'avoir faux/);
+    await refused([{ ...good, amount: 0 }], /un avoir vient d'une exclusion validée et touche une ligne d'abonnement/);
+    await refused([{ ...good, countId: last.lines[0].countId }], /un avoir vient d'une exclusion validée et touche une ligne d'abonnement/);
+    await refused([{ ...good, alreadyBilled: share(50_500) }], /déjà demandé faux/);
+    await refused([{ ...good, relatedLineId: first.lines[0].id }], /ligne touchée inconnue/);
+    await refused([{ ...good, relatedLineId: first.lines[0].id }], /un avoir touche le dernier document d'abonnement de l'établissement pour l'année/, { related: first.id });
+    await refused([{ ...good, pricePerPupil: 600, fullYear: 59_400, yearAmount: share(59_400) }], /prix, minimum et part de la ligne touchée attendus/);
+    await refused([{ ...good, correctionId: k1 }], /cette exclusion a déjà son avoir/);
+    await refused([good, { ...good }], /un avoir a une seule ligne/);
+    await refused([good], /jamais daté avant le document auquel il est lié/, { issueDay: T });
+    await refused([good], /ce document ne peut pas être lié/, { related: (await docsOf(K.groupId)).find((x) => x.kind === 'CREDIT_NOTE')!.id });
+
+    const [ok] = await credit([good]);
+    expect(ok.document_total).toBe(share(50_000) - share(49_500));
+    expect(await billed(K)).toBe(share(49_500));
+    await refused([{ ...good, alreadyBilled: share(49_500), pupilsChange: 0 }], /cette exclusion a déjà son avoir/);
+    expect((await docsOf(K.groupId)).filter((x) => x.kind === 'CREDIT_NOTE').map((x) => x.total)).toEqual([share(50_500) - share(50_000), ok.document_total]);
+  });
+
+  it('D-G5-14 A : plus de demande 30 jours après le document ; un refus du Super Admin exige un motif et prévient la direction', async () => {
+    const trial = await frozen(K, 'TRIAL_END');
+    const pupil = kFirst[3];
+    expect((await cancel(K, pupil)).status).toBe(201);
+    const ask = (today: string, kind = 'EXCLUSION', departure: string | null = null, p = pupil) => inTenant(K.id, (tx) => tx.$queryRaw<{ id: string }[]>`
+      SELECT request_count_correction(${trial.id}::uuid, ${kind}, ${p.enrollmentId}::uuid, ${departure}::date, 'Élève saisi deux fois (fictif)', NULL, NULL,
+        NULL::integer, ${K.directionId}::uuid, 'Fictif DIRECTION k', NULL, ${today}::date) AS id`, appDb);
+    await expect(ask(addDays(issued, 31))).rejects.toThrow(`délai passé : une exclusion se demande au plus tard 30 jours après le document concerné, émis le ${dmy(issued)} (D-G5-14 A)`);
+    const [{ id: k3 }] = await ask(addDays(issued, 30));
+    // Un comptage figé ne reçoit plus de date de départ ; une inscription qu'il ne compte pas ne s'y exclut pas.
+    await expect(ask(T, 'DEPARTURE_DATE', d(-5), kFirst[0])).rejects.toThrow(/la vérification de ce comptage est terminée : seule une exclusion se demande encore \(D-G5-14 A\)/);
+    expect((await cancel(K, kLate[0])).status).toBe(201);
+    expect(message(await as(K.direction).post(`/settings/billing-counts/${trial.id}/corrections`, exclusion(kLate[0])))).toMatch(/n'est pas comptée dans ce comptage figé/);
+
+    const decide = (body: object) => pf.post(`/billing/exclusions/${k3}/decision`, body);
+    expect(message(await decide({ tenantId: K.id, decision: 'REFUSED', note: 'abc', code: await code() }))).toMatch(/Un refus exige un motif/);
+    const note = 'Les deux dossiers sont deux élèves différents (fictif)';
+    const no = await decide({ tenantId: K.id, decision: 'REFUSED', note, code: await code() });
+    expect(no.status).toBe(201);
+    expect(no.body).toEqual({ status: 'REFUSED', credit: null, message: null });
+    expect(await correction(K, k3)).toMatchObject({ status: 'REFUSED', decidedByKind: 'platform', decisionNote: note });
+    expect(message(await decide({ tenantId: K.id, decision: 'VALIDATED', code: await code() }))).toMatch(/déjà reçu une décision/);
+    const notes = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_exclusion_refused' } }));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ title: 'Exclusion refusée par Cahiora', body: `Le Super Admin de Cahiora a refusé l’exclusion demandée : ${note}` });
+    // Un refus n'émet rien.
+    expect((await docsOf(K.groupId)).filter((x) => x.kind === 'CREDIT_NOTE')).toHaveLength(2);
+  });
+
+  it('avant tout document, la direction décide, même sur un comptage figé ; le document suit les élèves facturables ; au minimum, aucun avoir', async () => {
+    await newSchool(L, 'l', null);
+    const pupils = await enrol(3, year.start, (await newClass(L)).id, L);
+    expect((await pf.post(`/billing/establishments/${L.id}/trial`, { startDate: d(-20), code: await code() })).status).toBe(201);
+    await app.get(BillingJobsService).runDue(at(d(-6)));
+    await app.get(CountsService).runDue(at(d(-6)));
+    const trial = await frozen(L, 'TRIAL_END');
+    expect(trial).toMatchObject({ pupils: 3, cumulative: 3 });
+    const url = `/settings/billing-counts/${trial.id}`;
+
+    // Aucun document émis : sans limite de date, la direction décide (D-G5-13 B) ; aucune alerte de la plateforme.
+    expect((await cancel(L, pupils[0])).status).toBe(201);
+    expect((await as(L.direction).get(url)).body.items.find((i: Item) => i.enrollmentId === pupils[0].enrollmentId)).toMatchObject({
+      canExclude: true, documentDate: null, exclusionUntil: null, decider: 'SCHOOL',
+    });
+    const r = await as(L.direction).post(`${url}/corrections`, exclusion(pupils[0]));
+    expect(r.status).toBe(201);
+    expect((await as(L.direction).get(url)).body.corrections.find((k: { id: string }) => k.id === r.body.id)).toMatchObject({ status: 'PENDING', decider: 'SCHOOL' });
+    expect(await admin.platformAlert.count({ where: { tenantId: L.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' } })).toBe(0);
+    expect(message(await pf.post(`/billing/exclusions/${r.body.id}/decision`, { tenantId: L.id, decision: 'VALIDATED', code: await code() })))
+      .toMatch(/ne touche aucun document émis : la direction de l'établissement la décide \(D-G5-13 B\)/);
+    expect((await as(L.direction).post(`/settings/billing-counts/corrections/${r.body.id}/decision`, { decision: 'VALIDATED' })).body).toEqual({ status: 'VALIDATED' });
+    expect(await correction(L, r.body.id)).toMatchObject({ status: 'VALIDATED', decidedByKind: 'school' });
+    // Élèves facturables du comptage figé : l'exclusion validée est retirée ; le comptage, lui, ne change pas.
+    expect(await platform().$queryRaw`SELECT * FROM billing_counts_billable(${L.id}::uuid)`).toEqual([{ count_id: trial.id, billable: 2 }]);
+    expect(await admin.billingCount.findUniqueOrThrow({ where: { id: trial.id } })).toMatchObject({ pupils: 3, cumulative: 3 });
+
+    // L'acceptation des conditions émet le premier document (propositions de Dankou) : deux élèves, au minimum annuel.
+    expect((await as(L.direction).post('/settings/subscription/accept', { termsId, accepted: true })).status).toBe(201);
+    const [doc] = await docsOf(L.groupId);
+    expect(doc.lines[0]).toMatchObject({ countId: trial.id, pupils: 2, pupilsChange: 2, minimumApplied: true, fullYear: 40_000, yearAmount: share(40_000), amount: share(40_000) });
+    const issuedL = dayOf(doc.issueDate)!;
+
+    // Après le document : le Super Admin décide ; au minimum, la décision s'inscrit sans avoir.
+    expect((await cancel(L, pupils[1])).status).toBe(201);
+    const r2 = await as(L.direction).post(`${url}/corrections`, exclusion(pupils[1]));
+    expect(r2.status).toBe(201);
+    expect(await admin.platformAlert.count({ where: { tenantId: L.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' } })).toBe(1);
+    const row = (await pf.get('/billing/exclusions')).body.exclusions.find((x: Exclusion) => x.id === r2.body.id);
+    expect(row).toMatchObject({
+      status: 'PENDING', documentDate: issuedL, requestDeadline: addDays(issuedL, 30),
+      preview: { related: doc.reference, state: 'NONE', amount: 0, message: 'Au minimum annuel, rien ne change : aucun avoir', year: { pupils: 1, minimumApplied: true } },
+    });
+    const done = await pf.post(`/billing/exclusions/${r2.body.id}/decision`, { tenantId: L.id, decision: 'VALIDATED', code: await code() });
+    expect(done.status).toBe(201);
+    expect(done.body).toEqual({ status: 'VALIDATED', credit: null, message: 'Au minimum annuel, rien ne change : aucun avoir' });
+    expect((await docsOf(L.groupId)).map((x) => x.kind)).toEqual(['SUBSCRIPTION']);
+    expect(await billed(L)).toBe(share(40_000));
+    expect(await platform().$queryRaw`SELECT * FROM billing_counts_billable(${L.id}::uuid)`).toEqual([{ count_id: trial.id, billable: 1 }]);
+    const notes = await inTenant(L.id, (tx) => tx.notification.findMany({ where: { userId: L.directionId, kind: 'billing.count_exclusion_validated' } }));
+    expect(notes.map((x) => x.body)).toEqual(['Le Super Admin de Cahiora a validé l’exclusion demandée. Au minimum annuel, rien ne change : aucun avoir.']);
+
+    // Liste du Super Admin : les décisions qui lui reviennent, jamais celles de la direction.
+    const mineOnly = (await pf.get('/billing/exclusions')).body.exclusions.filter((x: Exclusion) => [K.id, L.id].includes(x.tenant.id));
+    expect(mineOnly.map((x: Exclusion & { status: string }) => `${x.tenant.id === K.id ? 'K' : 'L'}:${x.status}`).sort()).toEqual([
+      'K:REFUSED', 'K:VALIDATED', 'K:VALIDATED', 'L:VALIDATED',
+    ]);
   });
 });
