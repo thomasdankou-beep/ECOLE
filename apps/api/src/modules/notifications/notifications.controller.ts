@@ -1,11 +1,13 @@
 import { BadRequestException, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Actor, Can, CurrentActor } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor } from '../../common/auth';
 import { PrismaService } from '../../common/prisma.service';
 import { NotificationsService } from './notifications.service';
 
 @ApiTags('Notifications')
 @ApiBearerAuth()
+// Lot G5d-1 : marquer une notification comme lue reste possible pendant l'accès limité.
+@AllowedWhenLimited()
 @Controller('notifications')
 export class NotificationsController {
   constructor(private db: PrismaService, private notifications: NotificationsService) {}

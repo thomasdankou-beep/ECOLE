@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Header, Param, ParseUUIDPipe, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Actor, Can, CurrentActor, WholeSchool } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, WholeSchool } from '../../common/auth';
 import { BatchInvoiceDto, CancelReceiptDto, CashClosingDto, DeskPaymentDto, FeeGridDto, FeeTypeDto, InvoiceDto, RemindDto, CancelDecisionDto } from './finance.dto';
 import { FinanceService } from './finance.service';
 
@@ -9,6 +9,8 @@ const FEE_GRID_SHARED = 'La grille des frais est commune à tous les sites : seu
 
 @ApiTags('Finances')
 @ApiBearerAuth()
+// Lot G5d-1 (D-G5-30 A) : pendant l'accès limité, la caisse reste ouverte (paiements au guichet, annulation d'un reçu et
+// sa décision, clôture de caisse, relance des impayés) ; les frais et les factures des familles ne se saisissent plus.
 @Controller('finance')
 export class FinanceController {
   constructor(private s: FinanceService) {}
@@ -43,7 +45,7 @@ export class FinanceController {
   @Post('invoices/:id/cancel') @Can('finance.write')
   cancelInvoice(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelReceiptDto) { return this.s.cancelInvoice(a, id, dto.reason); }
 
-  @Post('payments/desk') @Can('finance.write')
+  @Post('payments/desk') @AllowedWhenLimited() @Can('finance.write')
   desk(@CurrentActor() a: Actor, @Body() dto: DeskPaymentDto) { return this.s.deskPayment(a, dto); }
 
   @Get('payments') @Can('finance.write', 'dashboard.read')
@@ -60,21 +62,21 @@ export class FinanceController {
   receipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.receipt(a, id); }
 
   /** SEC-015 : le comptable demande, la direction valide ou refuse. */
-  @Post('receipts/:id/cancel') @Can('finance.write')
+  @Post('receipts/:id/cancel') @AllowedWhenLimited() @Can('finance.write')
   cancelReceipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelReceiptDto) { return this.s.requestReceiptCancel(a, id, dto.reason); }
 
-  @Post('receipts/:id/cancel/decision') @Can('finance.validate')
+  @Post('receipts/:id/cancel/decision') @AllowedWhenLimited() @Can('finance.validate')
   decideCancel(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CancelDecisionDto) { return this.s.decideReceiptCancel(a, id, dto.approve, dto.comment); }
 
   @Get('unpaid') @Can('finance.write', 'dashboard.read')
   unpaid(@CurrentActor() a: Actor, @Query('classId') classId?: string) { return this.s.unpaid(a, classId); }
 
-  @Post('reminders') @Can('finance.write')
+  @Post('reminders') @AllowedWhenLimited() @Can('finance.write')
   remind(@CurrentActor() a: Actor, @Body() dto: RemindDto) { return this.s.remind(a, dto); }
 
   @Get('cash-closings') @Can('finance.write', 'dashboard.read')
   closings(@CurrentActor() a: Actor) { return this.s.cashClosings(a); }
 
-  @Post('cash-closings') @Can('finance.write')
+  @Post('cash-closings') @AllowedWhenLimited() @Can('finance.write')
   close(@CurrentActor() a: Actor, @Body() dto: CashClosingDto) { return this.s.closeCash(a, dto); }
 }

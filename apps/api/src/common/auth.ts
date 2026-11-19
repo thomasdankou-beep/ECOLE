@@ -11,6 +11,7 @@ import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { RoleCode } from '@prisma/client';
 import { config } from '../config';
+import { LIMITED_REFUSAL } from '../modules/billing/access-rules';
 import { can, Permission } from './permissions';
 import { PrismaService } from './prisma.service';
 import { AuditService } from './audit.service';
@@ -24,6 +25,19 @@ const SESSION_CACHE_MS = 30_000;
 const DENIED_WINDOW_MS = 10 * 60_000;
 const deniedSeen = new Map<string, number>();
 const sessionCache = new Map<string, { ok: boolean; until: number; userId: string; tenantId: string; slug?: string; domain?: string | null; pendingPassword?: boolean }>();
+
+/**
+ * Accès limité d'un établissement (lot G5d-1, D-G5-30 A) : abonnement au statut « Accès limité », lu par la fonction de
+ * l'école et gardé 30 secondes. La tâche planifiée et le Super Admin l'effacent dès qu'ils changent un abonnement.
+ */
+const ACCESS_CACHE_MS = 30_000;
+const accessCache = new Map<string, { limited: boolean; until: number }>();
+const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+export function forgetAccess(tenantId?: string) {
+  if (tenantId) accessCache.delete(tenantId);
+  else accessCache.clear();
+}
 
 /** Audience des jetons d'accès d'école (SEC-012) : un jeton Super Admin ou de double authentification n'est jamais accepté ici. */
 export const SCHOOL_AUDIENCE = 'school';
@@ -104,6 +118,16 @@ export const WHOLE_SCHOOL = 'wholeSchool';
 export const WholeSchool = (message = 'Ce réglage est commun à tous les sites : seul un compte de tous les sites peut le modifier') =>
   SetMetadata(WHOLE_SCHOOL, message);
 
+/**
+ * Route encore ouverte aux écritures pendant l'accès limité d'un établissement (lot G5d-1, D-G5-30 A) : sécurité des
+ * comptes, caisse, impression, régularisation. Toute autre écriture d'une école limitée est refusée ; une lecture reste
+ * toujours possible et rien n'est supprimé. Avec un prédicat, la route ne s'ouvre qu'aux demandes qu'il accepte
+ * (désactiver un compte, par exemple).
+ */
+export const LIMITED_OK = 'limitedAccessOk';
+export type LimitedRule = true | ((req: { body?: unknown }) => boolean);
+export const AllowedWhenLimited = (rule: LimitedRule = true) => SetMetadata(LIMITED_OK, rule);
+
 export const CurrentActor = createParamDecorator((_: unknown, ctx: ExecutionContext): Actor => {
   return ctx.switchToHttp().getRequest().actor;
 });
@@ -127,6 +151,17 @@ export class AuthGuard implements CanActivate {
     await this.db
       .forTenant(who.tenantId, (tx) => this.audit.log(tx, { ...who, ip: req.ip }, 'access.denied', 'Route', null, { route, reason, role }))
       .catch(() => undefined);
+  }
+
+  /** Établissement en accès limité (lot G5d-1) : lu par la fonction de l'école, gardé 30 secondes. */
+  private async limited(tenantId: string) {
+    const hit = accessCache.get(tenantId);
+    if (hit && hit.until > Date.now()) return hit.limited;
+    const rows = await this.db.forTenant(tenantId, (tx) => tx.$queryRaw<{ status: string }[]>`SELECT status FROM current_tenant_subscription_access()`);
+    const limited = rows[0]?.status === 'LIMITED';
+    if (accessCache.size > 10_000) accessCache.clear();
+    accessCache.set(tenantId, { limited, until: Date.now() + ACCESS_CACHE_MS });
+    return limited;
   }
 
   private async sessionValid(p: AccessTokenPayload) {
@@ -206,6 +241,16 @@ export class AuthGuard implements CanActivate {
     if (wholeSchool && actor.siteIds.length) {
       await this.denied(req, actor, 'réglage commun à tous les sites (GRP-002)', actor.role);
       throw new ForbiddenException(wholeSchool);
+    }
+    // Lot G5d-1 (D-G5-30 A) : abonnement non régularisé, accès limité. Les lectures restent ouvertes ; une écriture
+    // seulement sur les routes ouvertes pendant l'accès limité.
+    if (!READ_METHODS.has(req.method)) {
+      const rule = this.reflector.getAllAndOverride<LimitedRule | undefined>(LIMITED_OK, handlers);
+      const open = rule === true || (typeof rule === 'function' && rule(req));
+      if (!open && (await this.limited(actor.tenantId))) {
+        await this.denied(req, actor, 'accès limité : abonnement non régularisé (D-G5-30 A)', actor.role);
+        throw new ForbiddenException(actor.role === 'PARENT' || actor.role === 'ELEVE' ? LIMITED_REFUSAL.family : LIMITED_REFUSAL.staff);
+      }
     }
     return true;
   }

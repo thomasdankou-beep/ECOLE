@@ -185,14 +185,18 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
       ['TRIAL_OPENED', null, 'TRIAL', 'platform'], ['TRIAL_ENDED', 'TRIAL', 'AWAITING_ACCEPTANCE', 'system'],
     ]);
     expect(await admin.platformAlert.count({ where: { tenantId: S.A.id, kind: 'TRIAL_ENDED' } })).toBe(1);
-    expect(await admin.billingJob.count({ where: { tenantId: S.A.id } })).toBe(1);
+    // Lot G5d-1 (D-G5-30 A) : le rappel du dernier jour de l'essai est parti la veille, puis la fin de l'essai.
+    expect(await admin.billingJob.count({ where: { tenantId: S.A.id } })).toBe(2);
     const notes = await notificationsOf(S.A.id);
-    expect(notes.map((n) => [n.kind, n.channel, n.userId])).toEqual([['billing.trial_ended', 'IN_APP', S.A.directionId]]);
-    expect(notes[0].body).toMatch(/Paramètres › Abonnement Cahiora/);
+    expect(notes.map((n) => [n.kind, n.channel, n.userId])).toEqual([['billing.trial_reminder', 'IN_APP', S.A.directionId], ['billing.trial_ended', 'IN_APP', S.A.directionId]]);
+    expect(notes[1].body).toMatch(/Paramètres › Abonnement Cahiora/);
     expect(await inTenant(S.A.id, (tx) => tx.user.count())).toBe(users);
     expect(await schoolJournal(S.A.id, 'billing.trial_ended')).toHaveLength(1);
     // Un pilote ne s'ouvre pas sur un abonnement qui attend l'acceptation.
     expect((await pf.post(`/billing/establishments/${S.A.id}/pilot`, { startDate: today, reason: 'Essai de conversion refusée', code: await code() })).status).toBe(409);
+    // Lot G5d-1 : les passages simulés des tests suivants vont des mois plus loin ; la demande de régularisation de la
+    // direction retient la limitation (D-G5-42 A), et A reste en attente d'acceptation pour la suite de ce fichier.
+    expect((await school(S.A.direction).post('/settings/subscription/regularization-requests', { message: 'Demande fictive (test)' })).status).toBe(201);
   });
 
   it('Tests 21 et 22 : école pilote, N mois gratuits depuis l’activation saisie, alertes à 30 et 7 jours puis fin, chacune une seule fois', async () => {
@@ -446,7 +450,8 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
     await refused(`DELETE FROM platform_alerts WHERE tenant_id = '${A}'`);
     await refused(`UPDATE platform_alerts SET message = 'X' WHERE tenant_id = '${A}'`);
     for (const t of TABLES) await refused(`TRUNCATE ${t} CASCADE`);
-    expect(await admin.subscriptionEvent.count({ where: { tenantId: A } })).toBe(3);
+    // Ouverture, fin de l'essai, demande de régularisation (lot G5d-1) et acceptation.
+    expect(await admin.subscriptionEvent.count({ where: { tenantId: A } })).toBe(4);
     // Seule la lecture d'une alerte se note, une fois.
     const alert = await admin.platformAlert.findFirstOrThrow({ where: { tenantId: A } });
     expect((await pf.post(`/billing/alerts/${alert.id}/read`)).body).toEqual({ ok: true });

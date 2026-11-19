@@ -138,6 +138,9 @@ describe('Documents G5c : prochain document d’un établissement', () => {
   it('échéance de la première demande : dernier jour de grâce (D-G5-30 A, 15 jours), ou le jour du document s’il vient après', () => {
     expect(firstDueDate('2026-11-18', '2026-11-19')).toBe('2026-12-03');
     expect(firstDueDate('2026-11-18', '2026-12-10')).toBe('2026-12-10');
+    // Lot G5d-1 : le délai fixé dans l'abonnement à la fin de la gratuité compte quand il est connu.
+    expect(firstDueDate('2026-11-18', '2026-11-19', '2026-12-08')).toBe('2026-12-08');
+    expect(firstDueDate('2026-11-18', '2026-12-10', '2026-12-08')).toBe('2026-12-10');
   });
 });
 

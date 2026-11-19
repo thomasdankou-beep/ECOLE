@@ -2557,7 +2557,8 @@ describe("Lot G0 · GRP-001 : une direction couvre toujours tout l'établissemen
     const me = await g0As(limited).get('/auth/me');
     expect(me.status).toBe(200);
     expect(me.body.user.id).toBe(directionId);
-    expect(Object.keys(me.body).sort()).toEqual(['children', 'self', 'sites', 'tenant', 'user', 'year']);
+    // Lot G5d-1 : « access » porte l'accès selon l'abonnement de l'établissement (bandeau), rien d'un autre compte.
+    expect(Object.keys(me.body).sort()).toEqual(['access', 'children', 'self', 'sites', 'tenant', 'user', 'year']);
     const sessions = await g0As(limited).get('/auth/sessions');
     expect(sessions.status).toBe(200);
     const own = await inTenant('saint-kisito', (tx) => tx.session.findMany({ where: { userId: directionId }, select: { id: true } }));

@@ -4,7 +4,7 @@ import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiBearerAuth, ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
-import { Actor, Can, CurrentActor, Public } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, Public } from '../../common/auth';
 import {
   AcademicYearDto, AcademicYearUpdateDto, AssignmentDto, BulkCoefficientDto, ClassDto, ClassSubjectDto, LevelDto, LevelUpdateDto, RoomDto, RoomUpdateDto,
   SiteDto, StaffDto, StaffUpdateDto, SubjectDto, SubjectUpdateDto, TenantSettingsDto, TrackDto, TrackUpdateDto,
@@ -141,11 +141,18 @@ export class SettingsController {
   @Post('staff') @Can('users.manage')
   createStaff(@CurrentActor() a: Actor, @Body() dto: StaffDto) { return this.s.createStaff(a, dto); }
 
-  @Patch('staff/:id') @Can('users.manage')
+  // Lot G5d-1 : pendant l'accès limité, désactiver un compte du personnel reste possible (sécurité), rien d'autre.
+  @Patch('staff/:id') @AllowedWhenLimited(onlyDeactivation) @Can('users.manage')
   updateStaff(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: StaffUpdateDto) { return this.s.updateStaff(a, id, dto); }
 
-  @Post('users/:id/reset-password') @Can('users.manage')
+  @Post('users/:id/reset-password') @AllowedWhenLimited() @Can('users.manage')
   resetPassword(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.resetPassword(a, id); }
+}
+
+/** Seule demande ouverte pendant l'accès limité sur une fiche du personnel : la désactivation du compte, rien d'autre. */
+function onlyDeactivation(req: { body?: unknown }) {
+  const b = req.body as Record<string, unknown> | undefined;
+  return !!b && typeof b === 'object' && Object.keys(b).length === 1 && b.active === false;
 }
 
 function imageKind(kind: string) {

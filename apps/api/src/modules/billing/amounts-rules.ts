@@ -269,12 +269,14 @@ export const GRACE_DAYS = 15;
 /**
  * Échéance du premier document, celui de la fin de la gratuité : le dernier jour de grâce (D-G5-30 A). Un document émis
  * plus tard (conditions acceptées après la grâce) est à régler dès son émission. Les compléments n'ont pas d'échéance
- * décidée : null.
+ * décidée : null. Depuis le lot G5d-1, le délai de grâce est fixé dans l'abonnement à la fin de la gratuité (paramètre
+ * daté) : c'est lui qui compte quand il est connu, 15 jours sinon.
  */
-export function firstDueDate(lastFreeDay: string, issueDay: string) {
+export function firstDueDate(lastFreeDay: string, issueDay: string, graceEnd: string | null = null) {
   day('Dernier jour gratuit', lastFreeDay);
   day('Date du document', issueDay);
-  const end = addDays(lastFreeDay, GRACE_DAYS);
+  if (graceEnd) day('Fin du délai de grâce', graceEnd);
+  const end = graceEnd ?? addDays(lastFreeDay, GRACE_DAYS);
   return end < issueDay ? issueDay : end;
 }
 

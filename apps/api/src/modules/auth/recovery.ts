@@ -4,7 +4,7 @@ import { Throttle } from '@nestjs/throttler';
 import { Prisma, TwoFactorRecoveryRequest } from '@prisma/client';
 import { IsIn, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { config } from '../../config';
-import { Actor, Can, CurrentActor, forgetSessions } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, forgetSessions } from '../../common/auth';
 import { PrismaService } from '../../common/prisma.service';
 import { generateActivationCode } from './recovery-codes';
 
@@ -197,6 +197,8 @@ export class RecoveryService {
 
 @ApiTags('Récupération des comptes')
 @ApiBearerAuth()
+// Lot G5d-1 : sécurité des comptes, ouverte pendant l'accès limité.
+@AllowedWhenLimited()
 @Controller('recovery-requests')
 export class RecoveryController {
   constructor(private s: RecoveryService) {}
