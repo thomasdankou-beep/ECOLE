@@ -16,5 +16,6 @@ SELECT 'SELECT grant_platform_role()' WHERE to_regproc('grant_platform_role') IS
 SELECT 'SELECT grant_platform_billing_role()' WHERE to_regproc('grant_platform_billing_role') IS NOT NULL \gexec
 SELECT 'SELECT grant_platform_services_role()' WHERE to_regproc('grant_platform_services_role') IS NOT NULL \gexec
 SELECT 'SELECT grant_platform_counts_role()' WHERE to_regproc('grant_platform_counts_role') IS NOT NULL \gexec
+SELECT 'SELECT grant_platform_documents_role()' WHERE to_regproc('grant_platform_documents_role') IS NOT NULL \gexec
 SQL
 echo "Rôle erp_platform prêt."

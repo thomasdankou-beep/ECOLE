@@ -19,18 +19,19 @@ import { COUNT_KINDS, CountKind } from './counts-rules';
  *   automatique ; D-G5-14 A : une telle exclusion se demande au plus tard 30 jours après le document concerné.
  *
  * Ce qui attend encore une réponse reste fermé : le calcul répond « en attente de la décision » au lieu de choisir à la
- * place de Dankou (D-G5-4, D-G5-29, D-G5-31, arrondi d'une part, tarif changé en cours d'année). Montants en unités
- * entières de la monnaie de l'établissement (francs CFA).
+ * place de Dankou (D-G5-4, D-G5-29, D-G5-31, D-G5-32, arrondi d'une part, tarif changé en cours d'année). Montants en
+ * unités entières de la monnaie de l'établissement (francs CFA).
  */
 
 // ---------------------------------------------------------------- Décisions encore ouvertes
 
-export type OpenDecision = 'D-G5-4' | 'D-G5-29' | 'D-G5-31' | 'ARRONDI' | 'TARIF';
+export type OpenDecision = 'D-G5-4' | 'D-G5-29' | 'D-G5-31' | 'D-G5-32' | 'ARRONDI' | 'TARIF';
 
 export const OPEN_DECISIONS: Record<OpenDecision, string> = {
   'D-G5-4': 'décision D-G5-4 (comptage initial de la première année)',
   'D-G5-29': 'décision D-G5-29 (première année d’un établissement)',
   'D-G5-31': 'décision D-G5-31 (document d’un groupe dont les établissements sont facturés à des dates différentes)',
+  'D-G5-32': 'décision D-G5-32 (élève transféré entre deux établissements du même groupe)',
   ARRONDI: 'décision sur l’arrondi d’une part au prorata',
   TARIF: 'décision sur un tarif changé en cours d’année',
 };
@@ -48,10 +49,13 @@ function close(decision: OpenDecision, detail: string): Closed {
   return { closed: true, decision, message: `En attente de la ${OPEN_DECISIONS[decision]} : ${detail}` };
 }
 
+/** Calcul fermé par une décision encore ouverte, avec le détail du cas (documents-rules). */
+export const pendingDecision = close;
+
 /**
  * Réponses de Dankou qui ouvrent un calcul fermé ; null tant qu'il n'a pas répondu. Seules y figurent les possibilités
- * déjà chiffrées dans ses documents. D-G5-4, le point 1 de D-G5-29 et D-G5-31 n'ont pas de réglage : ils restent fermés
- * jusqu'à sa réponse, qui sera alors écrite et essayée.
+ * déjà chiffrées dans ses documents. D-G5-4, le point 1 de D-G5-29, D-G5-31 et D-G5-32 n'ont pas de réglage : ils restent
+ * fermés jusqu'à sa réponse, qui sera alors écrite et essayée.
  */
 export interface AmountDecisions {
   /** D-G5-29, point 3 : P1 divise par les mois de l'année scolaire de l'établissement, ou toujours par 12 (variante). */
@@ -193,6 +197,11 @@ export interface LineInput {
   firstPaidDay: string | null;
   /** Déjà demandé pour cet établissement et cette année : documents émis, moins les avoirs validés. */
   alreadyBilled: number;
+  /**
+   * Part retenue par le premier document de la première année : les arrivées suivantes gardent la même part (D-G5-3 A),
+   * même si les dates de l'année ont changé depuis. Absente pour le premier document.
+   */
+  keptShare?: Share | null;
 }
 
 export interface Line extends YearAmount {
@@ -230,10 +239,13 @@ export function billingLine(input: LineInput, decisions: AmountDecisions): Line 
     if (input.kind === 'INITIAL') {
       return close('D-G5-4', `la période gratuite a fini avant le comptage initial du ${frDay(input.date)}`);
     }
-    if (!decisions.firstYearDivisor) {
+    if (input.keptShare) {
+      share = input.keptShare;
+    } else if (!decisions.firstYearDivisor) {
       return close('D-G5-29', 'mois de l’année scolaire ou 12 mois pour la part de la première année');
+    } else {
+      share = firstYearShare(input.firstPaidDay, input.year, decisions.firstYearDivisor);
     }
-    share = firstYearShare(input.firstPaidDay, input.year, decisions.firstYearDivisor);
   }
   const y = yearAmount(input.pupils, input.tariff, share, decisions.rounding);
   if (isClosed(y)) return y;
@@ -246,10 +258,25 @@ export function billingLine(input: LineInput, decisions: AmountDecisions): Line 
 
 // ---------------------------------------------------------------- Comptages qui donnent un document
 
-const FREE_END_KINDS: CountKind[] = ['TRIAL_END', 'PILOT_END'];
+export const FREE_END_KINDS: CountKind[] = ['TRIAL_END', 'PILOT_END'];
 
 /** Premier jour payant : le lendemain du dernier jour gratuit (fin de l'essai ou du pilote). */
 export const firstPaidDayAfter = (lastFreeDay: string) => addDays(lastFreeDay, 1);
+
+/** D-G5-30 A (19 novembre 2026) : 15 jours de grâce, accès complet, après la fin de la gratuité. */
+export const GRACE_DAYS = 15;
+
+/**
+ * Échéance du premier document, celui de la fin de la gratuité : le dernier jour de grâce (D-G5-30 A). Un document émis
+ * plus tard (conditions acceptées après la grâce) est à régler dès son émission. Les compléments n'ont pas d'échéance
+ * décidée : null.
+ */
+export function firstDueDate(lastFreeDay: string, issueDay: string) {
+  day('Dernier jour gratuit', lastFreeDay);
+  day('Date du document', issueDay);
+  const end = addDays(lastFreeDay, GRACE_DAYS);
+  return end < issueDay ? issueDay : end;
+}
 
 /**
  * Comptages figés qui donnent un document, du plus ancien au plus récent : celui de la fin de la dernière période
@@ -319,6 +346,16 @@ export function groupDocument(lines: { establishment: string; line: Line | Close
   const dates = [...new Set(open.map((l) => l.line.date))].sort();
   if (dates.length > 1) return close('D-G5-31', `établissements facturés le ${dates.map(frDay).join(', le ')}`);
   return { date: dates[0], total: open.reduce((sum, l) => sum + l.line.due, 0), lines: open };
+}
+
+/**
+ * Groupe de plusieurs établissements : un élève transféré de l'un à l'autre dans l'année serait compté dans chacun (une
+ * fois par établissement). Cahiora ne voit pas les transferts (les noms restent dans les écoles) et D-G5-32 n'est pas
+ * tranché : le document du groupe reste fermé. Une école indépendante (groupe d'un seul établissement) n'est pas concernée.
+ */
+export function groupTransfers(establishments: number): Closed | null {
+  if (establishments < 2) return null;
+  return close('D-G5-32', `groupe de ${establishments} établissements : un élève transféré de l’un à l’autre serait compté dans chacun`);
 }
 
 // ---------------------------------------------------------------- Exclusion après un document

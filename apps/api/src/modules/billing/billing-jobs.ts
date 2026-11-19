@@ -9,6 +9,7 @@ import { PLATFORM_TZ } from './billing';
 import { addDays, daysLeft, dueAlerts, frDay, versionOn } from './billing-rules';
 import { AlreadyDone, jobOnce, notifyDirection, SYSTEM, systemJournals } from './billing-tasks';
 import { CountsService } from './counts';
+import { BillingDocumentsService } from './documents';
 
 /**
  * Tâches planifiées de la facturation (lot G5a) : fin d'un essai, alertes avant la fin d'un pilote, fin d'un pilote.
@@ -16,7 +17,8 @@ import { CountsService } from './counts';
  * inscrite dans billing_jobs, sous une clé unique, dans la même transaction que son effet : relancée, interrompue ou
  * lancée deux fois en même temps, elle ne produit jamais de doublon. Rien n'est facturé ici, aucun SMS n'est envoyé :
  * une alerte pour le Super Admin et une notification dans l'application pour la direction. Les comptages des élèves
- * facturables (lot G5b, CountsService) passent juste après, au même rythme.
+ * facturables (lot G5b, CountsService) passent juste après, au même rythme, puis les documents provisoires de
+ * l'abonnement (lot G5c, BillingDocumentsService), qui partent des comptages figés.
  */
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
@@ -30,7 +32,7 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
   private timers: NodeJS.Timeout[] = [];
   private running = false;
 
-  constructor(private db: PlatformDb, @Optional() private counts?: CountsService) {}
+  constructor(private db: PlatformDb, @Optional() private counts?: CountsService, @Optional() private documents?: BillingDocumentsService) {}
 
   /** Passage toutes les heures (le premier une minute après le démarrage) ; jamais pendant les tests automatiques, ni avec BILLING_JOBS=off. */
   onModuleInit() {
@@ -39,7 +41,9 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
       this.runDue()
         .catch((e) => this.log.error(`Tâches de facturation : ${e instanceof Error ? e.message : e}`))
         .then(() => this.counts?.runDue())
-        .catch((e) => this.log.error(`Comptages des élèves : ${e instanceof Error ? e.message : e}`));
+        .catch((e) => this.log.error(`Comptages des élèves : ${e instanceof Error ? e.message : e}`))
+        .then(() => this.documents?.runDue())
+        .catch((e) => this.log.error(`Documents de l’abonnement : ${e instanceof Error ? e.message : e}`));
     };
     this.timers.push(setTimeout(tick, 60_000), setInterval(tick, 3_600_000));
     for (const t of this.timers) t.unref?.();
@@ -149,13 +153,14 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
 @UseGuards(PlatformGuard)
 @Controller()
 export class BillingJobsController {
-  constructor(private jobs: BillingJobsService, private counts: CountsService) {}
+  constructor(private jobs: BillingJobsService, private counts: CountsService, private documents: BillingDocumentsService) {}
 
-  /** Passe les tâches tout de suite (sans attendre l'heure suivante), comptages compris ; sans effet sur ce qui est déjà fait. */
+  /** Passe les tâches tout de suite (sans attendre l'heure suivante), comptages et documents compris ; sans effet sur ce qui est déjà fait. */
   @Post('platform/billing/jobs/run') @Throttle({ default: { limit: 6, ttl: 60000 } })
   async run() {
     const billing = await this.jobs.runDue();
     const counts = await this.counts.runDue();
-    return { done: [...billing.done, ...counts.done], busy: billing.busy || counts.busy };
+    const documents = await this.documents.runDue();
+    return { done: [...billing.done, ...counts.done, ...documents.done], busy: billing.busy || counts.busy || documents.busy };
   }
 }
