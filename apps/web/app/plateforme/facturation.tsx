@@ -22,8 +22,10 @@ type Sub = {
 };
 type Calendar = {
   id: string; yearLabel: string; version: number; startDate: string; endDate: string; preparationFrom: string | null; initialCountDate: string;
-  firstRegularizationDate: string; finalRegularizationDate: string; renewalDate: string | null; formula: string; reason: string; createdByName: string; createdAt: string;
+  firstRegularizationDate: string; finalRegularizationDate: string; renewalDate: string | null; formula: string; adjusted: boolean; reason: string; createdByName: string; createdAt: string;
 };
+/** « dates saisies », « formule B, provisoire » ou, après un changement à la main, « formule B, provisoire, ajustée ». */
+const formulaLabel = (c: Pick<Calendar, 'formula' | 'adjusted'>) => (c.formula === 'MANUEL' ? 'dates saisies' : `formule ${c.formula}, provisoire${c.adjusted ? ', ajustée' : ''}`);
 type Establishment = {
   id: string; slug: string; name: string; status: 'ACTIVE' | 'SUSPENDED'; country: string; currency: string; timezone: string; today: string; createdOn: string; demo: boolean;
   group: { id: string; name: string }; subscription: Sub | null; calendars: Calendar[];
@@ -366,7 +368,8 @@ function Etablissements() {
                 </div>
                 {e.calendars.length === 0 ? <span className="text-muted">Aucun calendrier de facturation.</span> : e.calendars.map((c) => (
                   <span key={c.id}>
-                    <b>{c.yearLabel}</b> (version {c.version}, {c.formula === 'MANUEL' ? 'dates saisies' : `formule ${c.formula}, provisoire`}) : du {frDate(c.startDate)} au {frDate(c.endDate)} ; comptage initial le {frDate(c.initialCountDate)}, régularisations le {frDate(c.firstRegularizationDate)} et le {frDate(c.finalRegularizationDate)}{c.renewalDate ? ` ; renouvellement le ${frDate(c.renewalDate)}` : ''}.
+                    <b>{c.yearLabel}</b> (version {c.version}, {formulaLabel(c)}) : du {frDate(c.startDate)} au {frDate(c.endDate)} ; comptage initial le {frDate(c.initialCountDate)}, régularisations le {frDate(c.firstRegularizationDate)} et le {frDate(c.finalRegularizationDate)}{c.renewalDate ? ` ; renouvellement le ${frDate(c.renewalDate)}` : ''}.
+                    {c.adjusted && <span className="text-muted"> Motif de l’ajustement : {c.reason}</span>}
                   </span>
                 ))}
               </li>
@@ -381,37 +384,94 @@ function Etablissements() {
   );
 }
 
+type Formula = 'A' | 'B' | 'MANUEL';
+type Proposal = { applies: boolean; message: string | null; initialCountDate: string | null; firstRegularizationDate: string | null; finalRegularizationDate: string | null };
+type Proposals = Record<'A' | 'B', Proposal>;
 type CalendarData = {
   tenant: { id: string; name: string; today: string };
   versions: Calendar[];
-  schoolYears: { label: string; startDate: string; endDate: string; isCurrent: boolean; proposals: Record<'A' | 'B', { initialCountDate: string; firstRegularizationDate: string; finalRegularizationDate: string }> }[];
+  schoolYears: { label: string; startDate: string; endDate: string; isCurrent: boolean }[];
 };
-const EMPTY_CAL = { yearLabel: '', startDate: '', endDate: '', preparationFrom: '', initialCountDate: '', firstRegularizationDate: '', finalRegularizationDate: '', renewalDate: '', formula: 'B' as 'A' | 'B' | 'MANUEL', reason: '', code: '' };
+const EMPTY_CAL = { yearLabel: '', startDate: '', endDate: '', preparationFrom: '', initialCountDate: '', firstRegularizationDate: '', finalRegularizationDate: '', renewalDate: '', formula: 'B' as Formula, reason: '', code: '' };
+const IS_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const FORMULA_DATES = ['initialCountDate', 'firstRegularizationDate', 'finalRegularizationDate'] as const;
 
+/**
+ * Calendrier d'un établissement (correction C0) : les dates proposées existent pour toute rentrée et toute fin, et se
+ * recalculent quand l'une change. Une date changée à la main garde la formule et marque la version « ajustée ». Pour
+ * une année de 6 mois ou moins, la formule ne s'applique pas : dates saisies à la main, avec un motif (décision CAL-1).
+ */
 function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [data, setData] = useState<CalendarData | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
   const [f, setF] = useState(EMPTY_CAL);
+  /** Les trois dates de la formule suivent ses propositions ; faux dès qu'on en change une à la main. */
+  const [follow, setFollow] = useState(true);
+  /** Propositions des formules pour la rentrée et la fin `key` (« début|fin »), ou l'erreur de ces deux dates. */
+  const [proposed, setProposed] = useState<{ key: string; proposals: Proposals | null; error: unknown } | null>(null);
   const { busy, error, submit } = useSubmit(done, 'Calendrier enregistré');
   useEffect(() => {
     pf<CalendarData>('GET', `/billing/establishments/${e.id}/calendars`).then(setData).catch(setLoadError);
   }, [e.id]);
-  /** Remplit les dates depuis la dernière version de cette année, sinon depuis l'année scolaire de l'école et la formule. */
-  const fill = (yearLabel: string, formula: 'A' | 'B' | 'MANUEL') => {
+
+  const key = `${f.startDate}|${f.endDate}`;
+  useEffect(() => {
+    const [start, end] = key.split('|');
+    if (!IS_DAY.test(start) || !IS_DAY.test(end)) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      pf<{ proposals: Proposals }>('GET', `/billing/calendar-proposals?${new URLSearchParams({ startDate: start, endDate: end })}`)
+        .then((r) => live && setProposed({ key, proposals: r.proposals, error: null }))
+        .catch((err) => live && setProposed({ key, proposals: null, error: err }));
+    }, 250);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [key]);
+  const current = proposed?.key === key ? proposed : null;
+  const proposal = f.formula !== 'MANUEL' && current?.proposals ? current.proposals[f.formula] : null;
+  // Recalcul : tant que les dates suivent la formule, chaque proposition les remplace (aucune quand elle ne s'applique pas).
+  useEffect(() => {
+    if (!follow || !proposal) return;
+    const next = { initialCountDate: proposal.initialCountDate ?? '', firstRegularizationDate: proposal.firstRegularizationDate ?? '', finalRegularizationDate: proposal.finalRegularizationDate ?? '' };
+    setF((x) => (FORMULA_DATES.every((k) => x[k] === next[k]) ? x : { ...x, ...next }));
+  }, [follow, proposal]);
+  // Tant que les dates suivent la formule, l'effet ci-dessus les aligne : seule une date changée à la main rend la version « ajustée ».
+  const adjusted = !follow && !!proposal?.applies && FORMULA_DATES.some((k) => f[k] !== proposal[k]);
+  const notApplicable = proposal && !proposal.applies ? proposal.message : null;
+  /** Propositions des nouvelles dates pas encore reçues : on attend avant d'enregistrer. */
+  const waiting = f.formula !== 'MANUEL' && IS_DAY.test(f.startDate) && IS_DAY.test(f.endDate) && !current;
+
+  /** Reprend la dernière version de cette année telle quelle ; sinon les dates de l'année scolaire de l'école, recalculées. */
+  const pickYear = (yearLabel: string) => {
     const v = data?.versions.find((x) => x.yearLabel === yearLabel);
-    const y = data?.schoolYears.find((x) => x.label === yearLabel);
-    if (v && formula === 'MANUEL') {
-      setF({ ...f, yearLabel, formula, startDate: v.startDate, endDate: v.endDate, preparationFrom: v.preparationFrom ?? '', initialCountDate: v.initialCountDate, firstRegularizationDate: v.firstRegularizationDate, finalRegularizationDate: v.finalRegularizationDate, renewalDate: v.renewalDate ?? '' });
+    if (v) {
+      setF({ ...f, yearLabel, formula: v.formula as Formula, startDate: v.startDate, endDate: v.endDate, preparationFrom: v.preparationFrom ?? '', initialCountDate: v.initialCountDate, firstRegularizationDate: v.firstRegularizationDate, finalRegularizationDate: v.finalRegularizationDate, renewalDate: v.renewalDate ?? '' });
+      setFollow(false);
       return;
     }
-    const start = v?.startDate ?? y?.startDate ?? f.startDate;
-    const end = v?.endDate ?? y?.endDate ?? f.endDate;
-    const p = formula !== 'MANUEL' && y && start === y.startDate && end === y.endDate ? y.proposals[formula] : null;
-    setF({ ...f, yearLabel, formula, startDate: start, endDate: end, ...(p ?? {}), preparationFrom: v?.preparationFrom ?? f.preparationFrom, renewalDate: v?.renewalDate ?? f.renewalDate });
+    const y = data?.schoolYears.find((x) => x.label === yearLabel);
+    if (y && (y.startDate !== f.startDate || y.endDate !== f.endDate)) {
+      setF({ ...f, yearLabel, startDate: y.startDate, endDate: y.endDate });
+      setFollow(true);
+    } else setF({ ...f, yearLabel });
+  };
+  const pickFormula = (formula: Formula) => {
+    setF({ ...f, formula });
+    setFollow(formula !== 'MANUEL');
+  };
+  const setYearDate = (k: 'startDate' | 'endDate', value: string) => {
+    setF({ ...f, [k]: value });
+    setFollow(true);
+  };
+  const setFormulaDate = (k: (typeof FORMULA_DATES)[number], value: string) => {
+    setF({ ...f, [k]: value });
+    setFollow(false);
   };
   const versions = data?.versions.filter((v) => !f.yearLabel || v.yearLabel === f.yearLabel) ?? [];
   return (
-    <DialogContent title={`Calendrier de facturation : ${e.name}`} description="Chaque enregistrement ajoute une version ; une date passée ne change plus. Formules A et B : proposition provisoire, la formule définitive attend votre décision D-G5-28.">
+    <DialogContent title={`Calendrier de facturation : ${e.name}`} description="Chaque enregistrement ajoute une version ; une date passée ne change plus. Les dates proposées se recalculent quand la rentrée ou la fin change ; une date changée à la main rend la version « ajustée ». Formules A et B : proposition provisoire, la formule définitive attend votre décision D-G5-28.">
       <ErrorNote error={loadError} />
       {data && (
         <form className="grid max-h-[70vh] gap-3 overflow-y-auto pr-1" onSubmit={(ev) => {
@@ -420,33 +480,48 @@ function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
         }}>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Année scolaire" hint={data.schoolYears.length ? 'Années de l’école, ou saisie libre (2027 pour une année civile).' : 'L’école n’a encore aucune année scolaire.'}>
-              <Input list={`annees-${e.id}`} value={f.yearLabel} onChange={(x) => fill(x.target.value, f.formula)} required placeholder="2026-2027" />
+              <Input list={`annees-${e.id}`} value={f.yearLabel} onChange={(x) => pickYear(x.target.value)} required placeholder="2026-2027" />
               <datalist id={`annees-${e.id}`}>{data.schoolYears.map((y) => <option key={y.label} value={y.label} />)}</datalist>
             </Field>
             <Field label="Formule des dates proposées">
-              <Select value={f.formula} onChange={(x) => fill(f.yearLabel, x.target.value as 'A' | 'B' | 'MANUEL')}>
+              <Select value={f.formula} onChange={(x) => pickFormula(x.target.value as Formula)}>
                 <option value="B">B : à distance fixe (provisoire)</option>
                 <option value="A">A : en proportion de l’année (provisoire)</option>
                 <option value="MANUEL">Dates saisies à la main</option>
               </Select>
             </Field>
-            <Field label="Début de l’année scolaire"><Input type="date" value={f.startDate} onChange={(x) => setF({ ...f, startDate: x.target.value })} required /></Field>
-            <Field label="Fin de l’année scolaire"><Input type="date" value={f.endDate} onChange={(x) => setF({ ...f, endDate: x.target.value })} required /></Field>
+            <Field label="Début de l’année scolaire"><Input type="date" value={f.startDate} onChange={(x) => setYearDate('startDate', x.target.value)} required /></Field>
+            <Field label="Fin de l’année scolaire"><Input type="date" value={f.endDate} onChange={(x) => setYearDate('endDate', x.target.value)} required /></Field>
+          </div>
+          <ErrorNote error={current?.error} />
+          {notApplicable && (
+            <div role="status" className="grid gap-2 rounded-lg bg-warn-soft p-3 text-sm">
+              <p className="font-bold">{notApplicable}</p>
+              <Button type="button" size="sm" variant="outline" className="justify-self-start" onClick={() => pickFormula('MANUEL')}>Saisir les dates à la main</Button>
+            </div>
+          )}
+          <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Début de la préparation (facultatif)"><Input type="date" value={f.preparationFrom} onChange={(x) => setF({ ...f, preparationFrom: x.target.value })} /></Field>
-            <Field label="Comptage initial"><Input type="date" value={f.initialCountDate} onChange={(x) => setF({ ...f, initialCountDate: x.target.value })} required /></Field>
-            <Field label="Première régularisation"><Input type="date" value={f.firstRegularizationDate} onChange={(x) => setF({ ...f, firstRegularizationDate: x.target.value })} required /></Field>
-            <Field label="Régularisation finale"><Input type="date" value={f.finalRegularizationDate} onChange={(x) => setF({ ...f, finalRegularizationDate: x.target.value })} required /></Field>
+            <Field label="Comptage initial"><Input type="date" value={f.initialCountDate} onChange={(x) => setFormulaDate('initialCountDate', x.target.value)} required /></Field>
+            <Field label="Première régularisation"><Input type="date" value={f.firstRegularizationDate} onChange={(x) => setFormulaDate('firstRegularizationDate', x.target.value)} required /></Field>
+            <Field label="Régularisation finale"><Input type="date" value={f.finalRegularizationDate} onChange={(x) => setFormulaDate('finalRegularizationDate', x.target.value)} required /></Field>
             <Field label="Renouvellement (facultatif)" hint="Mode de renouvellement : décision D-G5-12 en attente."><Input type="date" value={f.renewalDate} onChange={(x) => setF({ ...f, renewalDate: x.target.value })} /></Field>
           </div>
+          {adjusted && (
+            <div role="status" className="grid gap-2 rounded-lg bg-sunk p-3 text-sm">
+              <p>Dates changées à la main : cette version sera enregistrée comme « formule {f.formula}, ajustée », avec votre motif.</p>
+              <Button type="button" size="sm" variant="outline" className="justify-self-start" onClick={() => setFollow(true)}>Reprendre les dates de la formule {f.formula}</Button>
+            </div>
+          )}
           <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required placeholder="Par exemple : calendrier communiqué par la direction" /></Field>
           <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
           <ErrorNote error={error} />
-          <Button type="submit" loading={busy}>Enregistrer cette version</Button>
+          <Button type="submit" loading={busy} disabled={!!notApplicable || waiting}>Enregistrer cette version</Button>
           {versions.length > 0 && (
             <div className="grid gap-1 text-xs">
               <p className="font-bold">Versions enregistrées</p>
               {versions.map((v) => (
-                <p key={v.id} className="rounded bg-sunk p-2">{v.yearLabel} v{v.version} ({v.formula}) : {frDate(v.initialCountDate)}, {frDate(v.firstRegularizationDate)}, {frDate(v.finalRegularizationDate)} · {v.createdByName}, {new Date(v.createdAt).toLocaleDateString('fr-FR')} · {v.reason}</p>
+                <p key={v.id} className="rounded bg-sunk p-2">{v.yearLabel} v{v.version} ({formulaLabel(v)}) : {frDate(v.initialCountDate)}, {frDate(v.firstRegularizationDate)}, {frDate(v.finalRegularizationDate)} · {v.createdByName}, {new Date(v.createdAt).toLocaleDateString('fr-FR')} · {v.reason}</p>
               ))}
             </div>
           )}

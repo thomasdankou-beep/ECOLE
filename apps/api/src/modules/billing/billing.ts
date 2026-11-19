@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Header, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Req, UseGuards,
+  BadRequestException, Body, ConflictException, Controller, ForbiddenException, Get, Header, Injectable, NotFoundException, Param, ParseUUIDPipe, Post, Query, Req, UseGuards,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
@@ -14,8 +14,8 @@ import { config } from '../../config';
 import { groupLog, PlatformActor, platformLog, schoolLogInTx } from '../platform/group-journal';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
 import {
-  calendarErrors, CalendarDates, daysBetween, daysLeft, frDay, isDay, isYearLabel, PARAMETER_KEYS, parameterError, ParameterKey, PARAMETERS, pilotEndDay,
-  proposeCalendar, retroactiveChanges, STATUS_LABELS, subscriptionKindLabel, trialEndDay, versionOn,
+  calendarErrors, CalendarDates, calendarProposal, calendarProposals, daysBetween, daysLeft, frDay, isAdjusted, isDay, isYearLabel, PARAMETER_KEYS, parameterError,
+  ParameterKey, PARAMETERS, pilotEndDay, retroactiveChanges, STATUS_LABELS, subscriptionKindLabel, trialEndDay, versionOn, yearDatesError,
 } from './billing-rules';
 
 /**
@@ -85,12 +85,15 @@ const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
 type CalendarRow = Prisma.BillingCalendarGetPayload<object>;
 
-/** Une version de calendrier, dates en AAAA-MM-JJ. */
+/** Une version de calendrier, dates en AAAA-MM-JJ ; `adjusted` : formule A ou B dont une date a été changée à la main. */
 function calendarView(c: CalendarRow) {
+  const dates = {
+    startDate: iso(c.startDate)!, endDate: iso(c.endDate)!, preparationFrom: iso(c.preparationFrom), initialCountDate: iso(c.initialCountDate)!,
+    firstRegularizationDate: iso(c.firstRegularizationDate)!, finalRegularizationDate: iso(c.finalRegularizationDate)!, renewalDate: iso(c.renewalDate),
+  };
   return {
-    id: c.id, yearLabel: c.yearLabel, version: c.version, startDate: iso(c.startDate)!, endDate: iso(c.endDate)!, preparationFrom: iso(c.preparationFrom),
-    initialCountDate: iso(c.initialCountDate)!, firstRegularizationDate: iso(c.firstRegularizationDate)!, finalRegularizationDate: iso(c.finalRegularizationDate)!,
-    renewalDate: iso(c.renewalDate), formula: c.formula, reason: c.reason, createdByName: c.createdByName, createdAt: c.createdAt,
+    id: c.id, yearLabel: c.yearLabel, version: c.version, ...dates, formula: c.formula, adjusted: isAdjusted(dates, c.formula), reason: c.reason,
+    createdByName: c.createdByName, createdAt: c.createdAt,
   };
 }
 
@@ -354,6 +357,16 @@ export class BillingService {
 
   // ---------------------------------------------------------------- Calendriers (§3)
 
+  /**
+   * Dates proposées par les formules A et B pour n'importe quelle année (correction C0), que l'écran recalcule quand la
+   * rentrée ou la fin change. Une année de 6 mois ou moins n'a pas de proposition (décision CAL-1).
+   */
+  proposals(startDate: unknown, endDate: unknown) {
+    const error = yearDatesError(startDate, endDate);
+    if (error) throw new BadRequestException(error);
+    return { startDate, endDate, proposals: calendarProposals(startDate as string, endDate as string)! };
+  }
+
   /** Versions des calendriers d'un établissement et ses années scolaires (dates seulement), pour proposer les dates. */
   async calendars(tenantId: string) {
     const t = await this.tenant(tenantId);
@@ -366,12 +379,16 @@ export class BillingService {
       schoolYears: years.map((y) => {
         const start = iso(y.startDate)!;
         const end = iso(y.endDate)!;
-        return { label: y.label, startDate: start, endDate: end, isCurrent: y.isCurrent, proposals: { B: proposeCalendar(start, end, 'B'), A: proposeCalendar(start, end, 'A') } };
+        return { label: y.label, startDate: start, endDate: end, isCurrent: y.isCurrent, proposals: calendarProposals(start, end) };
       }),
     };
   }
 
-  /** Nouvelle version du calendrier d'une année : dates contrôlées, jamais de changement d'une date passée. */
+  /**
+   * Nouvelle version du calendrier d'une année : dates contrôlées, jamais de changement d'une date passée. Une formule
+   * qui ne s'applique pas à l'année (6 mois ou moins, décision CAL-1) est refusée : dates saisies à la main, avec un motif.
+   * Une version A ou B dont une date a été changée à la main est enregistrée telle quelle et marquée « ajustée ».
+   */
   async addCalendar(actor: PlatformActor, tenantId: string, dto: CalendarDto) {
     const t = await this.tenant(tenantId);
     const today = localDay(t.timezone);
@@ -382,6 +399,10 @@ export class BillingService {
     };
     const errors = calendarErrors(next);
     if (errors.length) throw new BadRequestException(errors);
+    if (dto.formula !== 'MANUEL') {
+      const proposal = calendarProposal(next.startDate, next.endDate, dto.formula);
+      if (!proposal.applies) throw new BadRequestException(proposal.message);
+    }
     await this.confirm(actor, dto.code);
     try {
       return await this.db.$transaction(async (tx) => {
@@ -405,8 +426,8 @@ export class BillingService {
         });
         const view = calendarView(c);
         await this.journals(tx, actor, t, 'billing.calendar_saved', {
-          yearLabel: view.yearLabel, version: view.version, formula: view.formula, startDate: view.startDate, endDate: view.endDate, initialCountDate: view.initialCountDate,
-          firstRegularizationDate: view.firstRegularizationDate, finalRegularizationDate: view.finalRegularizationDate, renewalDate: view.renewalDate,
+          yearLabel: view.yearLabel, version: view.version, formula: view.formula, adjusted: view.adjusted, startDate: view.startDate, endDate: view.endDate, initialCountDate: view.initialCountDate,
+          firstRegularizationDate: view.firstRegularizationDate, finalRegularizationDate: view.finalRegularizationDate, renewalDate: view.renewalDate, reason: view.reason,
         });
         return view;
       });
@@ -494,6 +515,9 @@ export class BillingController {
 
   @Post('platform/billing/establishments/:id/pilot-end') @Throttle({ default: { limit: 20, ttl: 60000 } })
   pilotEnd(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PilotEndDto) { return this.s.changePilotEnd(this.actor(req), id, dto); }
+
+  @Get('platform/billing/calendar-proposals')
+  proposals(@Query('startDate') startDate: string, @Query('endDate') endDate: string) { return this.s.proposals(startDate, endDate); }
 
   @Get('platform/billing/establishments/:id/calendars')
   calendars(@Param('id', ParseUUIDPipe) id: string) { return this.s.calendars(id); }

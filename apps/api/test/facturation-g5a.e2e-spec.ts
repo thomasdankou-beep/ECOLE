@@ -14,7 +14,7 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { localDay } from '../src/common/country';
 import { BillingJobsService } from '../src/modules/billing/billing-jobs';
-import { addDays, pilotEndDay, proposeCalendar } from '../src/modules/billing/billing-rules';
+import { addDays, calendarProposals, lastDayOfMonth, pilotEndDay, proposeCalendar } from '../src/modules/billing/billing-rules';
 import { PlatformDb } from '../src/modules/platform/platform';
 
 const TZ = 'Africa/Porto-Novo';
@@ -345,7 +345,61 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
     // Dates proposées depuis l'année scolaire de l'école (lue par la plateforme : dates seulement), formules A et B provisoires.
     await inTenant(S.C.id, (tx) => tx.academicYear.create({ data: { tenantId: S.C.id, label: year(cStart), startDate: new Date(`${cStart}T00:00:00Z`), endDate: new Date(`${cEnd}T00:00:00Z`), isCurrent: true } }));
     const proposals = (await pf.get(`/billing/establishments/${S.C.id}/calendars`)).body;
-    expect(proposals.schoolYears).toEqual([{ label: year(cStart), startDate: cStart, endDate: cEnd, isCurrent: true, proposals: { A: proposeCalendar(cStart, cEnd, 'A'), B: proposeCalendar(cStart, cEnd, 'B') } }]);
+    expect(proposals.schoolYears).toEqual([{ label: year(cStart), startDate: cStart, endDate: cEnd, isCurrent: true, proposals: calendarProposals(cStart, cEnd) }]);
+    expect(proposals.schoolYears[0].proposals.B).toEqual({ applies: true, message: null, ...proposeCalendar(cStart, cEnd, 'B') });
+  });
+
+  it('Correction C0 : dates proposées pour toute année et recalculées, version ajustée marquée avec son motif, année de 6 mois ou moins en dates saisies (CAL-1)', async () => {
+    const proposals = (start: string, end: string, cookie?: string) => pf.get(`/billing/calendar-proposals?${new URLSearchParams({ startDate: start, endDate: end })}`, cookie);
+    // N'importe quelle rentrée et n'importe quelle fin, sans année scolaire enregistrée par l'école ; recalcul quand la fin change.
+    const sk = await proposals('2026-09-14', '2027-07-09');
+    expect(sk.status).toBe(200);
+    expect(sk.body).toEqual({ startDate: '2026-09-14', endDate: '2027-07-09', proposals: calendarProposals('2026-09-14', '2027-07-09') });
+    expect(sk.body.proposals.B).toEqual({ applies: true, message: null, initialCountDate: '2026-11-30', firstRegularizationDate: '2027-04-30', finalRegularizationDate: '2027-07-09' });
+    expect((await proposals('2026-09-14', '2027-08-14')).body.proposals.B).toMatchObject({ firstRegularizationDate: '2027-05-31', finalRegularizationDate: '2027-08-14' });
+    const short = (await proposals('2027-02-01', '2027-07-31')).body.proposals;
+    for (const f of ['A', 'B']) expect(short[f]).toMatchObject({ applies: false, initialCountDate: null, message: expect.stringMatching(/ne s’applique pas à une année de 6 mois ou moins/) });
+    expect((await proposals('2027-07-31', '2027-02-01')).body.message).toBe('La fin de l’année doit suivre son début');
+    expect((await proposals('2026-09-01', '2028-03-31')).body.message).toBe('Une année scolaire dure au plus 18 mois');
+    expect((await pf.get('/billing/calendar-proposals?startDate=hier&endDate=2027-07-31')).status).toBe(400);
+    expect((await pf.get('/billing/calendar-proposals')).status).toBe(400);
+    // Super Admin seulement.
+    expect((await proposals('2026-09-14', '2027-07-09', '')).status).toBe(401);
+    expect((await school(S.B.direction).get('/platform/billing/calendar-proposals?startDate=2026-09-14&endDate=2027-07-09')).status).toBe(401);
+
+    const save = async (o: Record<string, string | null>) => pf.post(`/billing/establishments/${S.B.id}/calendars`, { reason: 'Calendrier fictif (test C0)', code: await code(), ...o });
+    // Formule B dont la première régularisation est avancée de 10 jours : enregistrée « formule B », marquée ajustée, motif journalisé.
+    const start = addDays(today, 40);
+    const end = addDays(today, 340);
+    const label = `${start.slice(0, 4)}-${Number(start.slice(0, 4)) + 1}`;
+    const p = proposeCalendar(start, end, 'B');
+    const adjusted = await save({ yearLabel: label, startDate: start, endDate: end, formula: 'B', ...p, firstRegularizationDate: addDays(p.firstRegularizationDate, -10), reason: 'Ajustée pour les congés (test C0)' });
+    expect(adjusted.status).toBe(201);
+    expect(adjusted.body).toMatchObject({ version: 1, formula: 'B', adjusted: true, reason: 'Ajustée pour les congés (test C0)' });
+    const logged = await admin.platformAuditLog.findFirstOrThrow({ where: { action: 'billing.calendar_saved', tenantId: S.B.id }, orderBy: { createdAt: 'desc' } });
+    expect(logged.data).toMatchObject({ version: 1, formula: 'B', adjusted: true, reason: 'Ajustée pour les congés (test C0)' });
+    // Retour aux dates de la formule : nouvelle version, plus ajustée ; la liste des établissements montre la dernière.
+    const back = await save({ yearLabel: label, startDate: start, endDate: end, formula: 'B', ...p });
+    expect(back.body).toMatchObject({ version: 2, formula: 'B', adjusted: false });
+    const listed = ((await pf.get('/billing/establishments')).body as { id: string; calendars: { version: number; adjusted: boolean }[] }[]).find((x) => x.id === S.B.id)!;
+    expect(listed.calendars).toEqual([expect.objectContaining({ version: 2, adjusted: false })]);
+    const versions = (await pf.get(`/billing/establishments/${S.B.id}/calendars`)).body.versions as { version: number; adjusted: boolean }[];
+    expect(versions.map((v) => [v.version, v.adjusted])).toEqual([[2, false], [1, true]]);
+
+    // Année de 6 mois (du 1er du mois au dernier jour du 6e mois) : formules A et B refusées, avant même le code ; dates saisies acceptées.
+    const [y, m] = addDays(today, 60).split('-').map(Number);
+    const sStart = `${y}-${String(m).padStart(2, '0')}-01`;
+    const sEnd = lastDayOfMonth(y, m - 1 + 5);
+    const sixMonths = { yearLabel: String(y), startDate: sStart, endDate: sEnd, initialCountDate: addDays(sStart, 30), firstRegularizationDate: addDays(sStart, 100), finalRegularizationDate: sEnd };
+    for (const formula of ['B', 'A']) {
+      const refused = await pf.post(`/billing/establishments/${S.B.id}/calendars`, { ...sixMonths, formula, reason: 'Session courte (test C0)', code: '000000' });
+      expect(refused.status).toBe(400);
+      expect(refused.body.message).toBe(`La formule ${formula} ne s’applique pas à une année de 6 mois ou moins (du mois de la rentrée au mois de la fin) : choisissez « Dates saisies à la main » et indiquez le motif`);
+    }
+    expect(await admin.platformAuditLog.count({ where: { action: 'billing.2fa_failed', adminId: sa.id, createdAt: { gte: logged.createdAt } } })).toBe(0);
+    const manual = await save({ ...sixMonths, formula: 'MANUEL', reason: 'Session courte : dates de la direction (test C0)' });
+    expect(manual.status).toBe(201);
+    expect(manual.body).toMatchObject({ version: 1, formula: 'MANUEL', adjusted: false });
   });
 
   it('Test 23 : les écoles, les groupes et les statistiques n’ont aucun droit sur les tables de la facturation ; chaque direction ne voit que son établissement', async () => {

@@ -1,5 +1,6 @@
 import {
-  addDays, calendarErrors, dueAlerts, daysLeft, frDay, isDay, parameterError, pilotEndDay, proposeCalendar, retroactiveChanges, trialEndDay, versionOn,
+  addDays, calendarErrors, calendarProposal, calendarProposals, daysBetween, dueAlerts, daysLeft, frDay, isAdjusted, isDay, lastDayOfMonth, monthsSpanned, parameterError,
+  pilotEndDay, proposeCalendar, retroactiveChanges, trialEndDay, versionOn, yearDatesError,
 } from './billing-rules';
 
 /** Règles du lot G5a, sans base : cahier des charges du lot G5 du 14 novembre 2026. */
@@ -105,5 +106,100 @@ describe('Facturation G5a : calendriers propres à chaque établissement (§3, f
     expect(retroactiveChanges(v1, { ...v1, initialCountDate: '2026-12-31' }, today)).toEqual(['Comptage initial : le 30 novembre 2026 est passé, cette date ne change plus']);
     expect(retroactiveChanges(v1, { ...v1, firstRegularizationDate: '2026-12-01' }, today)).toEqual(['Première régularisation : une date ne peut pas être déplacée dans le passé']);
     expect(retroactiveChanges(v1, { ...v1, renewalDate: '2027-07-01' }, today)).toEqual([]);
+  });
+});
+
+describe('Correction C0 du calendrier (19 novembre 2026) : toutes dates, recalcul, « ajustée », années courtes (CAL-1)', () => {
+  it('une proposition pour n’importe quelle rentrée et n’importe quelle fin, recalculée quand l’une change', () => {
+    expect(calendarProposal('2026-09-14', '2027-07-09', 'B')).toEqual({ applies: true, message: null, initialCountDate: '2026-11-30', firstRegularizationDate: '2027-04-30', finalRegularizationDate: '2027-07-09' });
+    // Même rentrée, fin repoussée au 14 août : la première régularisation suit (31 mai), la finale aussi.
+    expect(calendarProposal('2026-09-14', '2027-08-14', 'B')).toMatchObject({ applies: true, firstRegularizationDate: '2027-05-31', finalRegularizationDate: '2027-08-14' });
+    // Rentrée le 30 septembre : même comptage initial qu'une rentrée le 1er (décision CAL-2, option A : règle actuelle).
+    expect(calendarProposal('2026-09-30', '2027-06-30', 'B').initialCountDate).toBe('2026-11-30');
+    expect(calendarProposal('2026-09-01', '2027-06-30', 'B').initialCountDate).toBe('2026-11-30');
+    expect(calendarProposal('2026-09-14', '2027-07-09', 'A')).toMatchObject({ applies: true, firstRegularizationDate: '2027-04-11' });
+  });
+
+  it('année de 6 mois ou moins, du mois de la rentrée au mois de la fin : aucune formule, dates saisies à la main avec un motif', () => {
+    expect(monthsSpanned('2026-09-01', '2027-06-30')).toBe(10);
+    expect(monthsSpanned('2027-02-01', '2027-07-31')).toBe(6);
+    expect(monthsSpanned('2027-01-15', '2027-07-14')).toBe(7);
+    for (const [start, end] of [['2027-02-01', '2027-07-31'], ['2027-03-01', '2027-06-30'], ['2027-01-01', '2027-06-30'], ['2027-05-31', '2027-06-01']]) {
+      for (const formula of ['A', 'B'] as const) {
+        const p = calendarProposal(start, end, formula);
+        expect(p).toMatchObject({ applies: false, initialCountDate: null, firstRegularizationDate: null, finalRegularizationDate: null });
+        expect(p.message).toBe(`La formule ${formula} ne s’applique pas à une année de 6 mois ou moins (du mois de la rentrée au mois de la fin) : choisissez « Dates saisies à la main » et indiquez le motif`);
+      }
+    }
+    // Janvier à juin : la formule A donnerait des dates valides, mais la décision CAL-1 vaut pour toutes les années de 6 mois ou moins.
+    expect(calendarErrors({ startDate: '2027-01-01', endDate: '2027-06-30', ...proposeCalendar('2027-01-01', '2027-06-30', 'A') })).toEqual([]);
+    // 15 janvier au 14 juillet : 7 mois touchés, la formule B s'applique.
+    expect(calendarProposal('2027-01-15', '2027-07-14', 'B')).toMatchObject({ applies: true, initialCountDate: '2027-03-31', firstRegularizationDate: '2027-04-30' });
+  });
+
+  it('début et fin de l’année contrôlés avant toute proposition', () => {
+    expect(yearDatesError('2026-09-01', '2027-06-30')).toBeNull();
+    expect(yearDatesError('2026-02-30', '2027-06-30')).toBe('Début de l’année scolaire : date invalide');
+    expect(yearDatesError('2026-09-01', undefined)).toBe('Fin de l’année scolaire : date invalide');
+    expect(yearDatesError(['2026-09-01'], '2027-06-30')).toBe('Début de l’année scolaire : date invalide');
+    expect(yearDatesError('2027-06-30', '2026-09-01')).toBe('La fin de l’année doit suivre son début');
+    expect(yearDatesError('2026-09-01', '2028-03-31')).toBe('Une année scolaire dure au plus 18 mois');
+    expect(calendarProposals('2027-06-30', '2026-09-01')).toBeNull();
+    expect(Object.keys(calendarProposals('2026-09-01', '2027-06-30')!)).toEqual(['B', 'A']);
+  });
+
+  it('balayage de chaque rentrée de 2026 : une formule s’applique si et seulement si l’année dure plus de 6 mois, et ses dates sont alors valides', () => {
+    // Fins : chaque jour de 140 à 230 jours après la rentrée (là où passe la limite des 6 mois), puis chaque fin de mois
+    // jusqu'à 18 mois. Le 19 novembre 2026, chaque fin possible (200 750 années) a aussi été essayée, hors de cette suite.
+    let pairs = 0;
+    for (let start = '2026-01-01'; start <= '2026-12-31'; start = addDays(start, 1)) {
+      const [y, m] = start.split('-').map(Number);
+      const ends = new Set<string>();
+      for (let n = 140; n <= 230; n++) ends.add(addDays(start, n));
+      for (let k = 0; k < 18; k++) ends.add(lastDayOfMonth(y, m - 1 + k));
+      for (const end of ends) {
+        if (end <= start || daysBetween(start, end) > 550) continue;
+        pairs++;
+        const all = calendarProposals(start, end)!;
+        for (const formula of ['A', 'B'] as const) {
+          const p = all[formula];
+          if (p.applies !== monthsSpanned(start, end) > 6) throw new Error(`${formula} ${start} → ${end} : ${JSON.stringify(p)}`);
+          if (p.applies && calendarErrors({ startDate: start, endDate: end, ...(p as { initialCountDate: string; firstRegularizationDate: string; finalRegularizationDate: string }) }).length) {
+            throw new Error(`${formula} ${start} → ${end} : dates proposées refusées`);
+          }
+        }
+      }
+    }
+    expect(pairs).toBeGreaterThan(365 * 100);
+  });
+
+  it('même balayage que le rapport du 16 novembre : 636 années, 432 avec des dates proposées par la formule B', () => {
+    let total = 0;
+    let applies = 0;
+    for (let m = 0; m < 12; m++) {
+      for (const day of [1, 15, 'fin'] as const) {
+        const start = day === 'fin' ? lastDayOfMonth(2026, m) : `2026-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        for (let months = 1; months <= 18; months++) {
+          const end = lastDayOfMonth(2026, m + months - 1);
+          if (end <= start || daysBetween(start, end) > 550) continue;
+          total++;
+          if (calendarProposal(start, end, 'B').applies) applies++;
+        }
+      }
+    }
+    expect([total, applies]).toEqual([636, 432]);
+  });
+
+  it('une version A ou B dont une date calculée a été changée à la main est « ajustée » ; la préparation et le renouvellement n’y comptent pas', () => {
+    const p = proposeCalendar('2026-09-14', '2027-07-09', 'B');
+    const v = { startDate: '2026-09-14', endDate: '2027-07-09', ...p };
+    expect(isAdjusted(v, 'B')).toBe(false);
+    expect(isAdjusted({ ...v, preparationFrom: '2026-08-01', renewalDate: '2027-07-10' }, 'B')).toBe(false);
+    expect(isAdjusted({ ...v, firstRegularizationDate: '2027-04-15' }, 'B')).toBe(true);
+    expect(isAdjusted({ ...v, initialCountDate: '2026-12-15' }, 'B')).toBe(true);
+    expect(isAdjusted({ ...v, finalRegularizationDate: '2027-07-01' }, 'B')).toBe(true);
+    // Les dates de la formule B ne sont pas celles de la formule A ; des dates saisies ne sont jamais « ajustées ».
+    expect(isAdjusted(v, 'A')).toBe(true);
+    expect(isAdjusted({ ...v, firstRegularizationDate: '2027-04-15' }, 'MANUEL')).toBe(false);
   });
 });
