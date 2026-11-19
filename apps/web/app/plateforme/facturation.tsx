@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Bell, CalendarDays, History, Play, Plus, Users } from 'lucide-react';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
+import { Acces } from './acces';
 import { Documents } from './documents';
 import { CodeField, frDate, money, useSubmit } from './facturation-outils';
 import { Prestations } from './prestations';
@@ -12,7 +13,8 @@ import { Prestations } from './prestations';
  * Commercial et facturation (lot G5a) : vue d'ensemble, abonnements, établissements clients et leurs calendriers,
  * paramètres tarifaires datés et conditions commerciales ; prestations complémentaires (lot G5g, ./prestations.tsx) ;
  * comptages des élèves de chaque établissement, en nombres seulement (lot G5b) ; documents provisoires, exclusions à
- * décider, devis et proformas de prestations (lot G5c, ./documents.tsx). Les autres rubriques arrivent avec les lots G5d à G5h.
+ * décider, devis et proformas de prestations (lot G5c, ./documents.tsx) ; accès des clients selon le paiement, demandes de
+ * régularisation et prolongations (lot G5d-1, ./acces.tsx). Les autres rubriques arrivent avec les lots G5d-2 à G5h.
  * Chaque opération financière demande un code actuel de l'application d'authentification.
  */
 
@@ -54,14 +56,14 @@ type Params = {
 type Terms = { id: string; version: number; title: string; body: string; effectiveFrom: string; createdByName: string; createdAt: string };
 type Event = { id: string; kind: string; label: string; createdAt: string; actorName: string; actorKind: string; reason: string | null; data: Record<string, unknown> | null };
 
-type Section = 'ensemble' | 'abonnements' | 'etablissements' | 'documents' | 'paiements' | 'avoirs' | 'prestations' | 'parrainage' | 'partenaires' | 'sms' | 'rapports' | 'parametres';
+type Section = 'ensemble' | 'abonnements' | 'acces' | 'etablissements' | 'documents' | 'paiements' | 'avoirs' | 'prestations' | 'parrainage' | 'partenaires' | 'sms' | 'rapports' | 'parametres';
 const LATER: Partial<Record<Section, [string, string]>> = {
-  paiements: ['G5d', 'Saisie et vérification des paiements, statuts, reçus provisoires.'],
-  avoirs: ['G5d', 'Trop-perçus en crédits, utilisation, demandes de remboursement.'],
+  paiements: ['G5d-2', 'Saisie et vérification des paiements, statuts, reçus provisoires.'],
+  avoirs: ['G5d-2', 'Trop-perçus en crédits, utilisation, demandes de remboursement.'],
   parrainage: ['G5h', 'Codes de parrainage, écoles filleules et crédits de 5 000 FCFA après le premier paiement confirmé.'],
   partenaires: ['G5h', 'Apporteurs d’affaires et partenaires premium, commissions et versements.'],
   sms: ['G5e', 'Crédits SMS prépayés par établissement (prix et forfaits : INFORMATION MANQUANTE).'],
-  rapports: ['G5c et G5d', 'Facturé, encaissé et impayés par période, établissement, groupe et état.'],
+  rapports: ['G5d-2', 'Facturé, encaissé et impayés par période, établissement, groupe et état.'],
 };
 
 const UNIT_SUFFIX = { days: 'jours', months: 'mois' } as const;
@@ -77,6 +79,7 @@ const STATUS_TONE: Record<Status, 'info' | 'good' | 'warn' | 'bad' | 'accent'> =
 const STATUS_FILTER: { value: string; label: string }[] = [
   { value: '', label: 'Tous les états' }, { value: 'none', label: 'Sans abonnement' }, { value: 'TRIAL', label: 'Essai gratuit' }, { value: 'PILOT', label: 'École pilote' },
   { value: 'AWAITING_ACCEPTANCE', label: 'Conditions à accepter' }, { value: 'AWAITING_PAYMENT', label: 'En attente de paiement' }, { value: 'ACTIVE', label: 'Abonnement actif' },
+  { value: 'LIMITED', label: 'Accès limité' },
 ];
 
 /** Dernier jour gratuit d'un pilote (même règle que le serveur) : la veille du même quantième N mois plus tard. */
@@ -95,13 +98,15 @@ export function Facturation() {
   return (
     <div className="grid gap-4">
       <Chips label="Commercial et facturation" value={section} onChange={setSection} options={[
-        { value: 'ensemble', label: 'Vue d’ensemble' }, { value: 'abonnements', label: 'Abonnements' }, { value: 'etablissements', label: 'Établissements clients' },
+        { value: 'ensemble', label: 'Vue d’ensemble' }, { value: 'abonnements', label: 'Abonnements' }, { value: 'acces', label: 'Accès des clients' },
+        { value: 'etablissements', label: 'Établissements clients' },
         { value: 'documents', label: 'Factures et documents' }, { value: 'paiements', label: 'Paiements' }, { value: 'avoirs', label: 'Avoirs et crédits' },
         { value: 'prestations', label: 'Prestations complémentaires' }, { value: 'parrainage', label: 'Parrainage' }, { value: 'partenaires', label: 'Partenaires et commissions' },
         { value: 'sms', label: 'SMS et crédits' }, { value: 'rapports', label: 'Rapports financiers' }, { value: 'parametres', label: 'Paramètres tarifaires' },
       ]} />
       {section === 'ensemble' && <Ensemble />}
       {section === 'abonnements' && <Abonnements />}
+      {section === 'acces' && <Acces />}
       {section === 'etablissements' && <Etablissements />}
       {section === 'documents' && <Documents />}
       {section === 'prestations' && <Prestations />}
@@ -133,9 +138,10 @@ function Ensemble() {
         <Stat label="Établissements" value={c.establishments} detail={`${c.none} sans abonnement`} />
         <Stat label="En essai" value={c.TRIAL} />
         <Stat label="Écoles pilotes" value={c.PILOT} />
-        <Stat label="Abonnés actifs" value={c.ACTIVE} detail="Paiement vérifié (lot G5d)" />
+        <Stat label="Abonnés actifs" value={c.ACTIVE} detail="Paiement vérifié (lot G5d-2)" />
         <Stat label="Conditions à accepter" value={c.AWAITING_ACCEPTANCE} tone={c.AWAITING_ACCEPTANCE ? 'warn' : undefined} />
         <Stat label="En attente de paiement" value={c.AWAITING_PAYMENT} tone={c.AWAITING_PAYMENT ? 'warn' : undefined} />
+        <Stat label="Accès limité" value={c.LIMITED} detail="Abonnement non régularisé (lot G5d-1)" tone={c.LIMITED ? 'bad' : undefined} />
         <Stat label="Alertes non lues" value={o.unreadAlerts} tone={o.unreadAlerts ? 'warn' : undefined} />
       </div>
       <Card className="grid gap-2">
@@ -173,7 +179,7 @@ function Ensemble() {
             }
           }}><Play className="size-4" /> Passer les tâches maintenant</Button>
         </div>
-        <p className="text-xs text-muted">Les tâches passent seules toutes les heures : fin d’essai, alertes avant la fin d’un pilote, fin de pilote, comptages des élèves.</p>
+        <p className="text-xs text-muted">Les tâches passent seules toutes les heures : rappels et fin d’essai, alertes avant la fin d’un pilote, fin de pilote, rappels pendant le délai de grâce ou une prolongation, accès limité quand le délai est passé, comptages des élèves, documents provisoires.</p>
         {alerts.length === 0 ? <p className="text-sm text-muted">Aucune alerte.</p> : (
           <ul className="grid gap-2">
             {alerts.map((a) => (
@@ -314,6 +320,8 @@ const EVENT_DETAILS: Record<string, string> = {
   trialStart: 'Début de l’essai', trialEnd: 'Dernier jour gratuit', trialDays: 'Jours d’essai',
   pilotStart: 'Début du pilote', pilotEnd: 'Dernier jour gratuit', pilotMonths: 'Mois gratuits',
   previousPilotEnd: 'Ancien dernier jour gratuit', lastFreeDay: 'Dernier jour gratuit', termsVersion: 'Version des conditions',
+  graceDays: 'Jours de grâce', graceStart: 'Début du délai de grâce', graceEnd: 'Fin du délai de grâce', until: 'Accès complet jusqu’au',
+  previousUntil: 'Prolongation précédente jusqu’au', extendedUntil: 'Prolongation jusqu’au', lastFullAccessDay: 'Dernier jour d’accès complet',
 };
 function eventDetails(data: Record<string, unknown>) {
   return Object.entries(data)

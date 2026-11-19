@@ -87,7 +87,7 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
 
   await rubrique(page, 'Rubrique', 'Commercial et facturation');
   await expect(page.getByRole('heading', { name: 'Commercial et facturation' })).toBeVisible();
-  for (const nom of ['Vue d’ensemble', 'Abonnements', 'Établissements clients', 'Factures et documents', 'Paiements', 'Avoirs et crédits', 'Prestations complémentaires', 'Parrainage', 'Partenaires et commissions', 'SMS et crédits', 'Rapports financiers', 'Paramètres tarifaires']) {
+  for (const nom of ['Vue d’ensemble', 'Abonnements', 'Accès des clients', 'Établissements clients', 'Factures et documents', 'Paiements', 'Avoirs et crédits', 'Prestations complémentaires', 'Parrainage', 'Partenaires et commissions', 'SMS et crédits', 'Rapports financiers', 'Paramètres tarifaires']) {
     await expect(page.getByRole('group', { name: 'Commercial et facturation' }).getByRole('button', { name: nom, exact: true })).toBeVisible();
   }
   await expect(page.getByText('Facturé et encaissé ne se confondent jamais', { exact: false })).toBeVisible();
@@ -195,7 +195,9 @@ test('Direction : lire et accepter les conditions commerciales à la fin de l’
   await connexion(page, COMPTES.direction);
   await page.goto('/espace/parametres?rubrique=abonnement');
   await expect(page.getByRole('heading', { name: 'Votre abonnement Cahiora' })).toBeVisible();
-  await expect(page.getByText('En attente d’acceptation des conditions')).toBeVisible();
+  // État de l'abonnement ; le bandeau du lot G5d-1 reprend ce libellé dans son titre (« Abonnement Cahiora : en attente… »).
+  await expect(page.getByText('En attente d’acceptation des conditions', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Abonnement Cahiora' })).toContainText('Votre période gratuite est terminée');
   await expect(page.getByText(titre)).toBeVisible();
   const accepter = page.getByRole('button', { name: 'Accepter les conditions' });
   await expect(accepter).toBeDisabled();

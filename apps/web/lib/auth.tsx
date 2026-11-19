@@ -2,6 +2,7 @@
 
 import { useRouter } from 'next/navigation';
 import * as React from 'react';
+import { loginAlert, onAccessChanged, type SchoolAccess } from './access';
 import { setCurrency } from './format';
 import { api, onSessionLost, refreshSession, setActiveRole, setSession } from './api';
 
@@ -14,6 +15,8 @@ export type Me = {
   year: { id: string; label: string } | null;
   children: Child[];
   self: Child | null;
+  /** Accès selon l'abonnement Cahiora (lot G5d-1) : personnel seulement ; null pour une famille ou sans abonnement. */
+  access: SchoolAccess | null;
 };
 
 type Ctx = {
@@ -98,6 +101,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return onSessionLost(() => setMe(null));
   }, [load]);
 
+  // Accès selon l'abonnement (lot G5d-1) : relu après une demande de régularisation ou une acceptation, et toutes les
+  // 30 minutes (le compteur change chaque jour). Une erreur de réseau laisse l'accès tel quel, sans fermer la session.
+  const refreshAccess = React.useCallback(async () => {
+    try {
+      const m = await api.get<Me>('/auth/me');
+      setMe((cur) => (cur && cur.user.id === m.user.id ? { ...cur, access: m.access } : cur));
+    } catch {
+      /* l'accès sera relu au prochain passage */
+    }
+  }, []);
+  const signedIn = !!me;
+  React.useEffect(() => {
+    if (!signedIn) return;
+    const off = onAccessChanged(refreshAccess);
+    const t = setInterval(refreshAccess, 30 * 60_000);
+    return () => {
+      off();
+      clearInterval(t);
+    };
+  }, [signedIn, refreshAccess]);
+
   const value = React.useMemo<Ctx>(() => {
     const roles = me ? [...new Set(me.user.roles.map((r) => r.role))] : [];
     const kids = me ? (me.self ? [me.self] : me.children) : [];
@@ -124,6 +148,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
         setSession(null);
         setActiveRole(null);
+        loginAlert.reset();
         setMe(null);
       },
     };

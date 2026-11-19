@@ -7,6 +7,7 @@ import { Badge, Button, Card, Chips, Empty, PageHeader, Stat } from '@/component
 import { useAuth } from '@/lib/auth';
 import { date, fcfa, hhmm, note, today } from '@/lib/format';
 import { qs, useApi } from '@/lib/use-api';
+import { AccessCard } from './access';
 import { Bars, LinkRow, Loader, Section, StatusBadge } from './bits';
 
 type DirectionDash = {
@@ -25,6 +26,8 @@ export function DirectionDashboard() {
   return (
     <>
       <PageHeader title="Tableau de bord" subtitle={`${me?.tenant.name} · ${date(today(), { weekday: 'long', day: 'numeric', month: 'long' })}`} />
+      {/* Lot G5d-1 : état de l'abonnement Cahiora et bouton « Régulariser mon abonnement » (D-G5-30 A). */}
+      <AccessCard />
       <Chips label="Site" value={site} onChange={setSite} options={[{ value: '', label: 'Tous les sites' }, ...(me?.sites ?? []).map((s) => ({ value: s.id, label: s.name }))]} />
       <Loader {...q}>
         {(d) => (

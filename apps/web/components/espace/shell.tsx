@@ -11,6 +11,7 @@ import { useRequireAuth, type Role } from '@/lib/auth';
 import { ROLE_LABEL } from '@/lib/format';
 import { NAV, isFamily } from '@/lib/nav';
 import { cn } from '@/lib/utils';
+import { AccessBanner, AccessLoginAlert } from './access';
 
 export function EspaceShell({ children }: { children: React.ReactNode }) {
   const auth = useRequireAuth();
@@ -141,6 +142,8 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
               Pour commencer, créez l’année scolaire et ses périodes dans Paramètres. Ajoutez ensuite vos classes, matières et frais.
             </Link>
           )}
+          {/* Lot G5d-1 : abonnement Cahiora (délai de grâce, prolongation, accès limité), sans bloquer le travail. */}
+          <AccessBanner />
           {auth.blockedDirection && !path.startsWith('/espace/compte') ? (
             <div className="grid gap-2 rounded-xl bg-warn-soft p-4 text-warn">
               <p className="font-bold">Ce compte Direction est limité à un site, ce qui n’est plus possible : une direction couvre tout l’établissement.</p>
@@ -152,6 +155,7 @@ export function EspaceShell({ children }: { children: React.ReactNode }) {
             children
           )}
         </main>
+        <AccessLoginAlert />
 
         {/* Barre d'onglets (téléphone) */}
         <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] lg:hidden no-print" aria-label="Raccourcis">
