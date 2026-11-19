@@ -160,6 +160,14 @@ export const AUDIT_LABELS: Record<string, string> = {
   'billing.pilot_ended': 'Cahiora : période pilote terminée, conditions à accepter',
   'billing.calendar_saved': 'Cahiora : calendrier de facturation enregistré',
   'billing.terms_accepted': 'Conditions commerciales de Cahiora acceptées',
+  // Comptages des élèves facturables (lot G5b).
+  'billing.count_recorded': 'Cahiora : comptage provisoire des élèves, vérification ouverte',
+  'billing.count_frozen': 'Cahiora : comptage des élèves figé',
+  'billing.count_blocked': 'Cahiora : comptage des élèves en attente (année scolaire absente)',
+  'billing.count_exclusion_requested': 'Comptage des élèves : exclusion demandée (inscription annulée par erreur de saisie)',
+  'billing.count_exclusion_validated': 'Comptage des élèves : exclusion validée',
+  'billing.count_exclusion_refused': 'Comptage des élèves : exclusion refusée',
+  'billing.count_departure_dated': 'Comptage des élèves : date d’un départ fixée par la direction',
   // Prestations complémentaires de Cahiora pour l'établissement (lot G5g).
   'billing.service_rule_added': 'Cahiora : prix d’une prestation pour l’établissement (tarif particulier, remise ou gratuité)',
   'billing.service_rule_ended': 'Cahiora : règle de prix d’une prestation arrêtée',
