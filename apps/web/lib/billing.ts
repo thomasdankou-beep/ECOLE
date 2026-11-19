@@ -1,4 +1,4 @@
-/** Libellés des actions de la facturation (lots G5a et G5g) dans les journaux de la plateforme et des groupes. */
+/** Libellés des actions de la facturation (lots G5a, G5b et G5g) dans les journaux de la plateforme et des groupes. */
 export const BILLING_ACTIONS: Record<string, string> = {
   'billing.trial_opened': 'Facturation : essai gratuit ouvert',
   'billing.pilot_opened': 'Facturation : école pilote partenaire activée',
@@ -8,6 +8,13 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.pilot_ended': 'Facturation : période pilote terminée, conditions à accepter',
   'billing.calendar_saved': 'Facturation : calendrier enregistré',
   'billing.terms_accepted': 'Facturation : conditions commerciales acceptées par la direction',
+  'billing.count_recorded': 'Comptages : comptage provisoire des élèves, vérification ouverte',
+  'billing.count_frozen': 'Comptages : comptage des élèves figé',
+  'billing.count_blocked': 'Comptages : comptage en attente, année scolaire absente',
+  'billing.count_exclusion_requested': 'Comptages : exclusion demandée par la direction',
+  'billing.count_exclusion_validated': 'Comptages : exclusion validée par la direction',
+  'billing.count_exclusion_refused': 'Comptages : exclusion refusée par la direction',
+  'billing.count_departure_dated': 'Comptages : date d’un départ fixée par la direction',
   'billing.terms_published': 'Facturation : conditions commerciales publiées',
   'billing.parameter_added': 'Facturation : nouvelle valeur d’un paramètre tarifaire',
   'billing.parameters.initial': 'Facturation : paramètres tarifaires initiaux (mise à jour de Cahiora)',

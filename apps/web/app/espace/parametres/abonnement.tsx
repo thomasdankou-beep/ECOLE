@@ -34,7 +34,7 @@ const frDate = (d: string | null | undefined) => (d ? new Date(`${d.slice(0, 10)
 const money = (n: number, currency: string) => `${new Intl.NumberFormat('fr-FR').format(n).replace(/[  ]/g, ' ')} ${currency === 'XOF' || currency === 'XAF' ? 'FCFA' : currency}`;
 const daysText = (n: number) => `${n} jour${n > 1 ? 's' : ''}`;
 
-export function Abonnement() {
+export function Abonnement({ openCounts }: { openCounts?: () => void }) {
   const q = useApi<Data>('/settings/subscription');
   return (
     <Loader {...q}>
@@ -46,7 +46,7 @@ export function Abonnement() {
           </div>
           <div className="grid content-start gap-4">
             <Tarif d={d} />
-            <Calendrier d={d} />
+            <Calendrier d={d} openCounts={openCounts} />
             <Historique d={d} />
           </div>
         </div>
@@ -157,7 +157,7 @@ function Tarif({ d }: { d: Data }) {
   );
 }
 
-function Calendrier({ d }: { d: Data }) {
+function Calendrier({ d, openCounts }: { d: Data; openCounts?: () => void }) {
   return (
     <Section title="Calendrier de facturation">
       {d.calendars.length === 0 ? <p className="text-sm text-muted">Aucun calendrier de facturation n’est encore fixé pour votre établissement.</p> : (
@@ -173,6 +173,7 @@ function Calendrier({ d }: { d: Data }) {
           ))}
         </ul>
       )}
+      {openCounts && <p className="mt-3 text-sm text-muted">Les comptages des élèves et leur liste sont dans la rubrique <button type="button" className="cursor-pointer font-bold text-brand underline" onClick={openCounts}>Effectifs facturables</button>.</p>}
     </Section>
   );
 }
