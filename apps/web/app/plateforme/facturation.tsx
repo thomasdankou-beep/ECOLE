@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bell, CalendarDays, History, Play, Plus } from 'lucide-react';
+import { Bell, CalendarDays, History, Play, Plus, Users } from 'lucide-react';
 import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
 import { CodeField, frDate, money, useSubmit } from './facturation-outils';
@@ -9,7 +9,8 @@ import { Prestations } from './prestations';
 
 /**
  * Commercial et facturation (lot G5a) : vue d'ensemble, abonnements, établissements clients et leurs calendriers,
- * paramètres tarifaires datés et conditions commerciales ; prestations complémentaires (lot G5g, ./prestations.tsx).
+ * paramètres tarifaires datés et conditions commerciales ; prestations complémentaires (lot G5g, ./prestations.tsx) ;
+ * comptages des élèves de chaque établissement, en nombres seulement (lot G5b).
  * Les autres rubriques arrivent avec les lots G5b à G5h.
  * Chaque opération financière demande un code actuel de l'application d'authentification.
  */
@@ -26,9 +27,14 @@ type Calendar = {
 };
 /** « dates saisies », « formule B, provisoire » ou, après un changement à la main, « formule B, provisoire, ajustée ». */
 const formulaLabel = (c: Pick<Calendar, 'formula' | 'adjusted'>) => (c.formula === 'MANUEL' ? 'dates saisies' : `formule ${c.formula}, provisoire${c.adjusted ? ', ajustée' : ''}`);
+/** Un comptage des élèves (lot G5b) : des nombres et l'empreinte de la liste, jamais un nom. */
+type PupilCount = {
+  id: string; yearLabel: string; kind: string; kindLabel: string; referenceDate: string; stage: 'PROVISIONAL' | 'FROZEN'; stageLabel: string; pupils: number; cumulative: number;
+  toCheck: number; excluded: number; listHash: string; knownAt: string; reviewUntil: string | null; reviewOpen: boolean; frozen: boolean;
+};
 type Establishment = {
   id: string; slug: string; name: string; status: 'ACTIVE' | 'SUSPENDED'; country: string; currency: string; timezone: string; today: string; createdOn: string; demo: boolean;
-  group: { id: string; name: string }; subscription: Sub | null; calendars: Calendar[];
+  group: { id: string; name: string }; subscription: Sub | null; calendars: Calendar[]; counts: PupilCount[];
 };
 type Overview = {
   counts: { establishments: number; none: number } & Record<Status, number>;
@@ -166,7 +172,7 @@ function Ensemble() {
             }
           }}><Play className="size-4" /> Passer les tâches maintenant</Button>
         </div>
-        <p className="text-xs text-muted">Les tâches passent seules toutes les heures : fin d’essai, alertes avant la fin d’un pilote, fin de pilote.</p>
+        <p className="text-xs text-muted">Les tâches passent seules toutes les heures : fin d’essai, alertes avant la fin d’un pilote, fin de pilote, comptages des élèves.</p>
         {alerts.length === 0 ? <p className="text-sm text-muted">Aucune alerte.</p> : (
           <ul className="grid gap-2">
             {alerts.map((a) => (
@@ -345,6 +351,7 @@ function HistoryDialog({ e }: { e: Establishment }) {
 function Etablissements() {
   const { list, error, load } = useEstablishments();
   const [open, setOpen] = useState<Establishment | null>(null);
+  const [counts, setCounts] = useState<Establishment | null>(null);
   if (error) return <ErrorNote error={error} />;
   if (!list) return null;
   const byGroup = new Map<string, { name: string; items: Establishment[] }>();
@@ -364,7 +371,10 @@ function Etablissements() {
               <li key={e.id} className="grid gap-1 rounded-lg bg-sunk p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span><b>{e.name}</b> <span className="text-muted">· {e.currency} · {e.timezone}</span> {e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}</span>
-                  <Button size="sm" variant="outline" onClick={() => setOpen(e)} aria-label={`Calendrier de facturation de ${e.name}`}><CalendarDays className="size-4" /> Calendrier</Button>
+                  <div className="flex flex-wrap gap-1">
+                    <Button size="sm" variant="outline" onClick={() => setCounts(e)} aria-label={`Comptages des élèves de ${e.name}`}><Users className="size-4" /> Comptages</Button>
+                    <Button size="sm" variant="outline" onClick={() => setOpen(e)} aria-label={`Calendrier de facturation de ${e.name}`}><CalendarDays className="size-4" /> Calendrier</Button>
+                  </div>
                 </div>
                 {e.calendars.length === 0 ? <span className="text-muted">Aucun calendrier de facturation.</span> : e.calendars.map((c) => (
                   <span key={c.id}>
@@ -372,6 +382,7 @@ function Etablissements() {
                     {c.adjusted && <span className="text-muted"> Motif de l’ajustement : {c.reason}</span>}
                   </span>
                 ))}
+                {e.counts[0] && <LastCount c={e.counts[0]} />}
               </li>
             ))}
           </ul>
@@ -380,7 +391,45 @@ function Etablissements() {
       <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
         {open && <CalendarDialog e={open} done={() => { setOpen(null); load(); }} />}
       </Dialog>
+      <Dialog open={!!counts} onOpenChange={(o) => !o && setCounts(null)}>
+        {counts && <CountsDialog e={counts} />}
+      </Dialog>
     </div>
+  );
+}
+
+const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
+
+function LastCount({ c }: { c: PupilCount }) {
+  return (
+    <span>
+      Dernier comptage : {c.kindLabel.toLowerCase()} du {frDate(c.referenceDate)}, {c.stageLabel.toLowerCase()} : <b>{pupilsText(c.pupils)}</b>
+      {c.reviewOpen ? ` (vérification par la direction jusqu’au ${frDate(c.reviewUntil)} inclus)` : ''}.
+    </span>
+  );
+}
+
+/** Comptages des élèves d'un établissement (lot G5b) : nombres, dates et empreinte ; la liste nominative reste dans l'école. */
+function CountsDialog({ e }: { e: Establishment }) {
+  return (
+    <DialogContent title={`Comptages des élèves : ${e.name}`} description="Des nombres seulement : la liste nominative reste dans l’espace de l’établissement. Les montants arrivent avec les documents (lot G5c).">
+      {e.counts.length === 0 ? <p className="text-sm text-muted">Aucun comptage : le premier a lieu à la fin de la période gratuite, puis aux dates du calendrier de facturation.</p> : (
+        <ul className="grid max-h-[60vh] gap-2 overflow-y-auto">
+          {e.counts.map((c) => (
+            <li key={c.id} className="grid gap-1 rounded-lg bg-sunk p-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <b>{c.kindLabel} du {frDate(c.referenceDate)}</b>
+                <Badge tone={c.stage === 'FROZEN' ? 'good' : 'warn'}>{c.stageLabel}</Badge>
+              </div>
+              <span>Année {c.yearLabel} · <b>{pupilsText(c.pupils)}</b> comptés · cumul de l’année : {c.cumulative} · à vérifier : {c.toCheck} · exclus : {c.excluded}</span>
+              {c.reviewOpen && <span className="text-warn">Vérification par la direction jusqu’au {frDate(c.reviewUntil)} inclus.</span>}
+              {c.stage === 'PROVISIONAL' && c.frozen && <span className="text-muted">Remplacé par le comptage définitif de la même date.</span>}
+              <span className="text-xs text-muted">Historique lu le {new Date(c.knownAt).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })} · empreinte de la liste {c.listHash.slice(0, 12)}…</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </DialogContent>
   );
 }
 

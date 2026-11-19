@@ -1,4 +1,4 @@
-import { Controller, Injectable, Logger, OnModuleDestroy, OnModuleInit, Post, UseGuards } from '@nestjs/common';
+import { Controller, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional, Post, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Prisma, Subscription } from '@prisma/client';
@@ -7,20 +7,20 @@ import { localDay } from '../../common/country';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
 import { PLATFORM_TZ } from './billing';
 import { addDays, daysLeft, dueAlerts, frDay, versionOn } from './billing-rules';
+import { AlreadyDone, jobOnce, notifyDirection, SYSTEM, systemJournals } from './billing-tasks';
+import { CountsService } from './counts';
 
 /**
  * Tâches planifiées de la facturation (lot G5a) : fin d'un essai, alertes avant la fin d'un pilote, fin d'un pilote.
  * Elles passent toutes les heures, avec la date du jour de chaque établissement (son fuseau). Chaque tâche est
  * inscrite dans billing_jobs, sous une clé unique, dans la même transaction que son effet : relancée, interrompue ou
  * lancée deux fois en même temps, elle ne produit jamais de doublon. Rien n'est facturé ici, aucun SMS n'est envoyé :
- * une alerte pour le Super Admin et une notification dans l'application pour la direction.
+ * une alerte pour le Super Admin et une notification dans l'application pour la direction. Les comptages des élèves
+ * facturables (lot G5b, CountsService) passent juste après, au même rythme.
  */
 
-const SYSTEM = 'Cahiora (tâche planifiée)';
 const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
-
-class AlreadyDone extends Error {}
 
 type Sub = Subscription & { tenant: { id: string; name: string; timezone: string; groupId: string } };
 
@@ -30,13 +30,16 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
   private timers: NodeJS.Timeout[] = [];
   private running = false;
 
-  constructor(private db: PlatformDb) {}
+  constructor(private db: PlatformDb, @Optional() private counts?: CountsService) {}
 
   /** Passage toutes les heures (le premier une minute après le démarrage) ; jamais pendant les tests automatiques, ni avec BILLING_JOBS=off. */
   onModuleInit() {
     if (process.env.NODE_ENV === 'test' || process.env.BILLING_JOBS === 'off') return;
     const tick = () => {
-      this.runDue().catch((e) => this.log.error(`Tâches de facturation : ${e instanceof Error ? e.message : e}`));
+      this.runDue()
+        .catch((e) => this.log.error(`Tâches de facturation : ${e instanceof Error ? e.message : e}`))
+        .then(() => this.counts?.runDue())
+        .catch((e) => this.log.error(`Comptages des élèves : ${e instanceof Error ? e.message : e}`));
     };
     this.timers.push(setTimeout(tick, 60_000), setInterval(tick, 3_600_000));
     for (const t of this.timers) t.unref?.();
@@ -86,41 +89,16 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Effet et clé de la tâche dans une seule transaction ; false si la tâche était déjà faite. */
-  private async once(key: string, kind: string, tenantId: string, dueDate: string, effect: (tx: Prisma.TransactionClient) => Promise<void>) {
-    if (await this.db.billingJob.findUnique({ where: { key }, select: { id: true } })) return false;
-    try {
-      await this.db.$transaction(async (tx) => {
-        await effect(tx);
-        const rows = await tx.$queryRaw<{ id: string }[]>`
-          INSERT INTO billing_jobs (id, key, kind, tenant_id, "dueDate", "createdAt")
-          VALUES (gen_random_uuid(), ${key}, ${kind}, ${tenantId}::uuid, ${dueDate}::date, timezone('UTC', now()))
-          ON CONFLICT (key) DO NOTHING RETURNING id`;
-        if (!rows.length) throw new AlreadyDone();
-      }, { timeout: 30000 });
-      return true;
-    } catch (e) {
-      if (e instanceof AlreadyDone) return false;
-      throw e;
-    }
+  private once(key: string, kind: string, tenantId: string, dueDate: string, effect: (tx: Prisma.TransactionClient) => Promise<void>) {
+    return jobOnce(this.db, key, kind, tenantId, dueDate, effect);
   }
 
-  /** Journaux de la plateforme, du groupe et de l'établissement, au nom de la tâche planifiée. */
-  private async journals(tx: Prisma.TransactionClient, s: Sub, action: string, data: Record<string, unknown>) {
-    await tx.platformAuditLog.create({ data: { adminId: null, action, tenantId: s.tenantId, data: data as Prisma.InputJsonValue } });
-    await tx.groupAuditLog.create({ data: { groupId: s.tenant.groupId, actorKind: 'system', actorName: SYSTEM, action, data: { tenantName: s.tenant.name, ...data } as Prisma.InputJsonValue } });
-    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${s.tenantId}, true)`;
-    await tx.auditLog.createMany({ data: [{ tenantId: s.tenantId, userId: null, userName: SYSTEM, action, entity: 'Subscription', entityId: s.id, data: data as Prisma.InputJsonValue }] });
+  private journals(tx: Prisma.TransactionClient, s: Sub, action: string, data: Record<string, unknown>) {
+    return systemJournals(tx, s.tenant, 'Subscription', s.id, action, data);
   }
 
-  /** Notification dans l'application pour chaque compte Direction actif de l'établissement (aucun SMS). */
-  private async notifyDirection(tx: Prisma.TransactionClient, tenantId: string, kind: string, title: string, body: string) {
-    await tx.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-    const roles = await tx.userRole.findMany({ where: { role: 'DIRECTION', user: { status: 'ACTIVE' } }, select: { userId: true } });
-    const ids = [...new Set(roles.map((r) => r.userId))];
-    if (ids.length) {
-      await tx.notification.createMany({ data: ids.map((userId) => ({ tenantId, userId, channel: 'IN_APP' as const, kind, title, body, status: 'SENT' as const, sentAt: new Date() })) });
-    }
+  private notifyDirection(tx: Prisma.TransactionClient, tenantId: string, kind: string, title: string, body: string) {
+    return notifyDirection(tx, tenantId, kind, title, body);
   }
 
   /** Fin de l'essai ou du pilote : l'abonnement attend l'acceptation des conditions commerciales (§4, §13). */
@@ -171,9 +149,13 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
 @UseGuards(PlatformGuard)
 @Controller()
 export class BillingJobsController {
-  constructor(private jobs: BillingJobsService) {}
+  constructor(private jobs: BillingJobsService, private counts: CountsService) {}
 
-  /** Passe les tâches tout de suite (sans attendre l'heure suivante) ; sans effet sur ce qui est déjà fait. */
+  /** Passe les tâches tout de suite (sans attendre l'heure suivante), comptages compris ; sans effet sur ce qui est déjà fait. */
   @Post('platform/billing/jobs/run') @Throttle({ default: { limit: 6, ttl: 60000 } })
-  run() { return this.jobs.runDue(); }
+  async run() {
+    const billing = await this.jobs.runDue();
+    const counts = await this.counts.runDue();
+    return { done: [...billing.done, ...counts.done], busy: billing.busy || counts.busy };
+  }
 }

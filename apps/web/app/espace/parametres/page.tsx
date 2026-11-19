@@ -12,6 +12,7 @@ import { useAuth } from '@/lib/auth';
 import type { SchoolIdentity } from '@/components/print/letterhead';
 import { Abonnement } from './abonnement';
 import { Coefficients } from './coefficients';
+import { Effectifs } from './effectifs';
 import { Etablissement, type IdentitySettings } from './etablissement';
 import { Honneur } from './honneur';
 import { ImageEcole, type PublicTexts } from './image';
@@ -43,8 +44,9 @@ export default function Parametres() {
       <Chips label="Rubrique" value={tab} onChange={setTab} options={[
         { value: 'etablissement', label: 'Établissement' }, { value: 'image', label: 'Logo et site public' }, { value: 'honneur', label: 'Élèves à l’honneur' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
         { value: 'structure', label: 'Sites, salles, matières' }, { value: 'annee', label: 'Année et périodes' }, { value: 'regles', label: 'Mentions et règles' }, { value: 'abonnement', label: 'Abonnement Cahiora' },
+        { value: 'effectifs', label: 'Effectifs facturables' },
       ]} />
-      {tab === 'abonnement' ? <Abonnement /> : <Loader {...q}>
+      {tab === 'abonnement' ? <Abonnement openCounts={() => setTab('effectifs')} /> : tab === 'effectifs' ? <Effectifs /> : <Loader {...q}>
         {(s) => (
           <>
             {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} locale={s.tenant} reload={q.reload} />}

@@ -271,6 +271,31 @@ export type BillableCount = {
  * (règle A du 12 novembre 2026). Aucune facture n'est créée ici : ces données serviront au lot de facturation.
  */
 export async function billableEnrollments(tx: Tx, academicYearId: string, date: string, timeZone: string, knownAt: Date = new Date()): Promise<BillableCount> {
+  const { at, rows } = await billableRows(tx, academicYearId, date, timeZone, knownAt);
+  const out: BillableCount = { date, timeZone, at, knownAt, count: 0, items: [], toReview: [] };
+  for (const r of rows) {
+    if (r.state === 'UNKNOWN') {
+      out.toReview.push({ enrollmentId: r.enrollmentId, studentId: r.studentId, matricule: r.matricule, reason: 'Départ enregistré sans date avant l’historique des inscriptions' });
+    } else if (r.state === 'ACTIVE') {
+      out.items.push({ enrollmentId: r.enrollmentId, studentId: r.studentId, matricule: r.matricule, type: r.type, classId: r.classId, siteId: r.siteId });
+    }
+  }
+  out.count = out.items.length;
+  return out;
+}
+
+/**
+ * Une inscription de l'année vue à la fin du jour R (même calcul que billableEnrollments) : son état, sa classe et son
+ * site à cette date et, pour un départ enregistré sans date avant l'historique (état UNKNOWN), la période concernée :
+ * début, et instant avant lequel le départ a eu lieu s'il est connu (retour de l'élève). Sert aux comptages (lot G5b).
+ */
+export type BillableRow = {
+  enrollmentId: string; studentId: string; matricule: string; type: string | null; status: string;
+  classId: string; siteId: string | null; state: 'ACTIVE' | 'INACTIVE' | 'UNKNOWN';
+  unknown: { since: Date; before: Date | null } | null;
+};
+
+export async function billableRows(tx: Tx, academicYearId: string, date: string, timeZone: string, knownAt: Date = new Date()): Promise<{ at: Date; rows: BillableRow[] }> {
   const at = endOfSchoolDay(date, timeZone);
   const rows = await tx.enrollment.findMany({
     where: { academicYearId, enrolledAt: { lte: at } },
@@ -281,16 +306,20 @@ export async function billableEnrollments(tx: Tx, academicYearId: string, date: 
     orderBy: [{ enrolledAt: 'asc' }, { id: 'asc' }],
   });
   const sites = new Map((await tx.class.findMany({ where: { academicYearId }, select: { id: true, siteId: true } })).map((c) => [c.id, c.siteId]));
-  const out: BillableCount = { date, timeZone, at, knownAt, count: 0, items: [], toReview: [] };
-  for (const r of rows) {
-    const state = stateAt(enrollmentEpisodes(r, r.events), date, at, knownAt);
-    if (state === 'UNKNOWN') {
-      out.toReview.push({ enrollmentId: r.id, studentId: r.studentId, matricule: r.student.matricule, reason: 'Départ enregistré sans date avant l’historique des inscriptions' });
-    } else if (state === 'ACTIVE') {
+  return {
+    at,
+    rows: rows.map((r) => {
+      const episodes = enrollmentEpisodes(r, r.events);
+      const state = stateAt(episodes, date, at, knownAt);
       const classId = classAt(r, r.events, at, knownAt);
-      out.items.push({ enrollmentId: r.id, studentId: r.studentId, matricule: r.student.matricule, type: r.type, classId, siteId: sites.get(classId) ?? null });
-    }
-  }
-  out.count = out.items.length;
-  return out;
+      // Période dont la fin est inconnue et qui couvre R (même règle que stateAt) : celle du départ à dater.
+      const open = state === 'UNKNOWN'
+        ? episodes.find((ep) => ep.start <= at && ep.startRecorded <= knownAt && ep.end?.kind === 'UNKNOWN' && (!ep.end.before || ep.end.before > at))
+        : undefined;
+      return {
+        enrollmentId: r.id, studentId: r.studentId, matricule: r.student.matricule, type: r.type, status: r.status, classId, siteId: sites.get(classId) ?? null, state,
+        unknown: open && open.end?.kind === 'UNKNOWN' ? { since: open.start, before: open.end.before } : null,
+      };
+    }),
+  };
 }

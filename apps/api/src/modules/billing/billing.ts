@@ -17,6 +17,7 @@ import {
   calendarErrors, CalendarDates, calendarProposal, calendarProposals, daysBetween, daysLeft, frDay, isAdjusted, isDay, isYearLabel, PARAMETER_KEYS, parameterError,
   ParameterKey, PARAMETERS, pilotEndDay, retroactiveChanges, STATUS_LABELS, subscriptionKindLabel, trialEndDay, versionOn, yearDatesError,
 } from './billing-rules';
+import { CountRecord, countView, sortCounts } from './counts-rules';
 
 /**
  * Facturation de Cahiora, lot G5a : paramètres tarifaires datés, conditions commerciales, calendriers des
@@ -111,6 +112,15 @@ export function subscriptionView(s: Subscription, today: string) {
     id: s.id, status: s.status, statusLabel: STATUS_LABELS[s.status], statusSince: s.statusSince,
     trialStart: iso(s.trialStart), trialEnd: iso(s.trialEnd), trialDays: s.trialDays, pilotStart: iso(s.pilotStart), pilotEnd: iso(s.pilotEnd), pilotMonths: s.pilotMonths,
     freeDaysLeft: last ? daysLeft(today, last) : null, acceptedAt: s.acceptedAt, acceptedByName: s.acceptedByName, acceptedTariff: s.acceptedTariff,
+  };
+}
+
+/** Un comptage des élèves (lot G5b) vu par le Super Admin : nombres, dates et empreinte de la liste, jamais un nom. */
+function countRecord(c: Prisma.BillingCountGetPayload<object>): CountRecord {
+  return {
+    id: c.id, yearLabel: c.yearLabel, kind: c.kind, referenceDate: iso(c.referenceDate)!, stage: c.stage, calendarVersion: c.calendarVersion, pupils: c.pupils,
+    cumulative: c.cumulative, toCheck: c.toCheck, excluded: c.excluded, listHash: c.listHash, at: c.at, knownAt: c.knownAt, reviewUntil: iso(c.reviewUntil),
+    timeZone: c.timeZone, createdAt: c.createdAt,
   };
 }
 
@@ -241,15 +251,18 @@ export class BillingService {
       orderBy: [{ name: 'asc' }, { createdAt: 'asc' }],
       select: {
         id: true, slug: true, name: true, status: true, country: true, currency: true, timezone: true, settings: true, createdAt: true,
-        group: { select: { id: true, name: true } }, subscription: true, billingCalendars: true,
+        group: { select: { id: true, name: true } }, subscription: true, billingCalendars: true, billingCounts: true,
       },
     });
     return tenants.map((t) => {
       const today = localDay(t.timezone);
+      const counts = sortCounts(t.billingCounts.map(countRecord));
       return {
         id: t.id, slug: t.slug, name: t.name, status: t.status, country: t.country, currency: t.currency, timezone: t.timezone, today,
         createdOn: localDay(t.timezone, t.createdAt), demo: !!(t.settings as Record<string, unknown> | null)?.demo, group: t.group,
         subscription: t.subscription ? subscriptionView(t.subscription, today) : null, calendars: latestCalendars(t.billingCalendars),
+        // Comptages des élèves (lot G5b) : des nombres seulement ; la liste nominative reste dans l'espace de l'école.
+        counts: counts.map((c) => countView(c, today, counts)),
       };
     });
   }

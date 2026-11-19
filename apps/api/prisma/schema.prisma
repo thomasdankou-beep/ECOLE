@@ -47,6 +47,8 @@ model Tenant {
   billingCalendars BillingCalendar[]
   /// Prestations complémentaires (lot G5g) : tarifs particuliers, remises et gratuités propres à l'établissement.
   serviceRates     ServiceRate[]
+  /// Comptages des élèves facturables (lot G5b) : des nombres seulement, la liste nominative reste dans l'école.
+  billingCounts    BillingCount[]
 
   @@index([groupId])
   @@map("tenants")
@@ -512,6 +514,144 @@ model ServiceRateEnd {
   @@map("service_rate_ends")
 }
 
+// ---------------------------------------------------------------- Comptages des élèves facturables (lot G5b)
+// Cahier des charges G5 (§5) et décisions de Dankou du 19 novembre 2026 (D-G5-13 B, D-G5-14 A, D-G5-16 A). Le
+// comptage lui-même (nombres, empreinte) est dans la zone de la plateforme ; la liste des inscriptions comptées et les
+// demandes de correction restent dans l'espace de l'école (Row Level Security de l'établissement). Tout s'écrit par des
+// fonctions de la base qui refont chaque contrôle (migration comptages_g5b). Aucun montant, aucune facture ici.
+
+enum BillingCountKind {
+  /// Fin de l'essai gratuit : comptage à la fin du dernier jour gratuit, figé aussitôt (première facture, lot G5c).
+  TRIAL_END
+  /// Fin de la période pilote : même règle.
+  PILOT_END
+  /// Comptage initial (date R) du calendrier de l'établissement.
+  INITIAL
+  /// Première régularisation du calendrier.
+  FIRST_REGULARIZATION
+  /// Régularisation finale du calendrier.
+  FINAL_REGULARIZATION
+}
+
+enum BillingCountStage {
+  /// Le lendemain de la date : ouvre la vérification par la direction (COUNT_REVIEW_DAYS jours, 15 par défaut).
+  PROVISIONAL
+  /// Instantané définitif, à la fin de la vérification (ou aussitôt pour une fin d'essai ou de pilote) : il ne change plus.
+  FROZEN
+}
+
+/// Comptage des élèves facturables d'un établissement à une date (zone de la plateforme) : type, étape, nombre, cumul de
+/// l'année, éléments à vérifier, exclusions et empreinte de la liste, jamais un nom. En ajout seul, une seule ligne par
+/// établissement, année, type, date et étape : une tâche relancée ne crée jamais de doublon.
+model BillingCount {
+  id              String             @id @default(uuid()) @db.Uuid
+  tenantId        String             @map("tenant_id") @db.Uuid
+  tenant          Tenant             @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  yearLabel       String
+  academicYearId  String             @db.Uuid
+  academicYear    AcademicYear       @relation(fields: [academicYearId], references: [id], onDelete: Restrict)
+  kind            BillingCountKind
+  /// Jour de référence, compté jusqu'à minuit dans le fuseau de l'établissement.
+  referenceDate   DateTime           @db.Date
+  stage           BillingCountStage
+  /// Version du calendrier de facturation qui a donné la date (comptages du calendrier).
+  calendarVersion Int?
+  /// Inscriptions comptées à la date.
+  pupils          Int
+  /// Élèves comptés au moins une fois dans l'année, dans les comptages figés jusqu'à celui-ci (une fois par élève et par
+  /// année), moins les exclusions validées.
+  cumulative      Int
+  /// Inscriptions comptées dont le départ, enregistré avant l'historique des inscriptions, n'a pas de date confirmée.
+  toCheck         Int
+  /// Inscriptions retirées du comptage par une exclusion validée.
+  excluded        Int
+  /// Empreinte SHA-256 de la liste (inscription, motif, date de départ), pour prouver qu'elle n'a pas changé.
+  listHash        String
+  /// Fin du jour de référence (instant) et état de l'historique lu (instant) : refaire le calcul donne la même liste.
+  at              DateTime
+  knownAt         DateTime
+  /// Dernier jour de la vérification par la direction (comptage provisoire seulement).
+  reviewUntil     DateTime?          @db.Date
+  timeZone        String
+  createdAt       DateTime           @default(now())
+  items           BillingCountItem[]
+  corrections     CountCorrection[]
+
+  @@unique([tenantId, yearLabel, kind, referenceDate, stage])
+  @@index([tenantId, createdAt])
+  @@map("billing_counts")
+}
+
+/// Ligne d'un comptage (espace de l'école) : une inscription comptée, ou retirée par une exclusion validée. La classe et
+/// le site sont ceux de la date de référence. En ajout seul ; ni la plateforme ni le groupe ne la lisent.
+model BillingCountItem {
+  id            String       @id @default(uuid()) @db.Uuid
+  tenantId      String       @map("tenant_id") @db.Uuid
+  countId       String       @db.Uuid
+  count         BillingCount @relation(fields: [countId], references: [id], onDelete: Restrict)
+  enrollmentId  String       @db.Uuid
+  enrollment    Enrollment   @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  classId       String       @db.Uuid
+  siteId        String?      @db.Uuid
+  counted       Boolean
+  /// ACTIVE (inscription active à la date), DEPARTURE_AUDIT (départ d'avant l'historique, daté par le journal d'audit),
+  /// DEPARTURE_UNKNOWN (départ d'avant l'historique sans date : compté), DEPARTURE_DIRECTION (date fixée par la
+  /// direction pendant la vérification), EXCLUDED (exclusion validée : pas comptée).
+  basis         String
+  departureDate DateTime?    @db.Date
+
+  @@unique([countId, enrollmentId])
+  @@index([tenantId, enrollmentId])
+  @@map("billing_count_items")
+}
+
+enum CountCorrectionKind {
+  /// Exclusion d'une inscription annulée pour erreur de saisie (règle du 13 novembre 2026), justifiée puis validée.
+  EXCLUSION
+  /// Date d'un départ enregistré avant l'historique des inscriptions, fixée par la direction pendant la vérification
+  /// (D-G5-16 A) : jamais après la date du journal d'audit.
+  DEPARTURE_DATE
+}
+
+enum CountCorrectionStatus {
+  PENDING
+  VALIDATED
+  REFUSED
+}
+
+/// Demande de correction d'un comptage par la direction (espace de l'école), avec sa justification et, au besoin, un
+/// justificatif. Une exclusion est validée par la direction tant qu'aucun document émis n'est touché (D-G5-13 B ; les
+/// documents arrivent au lot G5c). Jamais supprimée ; seule la décision s'inscrit, une fois.
+model CountCorrection {
+  id              String                @id @default(uuid()) @db.Uuid
+  tenantId        String                @map("tenant_id") @db.Uuid
+  kind            CountCorrectionKind
+  enrollmentId    String                @db.Uuid
+  enrollment      Enrollment            @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  /// Comptage en vérification au moment de la demande.
+  countId         String                @db.Uuid
+  count           BillingCount          @relation(fields: [countId], references: [id], onDelete: Restrict)
+  departureDate   DateTime?             @db.Date
+  justification   String
+  fileKey         String?
+  fileMime        String?
+  fileSize        Int?
+  status          CountCorrectionStatus
+  requestedById   String?               @db.Uuid
+  requestedByName String
+  requestedAt     DateTime              @default(now())
+  /// school (direction) ; platform (Super Admin, quand un document émis est touché : lot G5c).
+  decidedByKind   String?
+  decidedById     String?               @db.Uuid
+  decidedByName   String?
+  decidedAt       DateTime?
+  decisionNote    String?
+
+  @@index([tenantId, enrollmentId])
+  @@index([countId])
+  @@map("count_corrections")
+}
+
 model Site {
   id        String   @id @default(uuid()) @db.Uuid
   tenantId  String   @map("tenant_id") @db.Uuid
@@ -545,6 +685,7 @@ model AcademicYear {
   classes           Class[]
   enrollments       Enrollment[]
   internshipPeriods InternshipPeriod[]
+  billingCounts     BillingCount[]
 
   @@unique([tenantId, label])
   @@map("academic_years")
@@ -927,26 +1068,29 @@ enum EnrollmentType {
 
 /// Inscription : élève × classe × année. Une seule par élève et par année ; jamais supprimée (lot G4).
 model Enrollment {
-  id             String            @id @default(uuid()) @db.Uuid
-  tenantId       String            @map("tenant_id") @db.Uuid
-  studentId      String            @db.Uuid
-  student        Student           @relation(fields: [studentId], references: [id])
-  classId        String            @db.Uuid
-  class          Class             @relation(fields: [classId], references: [id])
-  academicYearId String            @db.Uuid
-  academicYear   AcademicYear      @relation(fields: [academicYearId], references: [id])
-  status         EnrollmentStatus  @default(ACTIVE)
-  enrolledAt     DateTime          @default(now())
+  id               String             @id @default(uuid()) @db.Uuid
+  tenantId         String             @map("tenant_id") @db.Uuid
+  studentId        String             @db.Uuid
+  student          Student            @relation(fields: [studentId], references: [id])
+  classId          String             @db.Uuid
+  class            Class              @relation(fields: [classId], references: [id])
+  academicYearId   String             @db.Uuid
+  academicYear     AcademicYear       @relation(fields: [academicYearId], references: [id])
+  status           EnrollmentStatus   @default(ACTIVE)
+  enrolledAt       DateTime           @default(now())
   /// Inscription ou réinscription ; vide pour les inscriptions enregistrées avant le lot G4.
-  type           EnrollmentType?
+  type             EnrollmentType?
   /// Départ en cours d'année (transfert, abandon) : date de sortie et motif.
-  exitDate       DateTime?         @db.Date
-  exitReason     String?
+  exitDate         DateTime?          @db.Date
+  exitReason       String?
   /// Annulation par la direction : date, motif, auteur. Une inscription annulée ne compte plus à partir de cette date.
-  cancelledAt    DateTime?
-  cancelReason   String?
-  cancelledById  String?           @db.Uuid
-  events         EnrollmentEvent[]
+  cancelledAt      DateTime?
+  cancelReason     String?
+  cancelledById    String?            @db.Uuid
+  events           EnrollmentEvent[]
+  /// Lot G5b : lignes des comptages des élèves facturables et demandes de correction de la direction.
+  countItems       BillingCountItem[]
+  countCorrections CountCorrection[]
 
   @@unique([studentId, academicYearId])
   @@index([classId])
