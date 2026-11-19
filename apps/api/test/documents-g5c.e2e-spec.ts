@@ -31,6 +31,7 @@ import { COUNT_KIND_LABELS } from '../src/modules/billing/counts-rules';
 import { FilesService } from '../src/modules/files/files.service';
 import { BillingDocumentsService, PROVISIONAL_MENTION } from '../src/modules/billing/documents';
 import { nextLine } from '../src/modules/billing/documents-rules';
+import { PROFORMA_DUE_MISSING, QUOTE_VALIDITY_MISSING } from '../src/modules/billing/service-documents';
 import { PlatformDb } from '../src/modules/platform/platform';
 
 const TZ = 'Africa/Porto-Novo';
@@ -763,5 +764,155 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     expect(mineOnly.map((x: Exclusion & { status: string }) => `${x.tenant.id === K.id ? 'K' : 'L'}:${x.status}`).sort()).toEqual([
       'K:REFUSED', 'K:VALIDATED', 'K:VALIDATED', 'L:VALIDATED',
     ]);
+  });
+});
+
+describe('Lot G5c · devis et proformas de prestations (catalogue G5g ; données fictives)', () => {
+  const ids: Record<string, string> = {};
+  const send = async (body: object) => pf.post('/billing/service-documents', { code: await code(), ...body });
+  const serviceDocs = async (s: School) => (await docsOf(s.groupId)).filter((x) => x.kind === 'SERVICE_QUOTE' || x.kind === 'SERVICE_PROFORMA');
+  const lineOf = (l: { tenantId: string; label: string; amount: number; serviceId: string | null; serviceName: string | null; quantity: number | null; unitPrice: number | null; priceBasis: string | null }) => ({
+    tenantId: l.tenantId, label: l.label, amount: l.amount, serviceId: l.serviceId, serviceName: l.serviceName, quantity: l.quantity, unitPrice: l.unitPrice, priceBasis: l.priceBasis,
+  });
+
+  beforeAll(async () => {
+    for (const s of await admin.service.findMany({ where: { code: { in: ['FORMATION_ET_PRISE_EN_MAIN', 'CONFIGURATION_AUTONOME', 'PARAMETRAGE_COMPLET', 'INTERVENTION_SUR_SITE'] } } })) {
+      ids[s.code] = s.id;
+    }
+  });
+
+  it('test 16 : la formation à 15 000 F sur une proforma ; rien n’est ajouté d’office ; la base refait chaque nom et chaque prix du catalogue', async () => {
+    const form = ids.FORMATION_ET_PRISE_EN_MAIN;
+    const conf = ids.CONFIGURATION_AUTONOME;
+    const site = ids.INTERVENTION_SUR_SITE;
+    // Saisies refusées avant toute écriture (aucun document, code jamais consommé pour rien).
+    expect(message(await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id }))).toMatch(/Ajoutez au moins une prestation/);
+    expect(message(await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: site, quantity: 1, unitPrice: 30_000 }] })))
+      .toMatch(/Intervention sur site : prestation sur devis, établissez d’abord un devis, puis sa proforma/);
+    expect(message(await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: form, quantity: 1, unitPrice: 10_000 }] }))).toMatch(/le prix vient du catalogue/);
+    expect(message(await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: form, quantity: 1 }, { serviceId: form, quantity: 2 }] })))
+      .toMatch(/une seule ligne par prestation/);
+    expect((await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: form, quantity: 0 }] })).status).toBe(400);
+    expect((await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: randomUUID(), quantity: 1 }] })).status).toBe(404);
+    expect((await send({ kind: 'SERVICE_PROFORMA', tenantId: randomUUID(), items: [{ serviceId: form, quantity: 1 }] })).status).toBe(404);
+    expect(await serviceDocs(L)).toEqual([]);
+
+    const r = await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: form, quantity: 1 }, { serviceId: conf, quantity: 1 }] });
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ total: 15_000, reference: expect.stringMatching(/^PROV-[0-9A-F]{10}$/) });
+    const [doc] = await serviceDocs(L);
+    expect(doc).toMatchObject({
+      id: r.body.documentId, kind: 'SERVICE_PROFORMA', total: 15_000, currency: 'XOF', dueDate: null, yearLabel: null, relatedDocumentId: null, createdByKind: 'platform',
+      createdById: sa.id, createdByName: sa.name,
+    });
+    expect(dayOf(doc.issueDate)).toBe(T);
+    expect(doc.lines.map(lineOf)).toEqual([
+      { tenantId: L.id, label: `${L.name} · Formation et prise en main`, amount: 15_000, serviceId: form, serviceName: 'Formation et prise en main', quantity: 1, unitPrice: 15_000, priceBasis: 'CATALOG' },
+      { tenantId: L.id, label: `${L.name} · Configuration autonome`, amount: 0, serviceId: conf, serviceName: 'Configuration autonome', quantity: 1, unitPrice: 0, priceBasis: 'FREE_SERVICE' },
+    ]);
+    expect(doc.lines.every((l) => l.countId === null && l.pupils === null && l.correctionId === null)).toBe(true);
+    expect(doc.data).toMatchObject({
+      title: 'Proforma · prestations Cahiora', mention: PROVISIONAL_MENTION, client: { groupId: L.groupId, name: L.groupName }, establishments: [{ tenantId: L.id, name: L.name }],
+      priceDay: T, quote: null, validity: null, due: PROFORMA_DUE_MISSING,
+      items: [
+        { serviceId: form, code: 'FORMATION_ET_PRISE_EN_MAIN', basis: 'CATALOG', basisLabel: 'Prix du catalogue', catalogAmount: 15_000, rule: null },
+        { serviceId: conf, code: 'CONFIGURATION_AUTONOME', basis: 'FREE_SERVICE', basisLabel: 'Prestation gratuite', catalogAmount: null, rule: null },
+      ],
+    });
+
+    // La base refait chaque ligne : nom, base et prix du catalogue de ce jour, montant, prestation sur devis, doublon.
+    const good = lineOf(doc.lines[0]);
+    const refused = (lines: object[], pattern: RegExp, o: Parameters<typeof issue>[2] = {}) =>
+      expect(issue(L.groupId, lines, { kind: 'SERVICE_PROFORMA', ...o })).rejects.toThrow(pattern);
+    await refused([{ ...good, unitPrice: 10_000, amount: 10_000 }], /nom et prix du catalogue de ce jour attendus/);
+    await refused([{ ...good, priceBasis: 'QUOTE' }], /nom et prix du catalogue de ce jour attendus/);
+    await refused([{ ...good, serviceName: 'Formation offerte' }], /nom et prix du catalogue de ce jour attendus/);
+    await refused([{ ...good, amount: 14_000 }], /montant différent de quantité × prix unitaire/);
+    await refused([{ ...good, serviceId: site, serviceName: 'Intervention sur site', priceBasis: 'QUOTE', unitPrice: 30_000, amount: 30_000 }], /prestation sur devis : un devis d'abord, puis sa proforma/);
+    await refused([good, { ...good }], /une prestation figure une seule fois par établissement dans un document/);
+    await refused([{ ...good, pupils: 1 }], /prestation, quantité et prix unitaire attendus/);
+    await refused([good], /prestation non proposée ce jour-là/, { issueDay: '2026-11-13' });
+    await refused([good], /ce document ne peut pas être lié/, { kind: 'SERVICE_QUOTE', related: doc.id });
+    await refused([good], /ce document ne peut pas être lié/, { related: (await docsOf(L.groupId))[0].id });
+    expect(await serviceDocs(L)).toHaveLength(1);
+  });
+
+  it('les prix de la base sont ceux du catalogue de G5g, règle par règle (remise, tarif particulier) ; la proforma suit la remise de l’établissement', async () => {
+    const reason = 'Règle fictive (tests du lot G5c)';
+    const form = ids.FORMATION_ET_PRISE_EN_MAIN;
+    const param = ids.PARAMETRAGE_COMPLET;
+    expect((await pf.post(`/billing/services/${form}/rates`, { kind: 'DISCOUNT_PERCENT', tenantId: L.id, value: 1000, effectiveFrom: T, reason, code: await code() })).status).toBe(201);
+    expect((await pf.post(`/billing/services/${param}/rates`, { kind: 'SPECIAL_PRICE', tenantId: L.id, currency: 'XOF', value: 45_000, effectiveFrom: T, reason, code: await code() })).status).toBe(201);
+    for (const s of [L, K]) {
+      const prices = (await pf.get(`/billing/services/prices?tenantId=${s.id}&day=${T}`)).body.items as { id: string; amount: number | null; basis: string; name: string }[];
+      expect(prices.length).toBeGreaterThanOrEqual(4);
+      for (const p of prices) {
+        const [db] = await admin.$queryRaw<{ amount: number | null; basis: string }[]>`SELECT amount, basis FROM service_unit_price(${p.id}::uuid, ${s.id}::uuid, 'XOF', ${T}::date)`;
+        expect({ service: p.name, amount: db.amount, basis: db.basis }).toEqual({ service: p.name, amount: p.amount, basis: p.basis });
+      }
+    }
+    const of = async (s: School, id: string) => (await admin.$queryRaw<{ amount: number | null; basis: string }[]>`SELECT amount, basis FROM service_unit_price(${id}::uuid, ${s.id}::uuid, 'XOF', ${T}::date)`)[0];
+    expect(await of(L, form)).toEqual({ amount: 13_500, basis: 'DISCOUNT' });
+    expect(await of(L, param)).toEqual({ amount: 45_000, basis: 'SPECIAL_PRICE' });
+    expect(await of(K, form)).toEqual({ amount: 15_000, basis: 'CATALOG' });
+
+    const r = await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, items: [{ serviceId: form, quantity: 2 }] });
+    expect(r.status).toBe(201);
+    expect(r.body.total).toBe(27_000);
+    const doc = (await serviceDocs(L)).find((x) => x.id === r.body.documentId)!;
+    expect(doc.lines[0]).toMatchObject({ unitPrice: 13_500, quantity: 2, amount: 27_000, priceBasis: 'DISCOUNT' });
+    expect(doc.data).toMatchObject({ items: [{ basis: 'DISCOUNT', basisLabel: 'Remise pour cet établissement', catalogAmount: 15_000, rule: 'Remise en pourcentage de 10 %' }] });
+  });
+
+  it('devis : prestation sur devis au prix saisi ; sa proforma le reprend tel quel, une seule fois ; la direction est prévenue ; trois journaux', async () => {
+    const site = ids.INTERVENTION_SUR_SITE;
+    const param = ids.PARAMETRAGE_COMPLET;
+    expect(message(await send({ kind: 'SERVICE_QUOTE', tenantId: L.id, items: [{ serviceId: site, quantity: 1 }] }))).toMatch(/saisissez le prix unitaire \(prestation sur devis\)/);
+    const q = await send({ kind: 'SERVICE_QUOTE', tenantId: L.id, items: [{ serviceId: site, quantity: 2, unitPrice: 25_000 }, { serviceId: param, quantity: 1 }] });
+    expect(q.status).toBe(201);
+    expect(q.body.total).toBe(2 * 25_000 + 45_000);
+    const quote = (await serviceDocs(L)).find((x) => x.id === q.body.documentId)!;
+    expect(quote).toMatchObject({ kind: 'SERVICE_QUOTE', total: 95_000, dueDate: null, relatedDocumentId: null });
+    expect(quote.lines.map((l) => `${l.serviceName}:${l.priceBasis}:${l.quantity}×${l.unitPrice}=${l.amount}`)).toEqual([
+      'Intervention sur site:QUOTE:2×25000=50000', 'Paramétrage complet:SPECIAL_PRICE:1×45000=45000',
+    ]);
+    expect(quote.data).toMatchObject({ title: 'Devis provisoire · prestations Cahiora', validity: QUOTE_VALIDITY_MISSING, due: null, quote: null });
+
+    // Une proforma reprend le devis tel quel : ni prestation ajoutée, ni autre établissement, ni autre document.
+    expect(message(await send({ kind: 'SERVICE_QUOTE', tenantId: L.id, quoteId: quote.id, items: [{ serviceId: param, quantity: 1 }] }))).toMatch(/Seule une proforma reprend un devis/);
+    expect(message(await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, quoteId: quote.id, items: [{ serviceId: param, quantity: 1 }] }))).toMatch(/telles quelles/);
+    expect((await send({ kind: 'SERVICE_PROFORMA', tenantId: K.id, quoteId: quote.id })).status).toBe(404);
+    expect((await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, quoteId: (await serviceDocs(L))[0].id })).status).toBe(404);
+    const copy = quote.lines.map(lineOf);
+    const refused = (lines: object[], pattern: RegExp) => expect(issue(L.groupId, lines, { kind: 'SERVICE_PROFORMA', related: quote.id })).rejects.toThrow(pattern);
+    await refused([copy[0]], /une proforma reprend les lignes du devis, telles quelles/);
+    await refused([{ ...copy[0], unitPrice: 20_000, amount: 40_000 }, copy[1]], /ligne 1 : une proforma reprend les lignes du devis, telles quelles/);
+    await refused([copy[1], copy[0]], /ligne 1 : une proforma reprend les lignes du devis, telles quelles/);
+
+    const p = await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, quoteId: quote.id });
+    expect(p.status).toBe(201);
+    expect(p.body.total).toBe(95_000);
+    const proforma = (await serviceDocs(L)).find((x) => x.id === p.body.documentId)!;
+    expect(proforma).toMatchObject({ kind: 'SERVICE_PROFORMA', relatedDocumentId: quote.id, total: 95_000, dueDate: null });
+    expect(proforma.lines.map(lineOf)).toEqual(copy);
+    expect(proforma.data).toMatchObject({ quote: { documentId: quote.id, reference: quote.reference }, priceDay: T, due: PROFORMA_DUE_MISSING, items: (quote.data as { items: unknown[] }).items });
+    expect(message(await send({ kind: 'SERVICE_PROFORMA', tenantId: L.id, quoteId: quote.id }))).toMatch(/Ce devis a déjà sa proforma/);
+    await refused(copy, /ce devis a déjà sa proforma/);
+
+    // La direction de L (école indépendante) est prévenue dans l'application et voit ses devis et proformas.
+    const notes = await inTenant(L.id, (tx) => tx.notification.findMany({ where: { userId: L.directionId, kind: { in: ['billing.service_quote_issued', 'billing.service_proforma_issued'] } } }));
+    expect(notes.map((x) => x.title).sort()).toEqual(['Devis de prestations Cahiora', 'Proforma de prestations Cahiora', 'Proforma de prestations Cahiora', 'Proforma de prestations Cahiora']);
+    expect(notes.find((x) => x.body.includes(quote.reference))?.body).toBe(`Devis de prestations ${quote.reference} : ${money(95_000, 'XOF')}, dans Paramètres › Abonnement Cahiora. ${PROVISIONAL_MENTION}`);
+    const seen = (await as(L.direction).get('/settings/billing-documents')).body.documents as { kind: string; label: string; reference: string; lines: object[] }[];
+    expect(seen.find((x) => x.reference === quote.reference)).toMatchObject({
+      label: 'Devis de prestations', lines: [{ serviceName: 'Intervention sur site', quantity: 2, unitPrice: 25_000, amount: 50_000 }, { serviceName: 'Paramétrage complet' }],
+    });
+    expect(seen.filter((x) => x.kind === 'SERVICE_PROFORMA').map((x) => x.label)).toEqual(['Proforma de prestations', 'Proforma de prestations', 'Proforma de prestations']);
+
+    // Journaux : la plateforme, le groupe et l'école, pour chaque devis et proforma.
+    const actions = ['billing.service_quote_issued', 'billing.service_proforma_issued'];
+    expect(await admin.platformAuditLog.count({ where: { tenantId: L.id, adminId: sa.id, action: { in: actions } } })).toBe(4);
+    expect(await admin.groupAuditLog.count({ where: { groupId: L.groupId, actorKind: 'platform', action: { in: actions } } })).toBe(4);
+    expect(await inTenant(L.id, (tx) => tx.auditLog.count({ where: { action: { in: actions } } }))).toBe(4);
   });
 });

@@ -166,7 +166,7 @@ describe('Lot G5c · migration des documents provisoires sur une base qui a déj
            pg_proc p WHERE p.proname IN ('issue_billing_document', 'billing_already_billed', 'billing_year_amount', 'current_tenant_billing_documents',
                                          'current_tenant_sees_billing_documents', 'billing_counts_billable', 'billing_count_billable', 'billing_enrollment_document',
                                          'decide_count_exclusion_platform', 'platform_count_exclusions', 'current_tenant_count_documents',
-                                         'request_count_correction', 'decide_count_correction')
+                                         'request_count_correction', 'decide_count_correction', 'service_live_rates', 'service_unit_price')
       ORDER BY 1, 2`;
     expect(fns.filter((f) => f.ok).map((f) => `${f.role}:${f.fn}`)).toEqual([
       'erp_app:current_tenant_billing_documents', 'erp_app:current_tenant_count_documents', 'erp_app:current_tenant_sees_billing_documents',
@@ -225,7 +225,8 @@ describe('Lot G5c · migration des documents provisoires sur une base qui a déj
     for (const t of DOCUMENTS) expect(await db.$queryRaw`SELECT to_regclass(${'public.' + t})::text AS t`).toEqual([{ t: null }]);
     expect(await db.$queryRaw`SELECT proname FROM pg_proc WHERE proname IN ('issue_billing_document', 'billing_already_billed', 'billing_year_amount',
       'current_tenant_billing_documents', 'current_tenant_sees_billing_documents', 'grant_platform_documents_role', 'billing_counts_billable', 'billing_count_billable',
-      'billing_enrollment_document', 'decide_count_exclusion_platform', 'platform_count_exclusions', 'current_tenant_count_documents')`).toEqual([]);
+      'billing_enrollment_document', 'decide_count_exclusion_platform', 'platform_count_exclusions', 'current_tenant_count_documents', 'service_live_rates',
+      'service_unit_price')`).toEqual([]);
     // Les fonctions du lot G5b sont revenues telles qu'elles étaient, avec leurs droits.
     expect(await g5bFunctions()).toEqual(g5bBefore);
     expect(await db.$queryRaw`SELECT has_function_privilege('erp_app', 'request_count_correction(uuid, text, uuid, date, text, text, text, integer, uuid, text, text, date)', 'EXECUTE') AS ok`)

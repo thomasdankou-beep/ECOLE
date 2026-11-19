@@ -84,7 +84,7 @@ const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : 
 const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''} facturable${n > 1 ? 's' : ''}`;
 
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») ; toute autre erreur reste une erreur. */
-function cahioraMessage(e: unknown) {
+export function cahioraMessage(e: unknown) {
   const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"]+)/);
   return m ? m[1].trim() : null;
 }

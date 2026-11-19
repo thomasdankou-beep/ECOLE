@@ -37,6 +37,8 @@ DROP FUNCTION IF EXISTS billing_already_billed(uuid, text);
 DROP FUNCTION IF EXISTS billing_year_amount(integer, integer, integer, integer, integer);
 DROP FUNCTION IF EXISTS billing_count_billable(uuid);
 DROP FUNCTION IF EXISTS billing_counts_billable(uuid);
+DROP FUNCTION IF EXISTS service_unit_price(uuid, uuid, text, date);
+DROP FUNCTION IF EXISTS service_live_rates(uuid, date);
 
 -- Fonctions du lot G5b, telles qu'elles étaient (CREATE OR REPLACE garde leurs droits) : la demande se fait de nouveau
 -- pendant la vérification seulement, et la direction décide chaque exclusion.

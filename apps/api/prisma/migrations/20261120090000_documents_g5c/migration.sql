@@ -163,6 +163,78 @@ CREATE OR REPLACE FUNCTION billing_year_amount(p_pupils integer, p_price integer
 $$;
 
 
+-- Règles de prix d'une prestation en vigueur un jour donné (lot G5g) : dernier jour = le plus tôt du dernier jour prévu
+-- et de l'arrêt.
+CREATE OR REPLACE FUNCTION service_live_rates(p_service uuid, p_day date)
+  RETURNS TABLE (id uuid, kind text, tenant_id uuid, currency text, value integer, effective_from date, created_at timestamp)
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT r.id, r.kind::text, r.tenant_id, r.currency, r.value, r."effectiveFrom", r."createdAt"
+  FROM service_rates r LEFT JOIN service_rate_ends e ON e."rateId" = r.id
+  WHERE r."serviceId" = p_service AND r."effectiveFrom" <= p_day AND p_day <= coalesce(least(r."effectiveTo", e."lastDay"), DATE 'infinity')
+$$;
+
+-- Prix d'une prestation pour un établissement un jour donné, comme servicePrice (services-rules.ts, lot G5g) : une
+-- seule règle, jamais de cumul. 0. pas au catalogue ou désactivée ce jour-là : aucun prix ; 1. prestation gratuite :
+-- 0 ; 2. gratuité de l'établissement, sinon pour tous : 0 ; 3. tarif particulier de l'établissement dans sa monnaie ;
+-- 4. sur devis : aucun prix (il se saisit sur le devis) ; 5. prix du catalogue dans la monnaie, moins la remise de
+-- l'établissement, sinon celle pour tous (pourcentage arrondi à l'unité, jamais négatif). Entre deux règles du même
+-- genre et de même portée, celle qui a commencé le plus récemment, puis la dernière inscrite.
+CREATE OR REPLACE FUNCTION service_unit_price(p_service uuid, p_tenant uuid, p_currency text, p_day date)
+  RETURNS TABLE (amount integer, basis text, name text)
+  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v record;
+  r record;
+  v_catalog integer;
+BEGIN
+  SELECT x.pricing::text AS pricing, x.active, x.name INTO v FROM service_versions x
+   WHERE x."serviceId" = p_service AND x."effectiveFrom" <= p_day ORDER BY x."effectiveFrom" DESC, x.version DESC LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT NULL::integer, 'NOT_IN_CATALOG'::text, NULL::text;
+    RETURN;
+  END IF;
+  IF NOT v.active THEN
+    RETURN QUERY SELECT NULL::integer, 'INACTIVE'::text, v.name;
+    RETURN;
+  END IF;
+  IF v.pricing = 'FREE' THEN
+    RETURN QUERY SELECT 0, 'FREE_SERVICE'::text, v.name;
+    RETURN;
+  END IF;
+  SELECT * INTO r FROM service_live_rates(p_service, p_day) x WHERE x.kind = 'FREE' AND (x.tenant_id = p_tenant OR x.tenant_id IS NULL)
+   ORDER BY (x.tenant_id IS NOT NULL) DESC, x.effective_from DESC, x.created_at DESC, x.id DESC LIMIT 1;
+  IF FOUND THEN
+    RETURN QUERY SELECT 0, 'FREE'::text, v.name;
+    RETURN;
+  END IF;
+  SELECT * INTO r FROM service_live_rates(p_service, p_day) x WHERE x.kind = 'SPECIAL_PRICE' AND x.tenant_id = p_tenant AND x.currency = p_currency
+   ORDER BY x.effective_from DESC, x.created_at DESC, x.id DESC LIMIT 1;
+  IF FOUND THEN
+    RETURN QUERY SELECT r.value, 'SPECIAL_PRICE'::text, v.name;
+    RETURN;
+  END IF;
+  IF v.pricing = 'QUOTE' THEN
+    RETURN QUERY SELECT NULL::integer, 'QUOTE'::text, v.name;
+    RETURN;
+  END IF;
+  SELECT * INTO r FROM service_live_rates(p_service, p_day) x WHERE x.kind = 'PRICE' AND x.tenant_id IS NULL AND x.currency = p_currency
+   ORDER BY x.effective_from DESC, x.created_at DESC, x.id DESC LIMIT 1;
+  IF NOT FOUND OR r.value IS NULL THEN
+    RETURN QUERY SELECT NULL::integer, 'MISSING'::text, v.name;
+    RETURN;
+  END IF;
+  v_catalog := r.value;
+  SELECT * INTO r FROM service_live_rates(p_service, p_day) x
+   WHERE (x.kind = 'DISCOUNT_PERCENT' OR (x.kind = 'DISCOUNT_AMOUNT' AND x.currency = p_currency)) AND (x.tenant_id = p_tenant OR x.tenant_id IS NULL)
+   ORDER BY (x.tenant_id IS NOT NULL) DESC, x.effective_from DESC, x.created_at DESC, x.id DESC LIMIT 1;
+  IF NOT FOUND OR r.value IS NULL THEN
+    RETURN QUERY SELECT v_catalog, 'CATALOG'::text, v.name;
+    RETURN;
+  END IF;
+  RETURN QUERY SELECT CASE WHEN r.kind = 'DISCOUNT_PERCENT' THEN greatest(0, round(v_catalog::numeric * (10000 - r.value) / 10000))::integer
+                           ELSE greatest(0, v_catalog - r.value) END, 'DISCOUNT'::text, v.name;
+END $$;
+
 -- Émet un document provisoire (rôle de la plateforme seulement : tâche planifiée ou Super Admin). L'API calcule les
 -- lignes (amounts-rules.ts) ; la base refait les contrôles et les calculs avant d'écrire quoi que ce soit :
 -- - client et établissements : chaque ligne porte un établissement du groupe, dans la monnaie du document ;
@@ -176,8 +248,10 @@ $$;
 --   fois ; elle touche la ligne de l'établissement dans son dernier document d'abonnement de l'année, avec ses prix et sa
 --   part ; élèves = élèves facturables de ce comptage, exclusions validées retirées ; montant = déjà demandé moins le
 --   montant de l'année recalculé, au moins 1 (au minimum, rien ne change : aucun avoir) ; règle du 13 novembre 2026 ;
--- - devis et proformas de prestations : prestation du catalogue, quantité, prix unitaire, montant = quantité × prix ;
---   une proforma peut reprendre un devis du même client.
+-- - devis et proformas de prestations : prestation du catalogue, une fois par établissement, nom et prix du catalogue de
+--   ce jour-là pour cet établissement (service_unit_price) ; une prestation sur devis seulement dans un devis, au prix
+--   saisi ; montant = quantité × prix unitaire ; une proforma peut reprendre un devis du même client, une seule fois,
+--   avec ses lignes telles quelles.
 -- Un document lié (avoir, proforma d'un devis) n'est jamais daté avant le document qu'il reprend. Total = somme des
 -- lignes. Référence provisoire « PROV-… », jamais un numéro de facture (G5f).
 CREATE OR REPLACE FUNCTION issue_billing_document(
@@ -201,6 +275,8 @@ DECLARE
   c record;
   k record;
   rl record;
+  sp record;
+  q record;
 BEGIN
   IF p_group IS NULL OR p_kind IS NULL OR p_currency IS NULL OR p_issue IS NULL OR p_data IS NULL OR jsonb_typeof(p_data) <> 'object'
      OR p_lines IS NULL OR jsonb_typeof(p_lines) <> 'array' OR jsonb_array_length(p_lines) = 0
@@ -227,6 +303,10 @@ BEGIN
   IF v_kind = 'SUBSCRIPTION' AND (SELECT count(*) <> count(DISTINCT x."tenantId") FROM jsonb_to_recordset(p_lines) AS x("tenantId" uuid)) THEN
     RAISE EXCEPTION 'CAHIORA: un établissement figure une seule fois dans un document d''abonnement';
   END IF;
+  IF v_kind IN ('SERVICE_QUOTE', 'SERVICE_PROFORMA')
+     AND (SELECT count(*) <> count(DISTINCT (x."tenantId", x."serviceId")) FROM jsonb_to_recordset(p_lines) AS x("tenantId" uuid, "serviceId" uuid)) THEN
+    RAISE EXCEPTION 'CAHIORA: une prestation figure une seule fois par établissement dans un document';
+  END IF;
   -- Deux documents d'un même client ne se calculent jamais en même temps : le déjà demandé reste juste.
   PERFORM pg_advisory_xact_lock(hashtext('cahiora-billing-document'), hashtext(p_group::text));
 
@@ -243,6 +323,14 @@ BEGIN
     END IF;
     IF p_issue < rel."issueDate" THEN
       RAISE EXCEPTION 'CAHIORA: un document n''est jamais daté avant le document auquel il est lié';
+    END IF;
+    IF v_kind = 'SERVICE_PROFORMA' THEN
+      IF EXISTS (SELECT 1 FROM billing_documents x WHERE x."relatedDocumentId" = p_related AND x.kind = 'SERVICE_PROFORMA') THEN
+        RAISE EXCEPTION 'CAHIORA: ce devis a déjà sa proforma';
+      END IF;
+      IF rel.currency <> p_currency OR v_lines <> (SELECT count(*) FROM billing_document_lines x WHERE x."documentId" = p_related) THEN
+        RAISE EXCEPTION 'CAHIORA: une proforma reprend les lignes du devis, telles quelles';
+      END IF;
     END IF;
   ELSIF v_kind = 'CREDIT_NOTE' THEN
     RAISE EXCEPTION 'CAHIORA: un avoir touche toujours un document émis';
@@ -380,6 +468,25 @@ BEGIN
       END IF;
       IF l.amount <> l.quantity::bigint * l."unitPrice" THEN
         RAISE EXCEPTION 'CAHIORA: ligne % : montant différent de quantité × prix unitaire', l.n;
+      END IF;
+      IF v_kind = 'SERVICE_PROFORMA' AND p_related IS NOT NULL THEN
+        -- Proforma d'un devis : ses lignes, dans le même ordre, avec les prix du devis.
+        SELECT * INTO q FROM billing_document_lines x WHERE x."documentId" = p_related AND x.position = l.n;
+        IF NOT FOUND OR q.tenant_id <> l."tenantId" OR q."serviceId" <> l."serviceId" OR q."serviceName" <> btrim(l."serviceName")
+           OR q.quantity <> l.quantity OR q."unitPrice" <> l."unitPrice" OR q."priceBasis" IS DISTINCT FROM l."priceBasis" THEN
+          RAISE EXCEPTION 'CAHIORA: ligne % : une proforma reprend les lignes du devis, telles quelles', l.n;
+        END IF;
+      ELSE
+        SELECT * INTO sp FROM service_unit_price(l."serviceId", l."tenantId", p_currency, p_issue);
+        IF sp.basis IN ('NOT_IN_CATALOG', 'INACTIVE') THEN
+          RAISE EXCEPTION 'CAHIORA: ligne % : prestation non proposée ce jour-là', l.n;
+        ELSIF sp.basis = 'MISSING' THEN
+          RAISE EXCEPTION 'CAHIORA: ligne % : INFORMATION MANQUANTE : aucun prix du catalogue en %', l.n, p_currency;
+        ELSIF sp.basis = 'QUOTE' AND v_kind <> 'SERVICE_QUOTE' THEN
+          RAISE EXCEPTION 'CAHIORA: ligne % : prestation sur devis : un devis d''abord, puis sa proforma', l.n;
+        ELSIF l."priceBasis" IS DISTINCT FROM sp.basis OR btrim(l."serviceName") <> sp.name OR (sp.basis <> 'QUOTE' AND l."unitPrice" <> sp.amount) THEN
+          RAISE EXCEPTION 'CAHIORA: ligne % : nom et prix du catalogue de ce jour attendus', l.n;
+        END IF;
       END IF;
     END IF;
     v_total := v_total + l.amount;
@@ -773,7 +880,8 @@ $$;
 REVOKE ALL ON FUNCTION billing_already_billed(uuid, text), billing_year_amount(integer, integer, integer, integer, integer),
   issue_billing_document(uuid, text, text, date, date, text, uuid, jsonb, jsonb, text, uuid, text), current_tenant_sees_billing_documents(),
   current_tenant_billing_documents(), billing_counts_billable(uuid), billing_count_billable(uuid), billing_enrollment_document(uuid, uuid, text),
-  decide_count_exclusion_platform(uuid, uuid, text, text, uuid, text, text), platform_count_exclusions(), current_tenant_count_documents() FROM PUBLIC;
+  decide_count_exclusion_platform(uuid, uuid, text, text, uuid, text, text), platform_count_exclusions(), current_tenant_count_documents(),
+  service_live_rates(uuid, date), service_unit_price(uuid, uuid, text, date) FROM PUBLIC;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_app') THEN
