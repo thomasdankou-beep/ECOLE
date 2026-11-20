@@ -49,7 +49,7 @@ type DocumentRow = {
 /** Erreur de la fonction d'acceptation (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 function acceptanceMessage(e: unknown) {
   const text = e instanceof Error ? e.message : String(e);
-  const m = text.match(/CAHIORA: ([^\n"]+)/);
+  const m = text.match(/CAHIORA: ([^\n"`]+)/);
   return m ? m[1].trim() : null;
 }
 

@@ -89,7 +89,7 @@ const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''} facturable${n
 
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») ; toute autre erreur reste une erreur. */
 export function cahioraMessage(e: unknown) {
-  const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"]+)/);
+  const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"`]+)/);
   return m ? m[1].trim() : null;
 }
 

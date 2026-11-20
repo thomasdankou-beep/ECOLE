@@ -1,3 +1,5 @@
+import { cahioraMessage as accessMessage } from './access';
+import { cahioraMessage as documentMessage } from './documents';
 import {
   activeMeans, availableCredit, CANCEL_REFUSED, cancellationPlan, documentPayment, impute, losesPayment, matchesStatus, meansCode, meansError, meansOn, MeansVersion,
   normalizedReference, OpenDocument, paymentError, PAYMENTS_LOCKED, paymentsUnlocked, receiptNumber, RECEIPT_MENTION, refundDecisionError, refundRequestError,
@@ -216,5 +218,15 @@ describe('G5d-2 · crédits, remboursements et transferts (D-G5-15 A, §9)', () 
     expect(transferError({ ...ok, amount: 40_000 })).toMatch(/au plus/);
     expect(transferError({ ...ok, authorizedBy: '' })).toMatch(/Autorisation/);
     expect(transferError({ ...ok, reason: 'ok' })).toMatch(/Motif/);
+  });
+});
+
+describe('Messages de la base rendus à l’écran', () => {
+  it('le message « CAHIORA: … » est lu sans l’apostrophe inverse dont Prisma l’entoure (défaut trouvé par les essais du lot G5d-2)', () => {
+    // Forme exacte d'une erreur levée par une fonction de la base, relevée sur Prisma 6.19.
+    const raised = new Error('\nInvalid `prisma.$queryRaw()` invocation:\n\n\nRaw query failed. Code: `P0001`. Message: `ERROR: CAHIORA: un moyen de paiement porte déjà ce nom : modifiez-le plutôt`');
+    expect(accessMessage(raised)).toBe('Un moyen de paiement porte déjà ce nom : modifiez-le plutôt');
+    expect(documentMessage(raised)).toBe('un moyen de paiement porte déjà ce nom : modifiez-le plutôt');
+    expect(accessMessage(new Error('Raw query failed. Code: `23505`. Message: `ERROR: duplicate key`'))).toBeNull();
   });
 });

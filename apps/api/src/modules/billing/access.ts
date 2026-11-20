@@ -65,7 +65,7 @@ export class AnswerDto {
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 export function cahioraMessage(e: unknown) {
   const text = e instanceof Error ? e.message : String(e);
-  const m = text.match(/CAHIORA: ([^\n"]+)/);
+  const m = text.match(/CAHIORA: ([^\n"`]+)/);
   if (!m) return null;
   const s = m[1].trim();
   return s.charAt(0).toUpperCase() + s.slice(1);
