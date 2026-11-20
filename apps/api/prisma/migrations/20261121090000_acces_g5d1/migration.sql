@@ -5,9 +5,13 @@
 -- régularisation qui attend la réponse de Cahiora, sans moyen de paiement activé, empêche la limitation), D-G5-43 A
 -- (paiement partiel : accès limité, sauf prolongation exceptionnelle avec une date de fin et un motif) ; chaque demande
 -- est horodatée et journalisée. Aucun paiement ni encaissement : le paiement validé arrive avec le lot G5d-2 (D-G5-33).
+-- Lectures 7 A et 9 A, validées par Dankou le 20 novembre 2026 : jamais moins de 48 heures entre la réponse de Cahiora
+-- à une demande de régularisation et la limitation (préavis donné une seule fois par échéance) ; chaque prolongation
+-- exceptionnelle dure 30 jours au plus, renouvellements compris (motivés et marqués).
 -- Aucune donnée existante n'est modifiée : les nouvelles colonnes des abonnements restent vides (un abonnement dont la
--- gratuité a fini avant ce lot n'a pas de délai de grâce et n'est jamais limité automatiquement). Un seul paramètre
--- est ajouté : le délai de grâce de 15 jours (D-G5-30 A).
+-- gratuité a fini avant ce lot n'a pas de délai de grâce et n'est jamais limité automatiquement). Trois paramètres
+-- datés sont ajoutés : le délai de grâce de 15 jours (D-G5-30 A), le préavis de 48 heures (lecture 7 A) et la durée
+-- maximale d'une prolongation, 30 jours (lecture 9 A).
 -- Tout s'applique en une seule transaction : en cas d'erreur, rien n'est changé.
 
 -- CreateEnum
@@ -17,7 +21,9 @@ CREATE TYPE "RegularizationRequestStatus" AS ENUM ('PENDING', 'ANSWERED');
 ALTER TABLE "subscriptions" ADD COLUMN "graceStart" DATE,
 ADD COLUMN "graceEnd" DATE,
 ADD COLUMN "extendedUntil" DATE,
-ADD COLUMN "limitedSince" TIMESTAMP(3);
+ADD COLUMN "limitedSince" TIMESTAMP(3),
+ADD COLUMN "noticeUntil" TIMESTAMP(3),
+ADD COLUMN "noticeGraceEnd" DATE;
 
 -- CreateTable
 CREATE TABLE "regularization_requests" (
@@ -59,17 +65,29 @@ ALTER TABLE "regularization_requests" ADD CONSTRAINT "regularization_requests_an
 ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_grace_check"
   CHECK (("graceStart" IS NULL) = ("graceEnd" IS NULL) AND ("graceEnd" IS NULL OR "graceEnd" >= "graceStart"));
 ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_limited_check" CHECK (("status" = 'LIMITED') = ("limitedSince" IS NOT NULL));
+-- Préavis (lecture 7 A) : l'échéance d'un préavis n'existe pas sans lui.
+ALTER TABLE "subscriptions" ADD CONSTRAINT "subscriptions_notice_check" CHECK ("noticeUntil" IS NOT NULL OR "noticeGraceEnd" IS NULL);
 
 -- Contrôle « même école » (SEC-001) : une demande pointe toujours vers l'abonnement de son établissement.
 SELECT install_same_tenant_checks();
 
 -- Le délai de grâce se fixe une seule fois, au passage en attente (fin d'un essai ou d'un pilote ; plus tard, échéance
 -- d'un renouvellement) ; ensuite, seul Cahiora accorde plus de temps, par une prolongation inscrite dans l'historique.
+-- Le préavis après une réponse (lecture 7 A) se donne pour l'échéance en cours, une seule fois : il ne change plus et
+-- ne s'efface pas tant que cette échéance reste celle de l'abonnement.
 CREATE OR REPLACE FUNCTION subscriptions_access_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF (NEW."graceStart", NEW."graceEnd") IS DISTINCT FROM (OLD."graceStart", OLD."graceEnd")
      AND NOT (OLD.status IN ('TRIAL', 'PILOT', 'ACTIVE') AND NEW.status IN ('AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT')) THEN
     RAISE EXCEPTION 'Le délai de grâce se fixe à la fin de la gratuité et ne change plus : Cahiora accorde ensuite une prolongation';
+  END IF;
+  IF (NEW."noticeUntil", NEW."noticeGraceEnd") IS DISTINCT FROM (OLD."noticeUntil", OLD."noticeGraceEnd") THEN
+    IF OLD."noticeUntil" IS NOT NULL AND OLD."noticeGraceEnd" IS NOT DISTINCT FROM NEW."graceEnd" THEN
+      RAISE EXCEPTION 'Le préavis de cette échéance est déjà donné : il ne se donne qu''une fois et ne change plus';
+    END IF;
+    IF NEW."noticeUntil" IS NOT NULL AND NEW."noticeGraceEnd" IS DISTINCT FROM NEW."graceEnd" THEN
+      RAISE EXCEPTION 'Un préavis se donne pour l''échéance en cours de l''abonnement';
+    END IF;
   END IF;
   RETURN NEW;
 END $$;
@@ -104,13 +122,16 @@ BEGIN
   END IF;
 END $$;
 
--- Accès de l'abonnement de l'école courante (app.tenant_id) : délai de grâce, prolongation, accès limité. Jamais le
--- motif d'une prolongation, ni l'abonnement d'une autre école.
+-- Accès de l'abonnement de l'école courante (app.tenant_id) : délai de grâce, prolongation, accès limité, fin du
+-- préavis donné pour l'échéance en cours (lecture 7 A). Jamais le motif d'une prolongation, ni l'abonnement d'une
+-- autre école.
 CREATE OR REPLACE FUNCTION current_tenant_subscription_access() RETURNS TABLE (
-  status text, grace_start date, grace_end date, extended_until date, limited_since timestamp, terms_accepted boolean, pending_request boolean)
+  status text, grace_start date, grace_end date, extended_until date, limited_since timestamp, terms_accepted boolean, pending_request boolean,
+  notice_until timestamp)
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT s.status::text, s."graceStart", s."graceEnd", s."extendedUntil", s."limitedSince", s."acceptedAt" IS NOT NULL,
-         EXISTS (SELECT 1 FROM regularization_requests r WHERE r.tenant_id = s.tenant_id AND r.status = 'PENDING')
+         EXISTS (SELECT 1 FROM regularization_requests r WHERE r.tenant_id = s.tenant_id AND r.status = 'PENDING'),
+         CASE WHEN s."noticeGraceEnd" IS NOT DISTINCT FROM s."graceEnd" THEN s."noticeUntil" END
   FROM subscriptions s
   WHERE s.tenant_id = app_current_tenant()
 $$;
@@ -267,11 +288,15 @@ BEGIN
 END $$;
 CREATE TRIGGER billing_document_lines_terms_check BEFORE INSERT ON billing_document_lines FOR EACH ROW EXECUTE FUNCTION billing_document_lines_terms_check();
 
--- Délai de grâce de la décision D-G5-30 A, en version 1 ; le Super Admin peut en saisir une nouvelle valeur datée.
+-- Délai de grâce (D-G5-30 A), préavis après la réponse (lecture 7 A) et durée maximale d'une prolongation (lecture 9 A),
+-- en version 1 ; le Super Admin peut saisir une nouvelle valeur datée de chacun.
 INSERT INTO billing_parameters (id, key, currency, value, "effectiveFrom", reason, "createdByName") VALUES
-  (gen_random_uuid(), 'GRACE_DAYS', NULL, 15, DATE '2026-11-19', 'Décision D-G5-30 A de Dankou (19 novembre 2026) : 15 jours de grâce en accès complet après la fin de la gratuité', 'Mise à jour de Cahiora (lot G5d-1)');
+  (gen_random_uuid(), 'GRACE_DAYS', NULL, 15, DATE '2026-11-19', 'Décision D-G5-30 A de Dankou (19 novembre 2026) : 15 jours de grâce en accès complet après la fin de la gratuité', 'Mise à jour de Cahiora (lot G5d-1)'),
+  (gen_random_uuid(), 'NOTICE_HOURS', NULL, 48, DATE '2026-11-20', 'Lecture 7 A validée par Dankou (20 novembre 2026) : jamais moins de 48 heures entre la réponse de Cahiora à une demande de régularisation et la limitation, une seule fois par échéance', 'Mise à jour de Cahiora (lot G5d-1)'),
+  (gen_random_uuid(), 'EXTENSION_MAX_DAYS', NULL, 30, DATE '2026-11-20', 'Lecture 9 A validée par Dankou (20 novembre 2026) : 30 jours au plus par prolongation exceptionnelle, renouvellements compris, motivés et marqués', 'Mise à jour de Cahiora (lot G5d-1)');
 INSERT INTO platform_audit_logs (id, action, "tenantId", data)
-  VALUES (gen_random_uuid(), 'billing.parameters.initial', NULL, jsonb_build_object('source', 'migration acces_g5d1', 'count', 1, 'key', 'GRACE_DAYS'));
+  VALUES (gen_random_uuid(), 'billing.parameters.initial', NULL,
+          jsonb_build_object('source', 'migration acces_g5d1', 'count', 3, 'keys', jsonb_build_array('GRACE_DAYS', 'NOTICE_HOURS', 'EXTENSION_MAX_DAYS')));
 
 -- Rôle de la plateforme : lire les demandes et y répondre (la réponse seulement, une fois) ; les abonnements, leur
 -- historique et les alertes gardent les droits du lot G5a. infra/postgres/role-plateforme.sh appelle cette fonction

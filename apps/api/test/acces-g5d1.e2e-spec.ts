@@ -4,6 +4,8 @@
  * Décisions de Dankou du 19 novembre 2026 : D-G5-30 A (essai de 14 jours, rappels J11/J13/J14, 15 jours de grâce en
  * accès complet, puis accès limité sans rien supprimer), D-G5-41 A (rappels pendant la grâce), D-G5-42 A (une demande
  * de régularisation en attente retient la limitation), D-G5-43 A (prolongation avec une date de fin et un motif).
+ * Lectures 7 A et 9 A validées par Dankou le 20 novembre 2026 : préavis de 48 heures après la réponse de Cahiora, une
+ * fois par échéance ; prolongation de 30 jours au plus, renouvellements exceptionnels motivés et marqués.
  * Les passages de la tâche planifiée sont simulés jour par jour : J1 est le jour d'ouverture de l'essai (aujourd'hui).
  * Aucun paiement, aucun SMS, aucune facture.
  */
@@ -16,7 +18,7 @@ import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { localDay } from '../src/common/country';
-import { LIMITED_REFUSAL } from '../src/modules/billing/access-rules';
+import { frDateTime, LIMITED_REFUSAL } from '../src/modules/billing/access-rules';
 import { BillingJobsService } from '../src/modules/billing/billing-jobs';
 import { addDays, frDay } from '../src/modules/billing/billing-rules';
 import { PlatformDb } from '../src/modules/platform/platform';
@@ -37,7 +39,7 @@ const groupDb = new PrismaClient({ datasources: { db: { url: process.env.DATABAS
 const statsDb = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_STATS_URL } } });
 
 type School = { id: string; slug: string; name: string; groupId: string; direction: string; directionId: string; comptable: string; parent: string };
-const S: Record<'A' | 'B' | 'C' | 'D', School> = {} as never;
+const S: Record<'A' | 'B' | 'C' | 'D' | 'E', School> = {} as never;
 const sa = { id: '', name: 'Super Admin accès (fictif)', email: `g5d1-${stamp}@test.local`, cookie: '', secret: '' };
 const today = localDay(TZ);
 /** Jour n de l'essai : J1 est aujourd'hui. */
@@ -80,7 +82,7 @@ async function login(s: { slug: string }, phone: string) {
 }
 
 /** Établissement fictif, seul dans son groupe : direction de tout l'établissement, comptable et parent. */
-async function newSchool(k: 'A' | 'B' | 'C' | 'D'): Promise<School> {
+async function newSchool(k: 'A' | 'B' | 'C' | 'D' | 'E'): Promise<School> {
   const t = await admin.tenant.create({
     data: { slug: `g5d1-${k.toLowerCase()}-${stamp}`, name: `École fictive G5d-1 ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5d-1 ${k} ${stamp}` } } },
   });
@@ -118,6 +120,7 @@ beforeAll(async () => {
   S.B = await newSchool('B');
   S.C = await newSchool('C');
   S.D = await newSchool('D');
+  S.E = await newSchool('E');
 
   // Super Admin fictif avec double authentification.
   await admin.platformAdmin.create({ data: { email: sa.email, name: sa.name, passwordHash: await argon2.hash(SA_PASSWORD), mustChangePassword: false, mustSetupTwoFactor: false } });
@@ -189,7 +192,7 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     const me = (await school(S.A.direction).get('/auth/me')).body;
     expect(me.access).toEqual({
       status: 'AWAITING_ACCEPTANCE', statusLabel: 'En attente d’acceptation des conditions', phase: 'GRACE', until: J(29), daysLeft: 29, limitedFrom: J(30),
-      pendingRequest: false, termsAccepted: false, direction: true, canRegularize: true,
+      limitedAt: null, limitedAtLabel: null, hoursLeft: null, pendingRequest: false, termsAccepted: false, direction: true, canRegularize: true,
     });
     expect((await school(S.A.comptable).get('/auth/me')).body.access).toMatchObject({ phase: 'GRACE', direction: false, canRegularize: false });
     // Une famille n'a jamais affaire à l'abonnement de l'établissement.
@@ -355,8 +358,13 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     await admin.platformAdmin.update({ where: { id: sa.id }, data: { failedLogins: 0 } });
     expect((await pf.post(url, { answer: '        ', code: await code() })).status).toBe(400);
     expect((await pf.post(`/billing/regularization-requests/${UUID}/answer`, { answer: ANSWER, code: await code() })).status).toBe(404);
+    // Avant d'envoyer, le Super Admin lit la date de la limitation : la grâce finit dans plus de 48 heures, pas de préavis.
+    const limitedAt = new Date(`${addDays(J(29), 1)}T00:00:00+01:00`).toISOString();
+    const label = `${frDay(J(30))} à 0 h 00`;
+    const after = { kind: 'scheduled', limitedAt, limitedAtLabel: label, noticeHours: null, noticeGiven: false };
+    expect((await pf.get('/billing/access')).body.clients.find((c: { tenantId: string }) => c.tenantId === S.B.id).afterAnswer).toEqual(after);
     const ok = await pf.post(url, { answer: ANSWER, code: await code() });
-    expect([ok.status, ok.body]).toEqual([201, { ok: true }]);
+    expect([ok.status, ok.body]).toEqual([201, { ok: true, outcome: after }]);
     expect((await pf.post(url, { answer: ANSWER, code: await code() })).status).toBe(409);
 
     expect(await admin.regularizationRequest.findUniqueOrThrow({ where: { id } })).toMatchObject({ status: 'ANSWERED', answer: ANSWER, answeredById: sa.id, answeredByName: sa.name });
@@ -365,6 +373,8 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     const note = (await notificationsOf(S.B.id)).at(-1)!;
     expect(note).toMatchObject({ kind: 'billing.regularization_answered', title: 'Réponse de Cahiora à votre demande de régularisation' });
     expect(note.body.startsWith(ANSWER)).toBe(true);
+    expect(note.body).toContain(`Sans paiement validé, l’accès sera limité à partir du ${label}.`);
+    expect((await admin.subscription.findUniqueOrThrow({ where: { tenantId: S.B.id } })).noticeUntil).toBeNull();
     // L'école lit la réponse ; jamais le nom du Super Admin.
     const v = (await school(S.B.direction).get('/settings/subscription')).body;
     expect(v.requests[0]).toMatchObject({ id, status: 'ANSWERED', answer: ANSWER });
@@ -396,13 +406,13 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     expect((await subscriptionOf(S.A.id)).status).toBe('LIMITED');
 
     const ok = await pf.post(EXT, { until: J(40), reason: `  ${reason}  `, code: await code() });
-    expect([ok.status, ok.body]).toEqual([201, { tenantId: S.A.id, status: 'AWAITING_PAYMENT', statusLabel: 'En attente de paiement', extendedUntil: J(40), limitationLifted: true }]);
+    expect([ok.status, ok.body]).toEqual([201, { tenantId: S.A.id, status: 'AWAITING_PAYMENT', statusLabel: 'En attente de paiement', extendedUntil: J(40), limitationLifted: true, kind: 'first' }]);
     const s = await subscriptionOf(S.A.id);
     expect(s).toMatchObject({ status: 'AWAITING_PAYMENT', limitedSince: null });
     expect(iso(s.extendedUntil)).toBe(J(40));
     expect((await eventsOf(S.A.id)).at(-1)).toMatchObject({
       kind: 'ACCESS_EXTENDED', fromStatus: 'LIMITED', toStatus: 'AWAITING_PAYMENT', reason, actorKind: 'platform', actorId: sa.id,
-      data: { until: J(40), previousUntil: null, graceEnd: J(29), limitationLifted: true },
+      data: { until: J(40), previousUntil: null, graceEnd: J(29), limitationLifted: true, kind: 'first', maxDays: 30 },
     });
     // Le motif reste dans le journal de la plateforme : ni le groupe, ni l'école, ni l'écran de la direction ne le voient.
     expect((await admin.platformAuditLog.findFirstOrThrow({ where: { tenantId: S.A.id, action: 'billing.access_extended' } })).data).toMatchObject({ until: J(40), reason });
@@ -439,6 +449,134 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     expect(await admin.regularizationRequest.count({ where: { tenantId: S.B.id, status: 'PENDING' } })).toBe(1);
   });
 
+  it('lecture 9 A : 30 jours au plus par prolongation ; renouvellement exceptionnel avec son propre motif, marqué ; fin avancée possible', async () => {
+    const EXT = `/billing/access/${S.A.id}/extension`;
+    const client = async () => (await pf.get('/billing/access')).body.clients.find((c: { tenantId: string }) => c.tenantId === S.A.id);
+    // A est de nouveau limité après sa prolongation jusqu'au jour 40 : 30 jours au plus depuis la fin de celle-ci.
+    expect((await subscriptionOf(S.A.id)).status).toBe('LIMITED');
+    expect((await client()).extension).toEqual({ current: J(40), maxDays: 30, maxUntil: J(70), renewals: 0 });
+    const msg = async (until: string, reason: string) => (await pf.post(EXT, { until, reason, code: await code() })).body.message;
+    expect(await msg(J(71), 'Renouvellement fictif trop long (test)'))
+      .toBe(`Une prolongation dure 30 jours au plus, renouvellement compris, depuis la fin de l’accès complet en cours : choisissez au plus tard le ${frDay(J(70))}`);
+    // Son propre motif : celui de la prolongation précédente est refusé, même écrit autrement.
+    expect(await msg(J(70), '  paiement partiel fictif,   solde promis (TEST G5d-1) '))
+      .toBe('Renouvellement exceptionnel : donnez son propre motif, différent de celui de la prolongation précédente');
+    const reason = 'Second versement fictif annoncé pour la fin du mois (test)';
+    const ok = await pf.post(EXT, { until: J(70), reason, code: await code() });
+    expect([ok.status, ok.body]).toEqual([201, { tenantId: S.A.id, status: 'AWAITING_PAYMENT', statusLabel: 'En attente de paiement', extendedUntil: J(70), limitationLifted: true, kind: 'renewal' }]);
+    expect((await eventsOf(S.A.id)).at(-1)).toMatchObject({
+      kind: 'ACCESS_EXTENSION_RENEWED', fromStatus: 'LIMITED', toStatus: 'AWAITING_PAYMENT', reason,
+      data: { until: J(70), previousUntil: J(40), graceEnd: J(29), kind: 'renewal', label: 'Renouvellement exceptionnel', maxDays: 30, limitationLifted: true },
+    });
+    // Marqué au journal (le motif reste à la plateforme) et dans la liste des clients ; la direction lit « à nouveau ».
+    expect((await admin.platformAuditLog.findFirstOrThrow({ where: { tenantId: S.A.id, action: 'billing.access_extension_renewed' } })).data).toMatchObject({ label: 'Renouvellement exceptionnel', reason });
+    expect(await admin.groupAuditLog.count({ where: { groupId: S.A.groupId, action: 'billing.access_extension_renewed' } })).toBe(1);
+    expect(JSON.stringify(await schoolJournal(S.A.id, 'billing.access_extension_renewed'))).not.toContain(reason);
+    expect(await client()).toMatchObject({ phase: 'EXTENDED', until: J(70), extension: { current: J(70), maxDays: 30, maxUntil: J(100), renewals: 1 } });
+    const note = (await notificationsOf(S.A.id)).at(-1)!;
+    expect(note).toMatchObject({ kind: 'billing.access_extension_renewed', title: 'Accès complet prolongé à nouveau par Cahiora' });
+    expect(note.body).toContain(`Cahiora prolonge à nouveau l’accès complet de votre établissement, à titre exceptionnel, jusqu’au ${frDay(J(70))} inclus : l’accès limité est levé dès maintenant.`);
+    const v = (await school(S.A.direction).get('/settings/subscription')).body;
+    expect(v.history[0]).toMatchObject({ kind: 'ACCESS_EXTENSION_RENEWED', label: 'Renouvellement exceptionnel : accès complet prolongé à nouveau par Cahiora', actorName: 'Cahiora' });
+    expect(JSON.stringify(v)).not.toContain(reason);
+    // Avancer la fin n'est pas un renouvellement.
+    const short = await pf.post(EXT, { until: J(60), reason: 'Fin avancée fictive (test)', code: await code() });
+    expect([short.status, short.body.kind, short.body.limitationLifted]).toEqual([201, 'shortened', false]);
+    expect((await eventsOf(S.A.id)).at(-1)).toMatchObject({ kind: 'ACCESS_EXTENSION_SHORTENED', data: { until: J(60), previousUntil: J(70), kind: 'shortened' } });
+    expect((await notificationsOf(S.A.id)).at(-1)).toMatchObject({ kind: 'billing.access_extension_shortened', title: 'Fin de la prolongation avancée par Cahiora' });
+    expect((await client()).extension).toMatchObject({ current: J(60), renewals: 1 });
+    // Le garde-fou d'un an reste.
+    expect(await msg(addDays(today, 400), 'Autre motif fictif (test)')).toBe('Date de fin : au plus un an après aujourd’hui');
+    // Sans paiement validé, la limitation revient après la nouvelle date de fin.
+    expect(mine(await run(J(61)), S.A)).toEqual([`access-limited:${S.A.name}`]);
+    expect((await subscriptionOf(S.A.id)).status).toBe('LIMITED');
+  });
+
+  it('lecture 7 A : réponse moins de 48 heures avant la limitation, préavis de 48 heures une seule fois par échéance ; rappel, puis accès limité', async () => {
+    const E = S.E;
+    const H = 3_600_000;
+    const answerUrl = (id: string) => `/billing/regularization-requests/${id}/answer`;
+    const client = async () => (await pf.get('/billing/access')).body.clients.find((c: { tenantId: string }) => c.tenantId === E.id);
+    // Abonnement fictif posé directement : essai fini il y a 15 jours, délai de grâce qui finit aujourd'hui.
+    const day = (d: string) => new Date(`${d}T00:00:00.000Z`);
+    await admin.subscription.create({
+      data: {
+        tenantId: E.id, status: 'AWAITING_ACCEPTANCE', trialStart: day(addDays(today, -28)), trialEnd: day(addDays(today, -15)), trialDays: 14,
+        graceStart: day(addDays(today, -14)), graceEnd: day(today),
+      },
+    });
+    const r1 = await school(E.direction).post(REQ, { message: 'Demande fictive de dernière minute (test lecture 7 A)' });
+    expect(r1.status).toBe(201);
+    expect(r1.body.access).toMatchObject({ phase: 'GRACE', until: today, pendingRequest: true, limitedAt: null });
+    // Avant d'envoyer, le Super Admin lit le préavis que sa réponse ouvrira.
+    const t0 = Date.now();
+    const preview = (await client()).afterAnswer;
+    expect(preview).toMatchObject({ kind: 'notice', noticeHours: 48, noticeGiven: false });
+    expect(new Date(preview.limitedAt).getTime()).toBeGreaterThanOrEqual(t0 - 5000 + 48 * H);
+    const ANSWER = 'Cahiora a bien reçu votre demande fictive (test lecture 7 A).';
+    const c1 = await code();
+    const t1 = Date.now();
+    const ok = await pf.post(answerUrl(r1.body.id), { answer: ANSWER, code: c1 });
+    const t2 = Date.now();
+    expect(ok.status).toBe(201);
+    const o = ok.body.outcome;
+    expect(o).toMatchObject({ kind: 'notice', noticeHours: 48, noticeGiven: false });
+    const until = new Date(o.limitedAt);
+    expect(until.getTime()).toBeGreaterThanOrEqual(t1 + 48 * H);
+    expect(until.getTime()).toBeLessThanOrEqual(t2 + 48 * H);
+    expect(o.limitedAtLabel).toBe(frDateTime(until, TZ));
+    const s = await subscriptionOf(E.id);
+    expect([s.noticeUntil?.toISOString(), iso(s.noticeGraceEnd), s.status]).toEqual([o.limitedAt, today, 'AWAITING_ACCEPTANCE']);
+    // La direction lit le jour et l'heure de la limitation, dans la réponse, le bandeau et l'alerte (/auth/me).
+    const note = (await notificationsOf(E.id)).at(-1)!;
+    expect(note.body).toContain(`Sans paiement validé, l’accès sera limité à partir du ${o.limitedAtLabel} : Cahiora vous laisse un préavis de 48 heures après cette réponse.`);
+    expect((await eventsOf(E.id)).at(-1)).toMatchObject({ kind: 'REGULARIZATION_ANSWERED', data: { limitation: { kind: 'notice', limitedAt: o.limitedAt, noticeHours: 48, graceEnd: today } } });
+    expect((await school(E.direction).get('/auth/me')).body.access).toMatchObject({ phase: 'NOTICE', limitedAt: o.limitedAt, limitedAtLabel: o.limitedAtLabel, hoursLeft: 48 });
+    expect(await client()).toMatchObject({ phase: 'NOTICE', limitedAtLabel: o.limitedAtLabel, noticeUntil: o.limitedAt, afterAnswer: null });
+
+    // Une nouvelle demande pendant le préavis, puis sa réponse : le préavis n'est pas renouvelé.
+    const r2 = await school(E.direction).post(REQ, { message: 'Seconde demande fictive (test lecture 7 A)' });
+    expect(r2.status).toBe(201);
+    expect((await client()).afterAnswer).toMatchObject({ kind: 'notice-running', limitedAt: o.limitedAt, noticeGiven: true });
+    const ok2 = await pf.post(answerUrl(r2.body.id), { answer: ANSWER, code: await code() });
+    expect(ok2.body.outcome).toMatchObject({ kind: 'notice-running', limitedAt: o.limitedAt, noticeGiven: true });
+    expect((await subscriptionOf(E.id)).noticeUntil?.toISOString()).toBe(o.limitedAt);
+    expect((await notificationsOf(E.id)).at(-1)!.body).toContain(`Sans paiement validé, l’accès sera limité à partir du ${o.limitedAtLabel}, à la fin du préavis déjà donné pour cette échéance.`);
+    // La base refuse de déplacer ou d'effacer le préavis de l'échéance, pour le propriétaire comme pour la plateforme.
+    await expect(admin.$executeRawUnsafe(`UPDATE subscriptions SET "noticeUntil" = "noticeUntil" + interval '1 day' WHERE tenant_id = '${E.id}'`))
+      .rejects.toThrow(/préavis de cette échéance est déjà donné/);
+    await expect(platformDb.$executeRawUnsafe(`UPDATE subscriptions SET "noticeUntil" = NULL, "noticeGraceEnd" = NULL WHERE tenant_id = '${E.id}'`))
+      .rejects.toThrow(/préavis de cette échéance est déjà donné/);
+
+    // Tâche planifiée : rien pendant le préavis, sauf le rappel de ses dernières 24 heures ; la limitation à sa fin.
+    const jobs = app.get(BillingJobsService);
+    const runAt = async (t: number) => mine((await jobs.runDue(new Date(t))).done, E);
+    expect(await runAt(until.getTime() - 25 * H)).toEqual([]);
+    expect(await runAt(until.getTime() - 23 * H)).toEqual([`notice-reminder:${E.name}`]);
+    expect(await runAt(until.getTime() - 22 * H)).toEqual([]);
+    expect(await runAt(until.getTime() - 60_000)).toEqual([]);
+    expect((await subscriptionOf(E.id)).status).toBe('AWAITING_ACCEPTANCE');
+    const rem = (await notificationsOf(E.id)).filter((n) => n.kind === 'billing.notice_reminder');
+    expect(rem).toHaveLength(1);
+    expect(rem[0].title).toBe('Dernier jour du préavis : régularisez votre abonnement Cahiora');
+    expect(rem[0].body).toContain(`Le préavis donné par Cahiora après sa réponse à votre demande de régularisation prend fin le ${o.limitedAtLabel} : jusque-là, l’accès reste complet.`);
+    expect(await schoolJournal(E.id, 'billing.notice_reminder')).toHaveLength(1);
+    expect(await runAt(until.getTime() + 60_000)).toEqual([`access-limited:${E.name}`]);
+    expect((await subscriptionOf(E.id)).status).toBe('LIMITED');
+    expect((await eventsOf(E.id)).at(-1)).toMatchObject({
+      kind: 'ACCESS_LIMITED', fromStatus: 'AWAITING_ACCEPTANCE', toStatus: 'LIMITED', data: { lastFullAccessDay: today, graceEnd: today, extendedUntil: null, noticeUntil: o.limitedAt },
+    });
+    expect((await notificationsOf(E.id)).at(-1)!.body).toContain(`Le préavis donné par Cahiora a pris fin le ${o.limitedAtLabel} sans paiement validé : l’accès à Cahiora est désormais limité.`);
+    expect((await admin.platformAlert.findFirstOrThrow({ where: { tenantId: E.id, kind: 'ACCESS_LIMITED' } })).message)
+      .toContain(`accès complet jusqu'au ${frDay(today)}, puis préavis après la réponse de Cahiora jusqu'au ${o.limitedAtLabel}`);
+    // Une demande envoyée pendant l'accès limité, puis sa réponse : rien à annoncer, l'accès reste limité.
+    const r3 = await school(E.direction).post(REQ, {});
+    expect(r3.status).toBe(201);
+    const ok3 = await pf.post(answerUrl(r3.body.id), { answer: ANSWER, code: await code() });
+    expect(ok3.body.outcome).toMatchObject({ kind: 'none', limitedAt: null });
+    expect((await subscriptionOf(E.id)).status).toBe('LIMITED');
+  });
+
   it('pilote : sa date est respectée ; le délai de grâce commence le lendemain du dernier jour gratuit', async () => {
     const end = iso((await subscriptionOf(S.C.id)).pilotEnd)!;
     expect(mine(await run(addDays(end, -3)), S.C)).toEqual([`pilot-alert-30:${S.C.name}`, `pilot-alert-7:${S.C.name}`]);
@@ -458,7 +596,7 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     // Les fonctions de l'école ne rendent que son propre abonnement, sans le motif d'une prolongation.
     const own = await inTenant(S.A.id, (tx) => tx.$queryRaw<Record<string, unknown>[]>`SELECT * FROM current_tenant_subscription_access()`, appDb);
     expect(own).toHaveLength(1);
-    expect(Object.keys(own[0]).sort()).toEqual(['extended_until', 'grace_end', 'grace_start', 'limited_since', 'pending_request', 'status', 'terms_accepted']);
+    expect(Object.keys(own[0]).sort()).toEqual(['extended_until', 'grace_end', 'grace_start', 'limited_since', 'notice_until', 'pending_request', 'status', 'terms_accepted']);
     expect(await inTenant(S.D.id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_subscription_access()`, appDb)).toEqual([]);
     expect(await inTenant(S.D.id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_regularization_requests()`, appDb)).toEqual([]);
     expect(await inTenant(S.B.id, (tx) => tx.$queryRaw<unknown[]>`SELECT * FROM current_tenant_regularization_requests()`, appDb)).toHaveLength(2);

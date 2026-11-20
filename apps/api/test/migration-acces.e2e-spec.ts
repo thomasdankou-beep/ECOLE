@@ -25,7 +25,9 @@ const PLATFORM = [
 ];
 const SCHOOL_TABLES = ['users', 'user_roles', 'audit_logs', 'notifications'];
 /** Colonnes ajoutées aux abonnements par le lot : vides pour les abonnements existants. */
-const NEW_COLUMNS = ['graceStart', 'graceEnd', 'extendedUntil', 'limitedSince'];
+const NEW_COLUMNS = ['graceStart', 'graceEnd', 'extendedUntil', 'limitedSince', 'noticeUntil', 'noticeGraceEnd'];
+/** Paramètres datés ajoutés par le lot : délai de grâce (D-G5-30 A), préavis (lecture 7 A), durée d'une prolongation (lecture 9 A). */
+const KEYS = ['GRACE_DAYS', 'NOTICE_HOURS', 'EXTENSION_MAX_DAYS'];
 /** Journaux et historiques en ajout seul : une demande y laisse ses lignes, même après un retour arrière forcé. */
 const APPEND_ONLY = ['subscription_events', 'platform_alerts', 'platform_audit_logs', 'group_audit_logs'];
 
@@ -116,21 +118,23 @@ describe('Lot G5d-1 · migration de l’accès selon le paiement sur une base qu
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('aucune donnée existante n’est modifiée ; colonnes nouvelles vides ; un seul paramètre ajouté, le délai de grâce de 15 jours', async () => {
-    unchanged(before, await snapshot(), { billing_parameters: 1, platform_audit_logs: 1 });
-    expect(await db.$queryRaw`SELECT count(*)::int AS n FROM subscriptions WHERE "graceStart" IS NOT NULL OR "graceEnd" IS NOT NULL OR "extendedUntil" IS NOT NULL OR "limitedSince" IS NOT NULL`)
-      .toEqual([{ n: 0 }]);
-    expect(await db.$queryRaw`SELECT key, currency, value, "effectiveFrom"::text AS "from", "createdByName" AS by FROM billing_parameters WHERE key = 'GRACE_DAYS'`).toEqual([
+  it('aucune donnée existante n’est modifiée ; colonnes nouvelles vides ; trois paramètres datés ajoutés : grâce de 15 jours, préavis de 48 heures, prolongation de 30 jours au plus', async () => {
+    unchanged(before, await snapshot(), { billing_parameters: 3, platform_audit_logs: 1 });
+    expect(await db.$queryRaw`SELECT count(*)::int AS n FROM subscriptions WHERE "graceStart" IS NOT NULL OR "graceEnd" IS NOT NULL OR "extendedUntil" IS NOT NULL OR "limitedSince" IS NOT NULL
+      OR "noticeUntil" IS NOT NULL OR "noticeGraceEnd" IS NOT NULL`).toEqual([{ n: 0 }]);
+    expect(await db.$queryRaw`SELECT key, currency, value, "effectiveFrom"::text AS "from", "createdByName" AS by FROM billing_parameters WHERE key = ANY(${KEYS}) ORDER BY "effectiveFrom", value DESC`).toEqual([
       { key: 'GRACE_DAYS', currency: null, value: 15, from: '2026-11-19', by: 'Mise à jour de Cahiora (lot G5d-1)' },
+      { key: 'NOTICE_HOURS', currency: null, value: 48, from: '2026-11-20', by: 'Mise à jour de Cahiora (lot G5d-1)' },
+      { key: 'EXTENSION_MAX_DAYS', currency: null, value: 30, from: '2026-11-20', by: 'Mise à jour de Cahiora (lot G5d-1)' },
     ]);
     expect(await db.$queryRaw`SELECT action, data FROM platform_audit_logs WHERE data->>'source' = 'migration acces_g5d1'`).toEqual([
-      { action: 'billing.parameters.initial', data: { source: 'migration acces_g5d1', count: 1, key: 'GRACE_DAYS' } },
+      { action: 'billing.parameters.initial', data: { source: 'migration acces_g5d1', count: 3, keys: KEYS } },
     ]);
     expect(await db.$queryRaw`SELECT count(*)::int AS n FROM regularization_requests`).toEqual([{ n: 0 }]);
     expect(await db.$queryRaw`SELECT count(*)::int AS n FROM _prisma_migrations WHERE migration_name = ${G5D1} AND finished_at IS NOT NULL`).toEqual([{ n: 1 }]);
     // Gratuité finie avant le lot : pas de délai connu, donc jamais limitée seule (lu par la fonction de l'école).
     expect(await inSchool(SCHOOLS[0].id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_subscription_access()`)).toEqual([{
-      status: 'AWAITING_PAYMENT', grace_start: null, grace_end: null, extended_until: null, limited_since: null, terms_accepted: true, pending_request: false,
+      status: 'AWAITING_PAYMENT', grace_start: null, grace_end: null, extended_until: null, limited_since: null, terms_accepted: true, pending_request: false, notice_until: null,
     }]);
     expect(await inSchool(SCHOOLS[2].id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_subscription_access()`)).toEqual([]);
   });
@@ -196,7 +200,7 @@ describe('Lot G5d-1 · migration de l’accès selon le paiement sur une base qu
       'grant_platform_access_role', 'subscriptions_access_guard', 'regularization_requests_guard', 'billing_document_lines_terms_check')`).toEqual([]);
     expect(await db.$queryRaw`SELECT column_name FROM information_schema.columns WHERE table_name = 'subscriptions' AND column_name = ANY(${NEW_COLUMNS})`).toEqual([]);
     expect(await db.$queryRaw`SELECT typname FROM pg_type WHERE typname = 'RegularizationRequestStatus'`).toEqual([]);
-    expect(await db.$queryRaw`SELECT count(*)::int AS n FROM billing_parameters WHERE key = 'GRACE_DAYS'`).toEqual([{ n: 0 }]);
+    expect(await db.$queryRaw`SELECT count(*)::int AS n FROM billing_parameters WHERE key = ANY(${KEYS})`).toEqual([{ n: 0 }]);
     expect(await db.$queryRaw`SELECT 1 FROM _prisma_migrations WHERE migration_name = ${G5D1}`).toEqual([]);
     // L'acceptation du lot G5a est revenue telle qu'elle était, avec ses droits.
     expect((await acceptFn())[0].def).toBe(acceptBefore);
@@ -212,6 +216,6 @@ describe('Lot G5d-1 · migration de l’accès selon le paiement sur une base qu
     deploy();
     expect(await exists()).toBe('regularization_requests');
     expect(await db.$queryRaw`SELECT has_table_privilege('erp_platform', 'regularization_requests', 'SELECT') AS ok`).toEqual([{ ok: true }]);
-    expect(await db.$queryRaw`SELECT count(*)::int AS n FROM billing_parameters WHERE key = 'GRACE_DAYS'`).toEqual([{ n: 1 }]);
+    expect(await db.$queryRaw`SELECT count(*)::int AS n FROM billing_parameters WHERE key = ANY(${KEYS})`).toEqual([{ n: 3 }]);
   });
 });

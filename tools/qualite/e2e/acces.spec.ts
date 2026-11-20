@@ -14,7 +14,11 @@ const { authenticator } = require('otplib');
  * - « accès limité » : délai passé depuis 24 jours. Bandeau pour tout le personnel, saisie refusée avec son motif,
  *   consultation et régularisation ouvertes ;
  * puis le Super Admin répond à la demande et prolonge l'accès de l'établissement limité (avec un code), et chaque
- * direction lit le résultat. Base de test seulement : abonnements fictifs posés dans la base, aucun paiement, aucun SMS.
+ * direction lit le résultat. Lectures 7 A et 9 A, validées par Dankou le 20 novembre 2026, avec un troisième
+ * établissement « préavis » (délai de grâce qui finit aujourd'hui, demande en attente) : le Super Admin lit le jour et
+ * l'heure de la limitation avant de répondre, la réponse ouvre un préavis de 48 heures que la direction lit avec les
+ * heures restantes ; le renouvellement exceptionnel d'une prolongation demande son propre motif et reste marqué.
+ * Base de test seulement : abonnements fictifs posés dans la base, aucun paiement, aucun SMS.
  */
 const url = process.env.DATABASE_ADMIN_URL ?? 'postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test';
 if (!/\/erp_test(\?|$)/.test(url)) throw new Error('Base refusée : erp_test seulement');
@@ -29,6 +33,8 @@ const MOTIF = 'Paiement partiel reçu, solde promis par écrit (test de navigate
 const LIMITED_STAFF = 'L’abonnement Cahiora de l’établissement n’est pas régularisé : consultation, impression, export, caisse et régularisation restent possibles, et aucune donnée n’est supprimée.';
 const LIMITED_REFUSAL = 'Accès limité : l’abonnement Cahiora de l’établissement n’est pas régularisé. Consultation, impression, export, caisse et régularisation restent possibles, et aucune donnée n’est supprimée.';
 const AFTER = 'Ensuite, sans paiement validé, l’accès sera limité : consultation, impression, export, caisse et régularisation resteront possibles, et aucune donnée ne sera supprimée.';
+const MESSAGE_PREAVIS = 'Le virement fictif part demain matin (test de navigateur du préavis)';
+const MOTIF_RENOUVELLEMENT = 'Second versement promis pour la fin du mois, confirmé par écrit (test de navigateur)';
 
 test.describe.configure({ mode: 'serial' });
 
@@ -37,6 +43,17 @@ const addDays = (d: string, n: number) => new Date(Date.parse(`${d}T00:00:00Z`) 
 const localDay = (at = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(at);
 /** Même format que l'écran : « 14 novembre 2026 ». */
 const frDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+/** Même format que les textes du serveur : « 1er décembre 2026 », puis « 3 décembre 2026 à 14 h 05 » à l'heure de Porto-Novo. */
+const MOIS = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+const frJour = (d: string) => {
+  const [y, m, j] = d.split('-').map(Number);
+  return `${j === 1 ? '1er' : j} ${MOIS[m - 1]} ${y}`;
+};
+const frHeure = (t: Date) => {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+    .formatToParts(t).filter((x) => x.type !== 'literal').map((x) => [x.type, x.value]));
+  return `${frJour(`${p.year}-${p.month}-${p.day}`)} à ${Number(p.hour)} h ${p.minute}`;
+};
 const at = (d: string) => new Date(`${d}T08:00:00Z`);
 
 type Ecole = { id: string; name: string; domain: string; direction: string; comptable: string };
@@ -45,6 +62,7 @@ let saEmail = '';
 let saName = '';
 const G: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
 const L: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
+const N: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
 
 /** Établissement fictif seul dans son groupe, à sa propre adresse locale, avec sa direction, une comptable et une année en cours. */
 async function ecole(e: Ecole, slug: string, name: string, phones: [string, string]) {
@@ -111,6 +129,25 @@ test.beforeAll(async ({}, info) => {
       },
     ],
   });
+
+  // Préavis (lecture 7 A) : essai terminé il y a 15 jours, délai de grâce qui finit aujourd'hui, demande en attente.
+  const n = await ecole(N, `e2e-g5d-preavis-${suffix}-${stamp}`, `École fictive préavis ${suffix} ${stamp}`, [`+22901900085${suffix}1`, `+22901900085${suffix}2`]);
+  const nEnd = addDays(T0, -15);
+  const ns = await db.subscription.create({
+    data: {
+      tenantId: n.id, status: 'AWAITING_ACCEPTANCE', statusSince: at(addDays(nEnd, 1)), trialStart: new Date(addDays(nEnd, -13)), trialEnd: new Date(nEnd), trialDays: 14,
+      graceStart: new Date(addDays(nEnd, 1)), graceEnd: new Date(T0),
+    },
+  });
+  await db.subscriptionEvent.create({
+    data: {
+      subscriptionId: ns.id, tenantId: n.id, kind: 'TRIAL_ENDED', fromStatus: 'TRIAL', toStatus: 'AWAITING_ACCEPTANCE', actorKind: 'system', actorName: 'Préparation des tests de navigateur',
+      data: { fixture: true, lastFreeDay: nEnd, graceDays: 15, graceStart: addDays(nEnd, 1), graceEnd: T0 }, createdAt: at(addDays(nEnd, 1)),
+    },
+  });
+  await db.regularizationRequest.create({
+    data: { tenantId: n.id, subscriptionId: ns.id, status: 'PENDING', subscriptionStatus: 'AWAITING_ACCEPTANCE', message: MESSAGE_PREAVIS, requestedByName: `Fictive DIRECTION ${n.name}` },
+  });
 });
 
 test.afterAll(async () => {
@@ -139,6 +176,22 @@ async function code(page: Page) {
   const reste = 30_000 - (Date.now() % 30_000);
   if (reste < marge) await page.waitForTimeout(reste + 200);
   return authenticator.generate(secret) as string;
+}
+
+/** Nouvelle connexion du Super Admin, double authentification déjà active : un code d'une fenêtre pas encore utilisée. */
+async function connexionPlateforme(page: Page) {
+  await page.goto('/plateforme/connexion');
+  await page.getByLabel('Adresse e-mail').fill(saEmail);
+  await page.getByLabel('Mot de passe').fill(SA_PW);
+  await page.getByRole('button', { name: 'Se connecter' }).click();
+  const champ = page.getByLabel('Code', { exact: true });
+  await expect(champ).toBeVisible();
+  const last = (await db.platformAdmin.findUniqueOrThrow({ where: { email: saEmail } })).totpLastStep ?? 0;
+  const attente = (Number(last) + 1) * 30_000 - Date.now();
+  if (attente > 0) await page.waitForTimeout(attente + 200);
+  await champ.fill(await code(page));
+  await page.getByRole('button', { name: 'Valider' }).click();
+  await page.waitForURL((u) => u.pathname === '/plateforme');
 }
 
 async function rubrique(page: Page, groupe: string, nom: string) {
@@ -332,7 +385,10 @@ test('Super Admin : réponse à la demande de régularisation et prolongation qu
   await enAttente.getByRole('button', { name: `Répondre à ${G.name}` }).click();
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText(`« ${MESSAGE} »`);
-  await expect(dlg).toContainText('Une demande répondue ne retient plus la limitation');
+  // Lecture 7 A : avant d'envoyer, le jour et l'heure de la limitation ; la grâce finit dans plus de 48 heures, sans préavis.
+  await expect(dlg.getByTestId('apres-reponse')).toHaveText(
+    `Sans paiement validé ni prolongation, l’accès sera limité à partir du ${frJour(addDays(T0, 13))} à 0 h 00, à la fin du délai d’accès complet : la réponse ne change pas cette date.`,
+  );
   await dlg.getByLabel('Réponse').fill(REPONSE);
   await dlg.getByLabel('Code de votre application d’authentification').fill('000000');
   await dlg.getByRole('button', { name: 'Envoyer la réponse' }).click();
@@ -410,4 +466,78 @@ test('Directions : réponse de Cahiora lue dans l’abonnement ; accès complet 
   await connexion(page, L, L.comptable);
   await expect(page.getByRole('heading').first()).toBeVisible();
   await expect(page.getByRole('region', { name: 'Abonnement Cahiora' })).toHaveCount(0);
+});
+
+test('Super Admin : jour et heure de la limitation lus avant la réponse (préavis de 48 heures) ; renouvellement exceptionnel motivé et marqué', async ({ page }) => {
+  await connexionPlateforme(page);
+  await rubrique(page, 'Rubrique', 'Commercial et facturation');
+  await rubrique(page, 'Commercial et facturation', 'Accès des clients');
+  const enAttente = page.getByRole('list', { name: 'Demandes de régularisation en attente' }).locator(':scope > li', { hasText: N.name });
+  await expect(enAttente).toContainText(`« ${MESSAGE_PREAVIS} »`);
+  await enAttente.getByRole('button', { name: `Répondre à ${N.name}` }).click();
+  const dlg = page.getByRole('dialog');
+  // Le délai finit aujourd'hui : la réponse ouvre un préavis de 48 heures, et le Super Admin le lit avant d'envoyer.
+  await expect(dlg.getByTestId('apres-reponse')).toContainText('Le délai d’accès complet finit dans moins de 48 heures : votre réponse ouvre un préavis de 48 heures, une seule fois pour cette échéance.');
+  await dlg.getByLabel('Réponse').fill(REPONSE);
+  await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await tientEnLargeur(page);
+  await shot(page, 'g5d-14-preavis-annonce');
+  await dlg.getByRole('button', { name: 'Envoyer la réponse' }).click();
+  await expect(dlg).toBeHidden();
+  const s = await db.subscription.findUniqueOrThrow({ where: { tenantId: N.id } });
+  expect(s.noticeUntil).not.toBeNull();
+  expect(s.noticeUntil!.getTime() - Date.now()).toBeGreaterThan(47 * 3_600_000);
+  const clients = page.getByRole('list', { name: 'Clients en attente ou en accès limité' });
+  const cN = clients.locator(':scope > li', { hasText: N.name });
+  await expect(cN).toContainText('Préavis après la réponse');
+  await expect(cN).toContainText(`Préavis après la réponse de Cahiora : accès complet jusqu’au ${frHeure(s.noticeUntil!)}`);
+
+  // Lecture 9 A : nouvelle date plus tardive pour la prolongation de l'établissement limité, donc renouvellement exceptionnel.
+  const cL = clients.locator(':scope > li', { hasText: L.name });
+  await cL.getByRole('button', { name: `Prolonger l’accès de ${L.name}` }).click();
+  await expect(dlg).toContainText(`Prolongation actuelle jusqu’au ${frDate(addDays(T0, 20))} : une date plus tardive est un renouvellement exceptionnel ; une date plus proche avance la fin.`);
+  const fin = dlg.getByLabel('Dernier jour d’accès complet');
+  // 30 jours au plus depuis la fin de la prolongation en cours.
+  await expect(fin).toHaveAttribute('max', addDays(T0, 50));
+  await fin.fill(addDays(T0, 40));
+  await expect(dlg).toContainText('Renouvellement exceptionnel : il sera marqué comme tel au journal et dans cette liste');
+  // Son propre motif : celui de la prolongation précédente est refusé.
+  await dlg.getByLabel('Motif du renouvellement exceptionnel').fill(MOTIF);
+  await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await dlg.getByRole('button', { name: 'Prolonger l’accès' }).click();
+  await expect(dlg.getByText('Renouvellement exceptionnel : donnez son propre motif, différent de celui de la prolongation précédente')).toBeVisible();
+  await tientEnLargeur(page);
+  await shot(page, 'g5d-15-renouvellement-motif-refuse');
+  await dlg.getByLabel('Motif du renouvellement exceptionnel').fill(MOTIF_RENOUVELLEMENT);
+  await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await dlg.getByRole('button', { name: 'Prolonger l’accès' }).click();
+  await expect(dlg).toBeHidden();
+  await expect(cL).toContainText('Renouvellement exceptionnel');
+  await expect(cL).toContainText(`Accès complet prolongé jusqu’au ${frDate(addDays(T0, 40))} (encore 41 jours).`);
+  const ev = await db.subscriptionEvent.findFirstOrThrow({ where: { tenantId: L.id, kind: 'ACCESS_EXTENSION_RENEWED' } });
+  expect(ev).toMatchObject({ reason: MOTIF_RENOUVELLEMENT, actorName: saName, data: { until: addDays(T0, 40), previousUntil: addDays(T0, 20), kind: 'renewal' } });
+  await shot(page, 'g5d-16-renouvellement-marque');
+});
+
+test('Direction pendant le préavis : jour et heure de la limitation, heures restantes, dans l’alerte, le bandeau et l’abonnement', async ({ page }) => {
+  const s = await db.subscription.findUniqueOrThrow({ where: { tenantId: N.id } });
+  const fin = frHeure(s.noticeUntil!);
+  await connexion(page, N, N.direction);
+  const alerte = page.getByRole('alertdialog', { name: 'Préavis avant l’accès limité' });
+  await expect(alerte).toBeVisible();
+  await expect(alerte.getByTestId('compteur-acces')).toHaveText(/^\s*Encore 4[78] heures d’accès complet\s*$/);
+  await expect(alerte).toContainText(`Cahiora a répondu à votre demande de régularisation : l’accès reste complet jusqu’au ${fin}. ${AFTER}`);
+  await tientEnLargeur(page);
+  await shot(page, 'g5d-17-preavis-alerte');
+  await alerte.getByRole('button', { name: 'Plus tard' }).click();
+  await expect(alerte).toBeHidden();
+  await page.goto(`${adresse(N)}/espace/parametres?rubrique=abonnement`);
+  const bandeau = page.getByRole('region', { name: 'Abonnement Cahiora' });
+  await expect(bandeau).toContainText('Préavis avant l’accès limité');
+  await expect(bandeau.getByTestId('compteur-acces')).toHaveText(/^\s*Encore 4[78] heures d’accès complet\s*$/);
+  await expect(page.getByText(`Préavis après la réponse de Cahiora : accès complet jusqu’au ${fin}.`)).toBeVisible();
+  const demande = page.locator('#regulariser').getByRole('list', { name: 'Demandes de régularisation' }).locator(':scope > li').first();
+  await expect(demande).toContainText(REPONSE);
+  await tientEnLargeur(page);
+  await shot(page, 'g5d-18-preavis-abonnement');
 });

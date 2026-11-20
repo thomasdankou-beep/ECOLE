@@ -11,7 +11,7 @@ import { AccessTokenPayload, Actor, forgetSessions, SCHOOL_AUDIENCE } from '../.
 import { AuditService, auditSubject, maskIdentifier } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
-import { country, localDay } from '../../common/country';
+import { country } from '../../common/country';
 import { schoolAccess } from '../billing/access';
 import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -418,9 +418,10 @@ export class AuthService {
       // Lot G5d-1 (D-G5-30 A) : accès selon l'abonnement, pour le bandeau et l'alerte de la direction ; le personnel ne
       // lit que l'accès limité, une famille rien (elle n'a jamais affaire à l'abonnement de l'établissement).
       const staff = user.roles.some((r) => r.role !== 'PARENT' && r.role !== 'ELEVE');
-      const a = staff ? await schoolAccess(tx, localDay(timezone)) : null;
+      const a = staff ? await schoolAccess(tx, timezone) : null;
       const access = a && {
-        status: a.status, statusLabel: a.statusLabel, phase: a.phase, until: a.until, daysLeft: a.daysLeft, limitedFrom: a.limitedFrom, pendingRequest: a.pendingRequest,
+        status: a.status, statusLabel: a.statusLabel, phase: a.phase, until: a.until, daysLeft: a.daysLeft, limitedFrom: a.limitedFrom,
+        limitedAt: a.limitedAt, limitedAtLabel: a.limitedAtLabel, hoursLeft: a.hoursLeft, pendingRequest: a.pendingRequest,
         termsAccepted: a.termsAccepted, direction: user.roles.some((r) => r.role === 'DIRECTION'), canRegularize: user.roles.some((r) => r.role === 'DIRECTION' && !r.siteId),
       };
       return { user, tenant, sites, year, children, self, access };

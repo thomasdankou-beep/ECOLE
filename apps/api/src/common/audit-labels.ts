@@ -183,6 +183,9 @@ export const AUDIT_LABELS: Record<string, string> = {
   'billing.extension_reminder': 'Cahiora : rappel avant la fin de la prolongation',
   'billing.access_limited': 'Cahiora : accès limité, abonnement non régularisé (aucune donnée supprimée)',
   'billing.access_extended': 'Cahiora : accès complet prolongé',
+  'billing.access_extension_renewed': 'Cahiora : accès complet prolongé à nouveau (renouvellement exceptionnel)',
+  'billing.access_extension_shortened': 'Cahiora : fin de la prolongation de l’accès complet avancée',
+  'billing.notice_reminder': 'Cahiora : rappel avant la fin du préavis',
   'billing.regularization_requested': 'Demande de régularisation de l’abonnement envoyée à Cahiora',
   'billing.regularization_answered': 'Cahiora : réponse à la demande de régularisation',
 };

@@ -3,10 +3,12 @@
 /**
  * Accès selon l'abonnement Cahiora, tel que l'établissement le lit (lot G5d-1, D-G5-30 A) : textes du bandeau, de
  * l'alerte de connexion de la direction et de la carte du tableau de bord. Les phases et les dates viennent de l'API
- * (/auth/me), qui les calcule au jour de l'établissement ; rien n'est recalculé ici.
+ * (/auth/me), qui les calcule au jour et à l'heure de l'établissement ; rien n'est recalculé ici. Lecture 7 A
+ * (20 novembre 2026) : pendant le préavis qui suit une réponse de Cahiora, le jour et l'heure de la limitation, avec
+ * un compteur en heures.
  */
 
-export type AccessPhase = 'FREE' | 'ACTIVE' | 'GRACE' | 'EXTENDED' | 'HELD' | 'DUE' | 'LIMITED' | 'WAITING';
+export type AccessPhase = 'FREE' | 'ACTIVE' | 'GRACE' | 'EXTENDED' | 'NOTICE' | 'HELD' | 'DUE' | 'LIMITED' | 'WAITING';
 
 /** Accès de l'établissement pour le personnel (null pour une famille, ou sans abonnement). */
 export type SchoolAccess = {
@@ -16,13 +18,15 @@ export type SchoolAccess = {
   /** Jours d'accès complet restants, aujourd'hui compris : le compteur. */
   daysLeft: number | null;
   limitedFrom: string | null;
+  /** Préavis en cours : fin (instant), son libellé à l'heure de l'établissement, heures restantes. */
+  limitedAt: string | null; limitedAtLabel: string | null; hoursLeft: number | null;
   pendingRequest: boolean; termsAccepted: boolean;
   /** La personne a le rôle Direction ; seule la direction de tout l'établissement régularise. */
   direction: boolean; canRegularize: boolean;
 };
 
 /** Phases où la direction est prévenue (bandeau, alerte de connexion, carte du tableau de bord). */
-export const ALERT_PHASES: AccessPhase[] = ['GRACE', 'EXTENDED', 'HELD', 'DUE', 'WAITING', 'LIMITED'];
+export const ALERT_PHASES: AccessPhase[] = ['GRACE', 'EXTENDED', 'NOTICE', 'HELD', 'DUE', 'WAITING', 'LIMITED'];
 
 /** Page de l'abonnement, à sa section « Régulariser mon abonnement ». */
 export const REGULARIZE_HREF = '/espace/parametres?rubrique=abonnement#regulariser';
@@ -37,6 +41,16 @@ const lower = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
 /** Compteur : « Encore 15 jours », « Encore 2 jours », « Dernier jour ». */
 export const counterText = (n: number) => (n <= 1 ? 'Dernier jour d’accès complet' : `Encore ${n} jours d’accès complet`);
 
+/** Compteur du préavis : « Encore 31 heures », « Dernière heure ». */
+export const hoursText = (n: number) => (n <= 1 ? 'Dernière heure d’accès complet' : `Encore ${n} heures d’accès complet`);
+
+/** Compteur d'une phase : jours pendant le délai ou la prolongation, heures pendant le préavis ; null sinon. */
+export function accessCounter(a: Pick<SchoolAccess, 'phase' | 'daysLeft' | 'hoursLeft'>) {
+  if (a.phase === 'NOTICE' && a.hoursLeft !== null) return hoursText(a.hoursLeft);
+  if ((a.phase === 'GRACE' || a.phase === 'EXTENDED') && a.daysLeft !== null) return counterText(a.daysLeft);
+  return null;
+}
+
 /** Titre et texte d'une phase ; `staff` : personnel qui n'est pas de la direction (accès limité seulement). */
 export function accessText(a: SchoolAccess, staff = false): { title: string; body: string; tone: 'warn' | 'bad' } {
   const pending = a.pendingRequest ? ' Votre demande de régularisation attend la réponse de Cahiora : tant qu’elle attend, l’accès ne sera pas limité.' : '';
@@ -46,6 +60,11 @@ export function accessText(a: SchoolAccess, staff = false): { title: string; bod
       return { tone: 'warn', title: `Abonnement Cahiora : ${lower(a.statusLabel)}`, body: `Délai de grâce en accès complet jusqu’au ${frDate(a.until)} inclus.${a.pendingRequest ? pending : after}` };
     case 'EXTENDED':
       return { tone: 'warn', title: 'Accès complet prolongé par Cahiora', body: `Jusqu’au ${frDate(a.until)} inclus.${a.pendingRequest ? pending : after}` };
+    case 'NOTICE':
+      return {
+        tone: 'warn', title: 'Préavis avant l’accès limité',
+        body: `Cahiora a répondu à votre demande de régularisation : l’accès reste complet jusqu’au ${a.limitedAtLabel ?? frDate(a.until)}.${a.pendingRequest ? pending : after}`,
+      };
     case 'HELD':
       return { tone: 'warn', title: `Abonnement Cahiora : ${lower(a.statusLabel)}`, body: 'Le délai d’accès complet est passé. Votre demande de régularisation attend la réponse de Cahiora : tant qu’elle attend, l’accès n’est pas limité.' };
     case 'DUE':

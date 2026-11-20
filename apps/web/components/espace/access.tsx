@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { AlertTriangle, CalendarClock, Lock, X } from 'lucide-react';
 import { Button, Card } from '@/components/ui';
-import { accessText, type AccessPhase, counterText, loginAlert, REGULARIZE_HREF, type SchoolAccess, showsAccess } from '@/lib/access';
+import { accessCounter, accessText, type AccessPhase, loginAlert, REGULARIZE_HREF, type SchoolAccess, showsAccess } from '@/lib/access';
 import { currentSessionId } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
@@ -13,7 +13,8 @@ import { cn } from '@/lib/utils';
 /**
  * Accès selon l'abonnement Cahiora (lot G5d-1, D-G5-30 A), sans jamais bloquer le travail pendant l'accès complet :
  * - bandeau permanent avec le compteur des jours : la direction pendant le délai de grâce, une prolongation, une demande
- *   en attente ou après la fin de la gratuité ; tout le personnel pendant l'accès limité ; jamais les familles ;
+ *   en attente ou après la fin de la gratuité ; tout le personnel pendant l'accès limité ; jamais les familles ; pendant
+ *   le préavis qui suit une réponse de Cahiora (lecture 7 A), le jour et l'heure de la limitation et les heures restantes ;
  * - alerte à chaque connexion de la direction, posée dans un coin de l'écran sans couvrir la page : on peut travailler
  *   sans la fermer (les alertes ne bloquent pas le travail pendant l'accès complet) ;
  * - carte du tableau de bord de la direction (le bandeau n'y est pas répété) ;
@@ -30,12 +31,13 @@ function RegularizeButton({ onClick, className }: { onClick?: () => void; classN
   );
 }
 
-/** Compteur des jours d'accès complet (délai de grâce ou prolongation). */
+/** Compteur de l'accès complet : jours (délai de grâce ou prolongation) ou heures (préavis). */
 function Counter({ a, big, className }: { a: SchoolAccess; big?: boolean; className?: string }) {
-  if (a.daysLeft === null || (a.phase !== 'GRACE' && a.phase !== 'EXTENDED')) return null;
+  const text = accessCounter(a);
+  if (!text) return null;
   return (
     <span className={cn('inline-flex w-fit items-center gap-1.5 rounded-full bg-surface/70 px-2.5 py-0.5 font-extrabold tabular', big ? 'text-base' : 'text-sm', className)} data-testid="compteur-acces">
-      <CalendarClock className="size-4 flex-none" aria-hidden /> {counterText(a.daysLeft)}
+      <CalendarClock className="size-4 flex-none" aria-hidden /> {text}
     </span>
   );
 }
@@ -81,10 +83,10 @@ export function AccessCard() {
 }
 
 /**
- * Phases de l'alerte de connexion : délai de grâce, prolongation, demande en attente, délai passé, accès limité. Une
- * gratuité finie avant le lot G5d, sans délai connu, n'a que le bandeau.
+ * Phases de l'alerte de connexion : délai de grâce, prolongation, préavis, demande en attente, délai passé, accès
+ * limité. Une gratuité finie avant le lot G5d, sans délai connu, n'a que le bandeau.
  */
-const LOGIN_ALERT_PHASES: AccessPhase[] = ['GRACE', 'EXTENDED', 'HELD', 'DUE', 'LIMITED'];
+const LOGIN_ALERT_PHASES: AccessPhase[] = ['GRACE', 'EXTENDED', 'NOTICE', 'HELD', 'DUE', 'LIMITED'];
 
 /**
  * Alerte à chaque connexion de la direction, une seule fois par connexion même avec plusieurs onglets (lecture 3,

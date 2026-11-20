@@ -89,7 +89,7 @@ export class SchoolSubscriptionService {
           renewalDate: iso(c.renewal_date as Date | null), formula: c.formula,
         })),
         history: events.map((e) => ({ kind: e.kind, label: subscriptionKindLabel(e.kind), fromStatus: e.from_status, toStatus: e.to_status, data: e.data, actorName: e.actor_name, createdAt: e.created_at })),
-        access: await schoolAccess(tx, today),
+        access: await schoolAccess(tx, t.timezone),
         requests: s ? await schoolRequests(tx) : [],
         regularization: s ? await this.regularization(tx, t.currency) : null,
       };

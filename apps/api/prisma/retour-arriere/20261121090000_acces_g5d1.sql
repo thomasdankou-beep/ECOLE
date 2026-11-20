@@ -1,15 +1,16 @@
 -- Retour arrière de la migration 20261121090000_acces_g5d1 (API arrêtée, avant de remettre le code précédent).
 -- Retire la table des demandes de régularisation, les colonnes d'accès des abonnements (délai de grâce, prolongation,
--- accès limité), les fonctions, le type, les contrôles et les droits ajoutés par le lot G5d-1, remet l'acceptation des
--- conditions commerciales du lot G5a telle qu'elle était et retire le délai de grâce inscrit par la migration. Ne
--- touche à aucune autre donnée, ni à la facturation des lots G5a, G5b, G5c et G5g. Si plusieurs lots doivent être
--- retirés, passer celui-ci d'abord, puis ceux de G5c, de G5b, de G5g et de G5a.
+-- accès limité, préavis après une réponse), les fonctions, le type, les contrôles et les droits ajoutés par le lot
+-- G5d-1, remet l'acceptation des conditions commerciales du lot G5a telle qu'elle était et retire les trois paramètres
+-- inscrits par la migration (délai de grâce, préavis, durée maximale d'une prolongation). Ne touche à aucune autre
+-- donnée, ni à la facturation des lots G5a, G5b, G5c et G5g. Si plusieurs lots doivent être retirés, passer celui-ci
+-- d'abord, puis ceux de G5c, de G5b, de G5g et de G5a.
 -- Les lignes déjà inscrites dans les journaux de la plateforme, des groupes et des écoles et dans l'historique des
 -- abonnements restent : ils sont en ajout seul. Une fois le script passé, la migration peut être rejouée par une
 -- nouvelle mise à jour.
 -- Contrôle de sécurité : s'il existe une demande de régularisation, un abonnement avec un délai de grâce, une
--- prolongation ou un accès limité, ou un délai de grâce saisi par le Super Admin, le script les compte et S'ARRÊTE sans
--- rien changer. Pour passer outre en connaissance de cause seulement (ces données seront perdues : gardez d'abord une
+-- prolongation, un préavis ou un accès limité, ou une valeur de ces trois paramètres saisie par le Super Admin, le
+-- script les compte et S'ARRÊTE sans rien changer. Pour passer outre en connaissance de cause seulement (ces données seront perdues : gardez d'abord une
 -- sauvegarde hors du serveur) : PGOPTIONS="-c cahiora.forcer_retour=oui". Un accès limité est alors levé : l'abonnement
 -- revient en attente d'acceptation ou de paiement, inscrit dans son historique.
 -- Lancement :
@@ -24,11 +25,13 @@ DECLARE
   n_params int;
 BEGIN
   SELECT count(*) INTO n_requests FROM regularization_requests;
-  SELECT count(*) INTO n_access FROM subscriptions WHERE "graceStart" IS NOT NULL OR "extendedUntil" IS NOT NULL OR "limitedSince" IS NOT NULL;
+  SELECT count(*) INTO n_access FROM subscriptions
+   WHERE "graceStart" IS NOT NULL OR "extendedUntil" IS NOT NULL OR "limitedSince" IS NOT NULL OR "noticeUntil" IS NOT NULL;
   SELECT count(*) INTO n_limited FROM subscriptions WHERE status = 'LIMITED';
-  SELECT count(*) INTO n_params FROM billing_parameters WHERE key = 'GRACE_DAYS' AND "createdByName" <> 'Mise à jour de Cahiora (lot G5d-1)';
+  SELECT count(*) INTO n_params FROM billing_parameters
+   WHERE key IN ('GRACE_DAYS', 'NOTICE_HOURS', 'EXTENSION_MAX_DAYS') AND "createdByName" <> 'Mise à jour de Cahiora (lot G5d-1)';
   IF n_requests + n_access + n_limited + n_params > 0 AND coalesce(current_setting('cahiora.forcer_retour', true), '') <> 'oui' THEN
-    RAISE EXCEPTION 'Retour arrière arrêté, rien n''a été changé : % demande(s) de régularisation, % abonnement(s) avec un délai de grâce, une prolongation ou un accès limité, % délai(s) de grâce saisi(s) par le Super Admin',
+    RAISE EXCEPTION 'Retour arrière arrêté, rien n''a été changé : % demande(s) de régularisation, % abonnement(s) avec un délai de grâce, une prolongation, un préavis ou un accès limité, % valeur(s) du délai de grâce, du préavis ou de la durée des prolongations saisie(s) par le Super Admin',
       n_requests, greatest(n_access, n_limited), n_params;
   END IF;
 END $$;
@@ -54,13 +57,15 @@ DROP TABLE IF EXISTS regularization_requests;
 DROP FUNCTION IF EXISTS regularization_requests_guard();
 DROP TRIGGER IF EXISTS subscriptions_access_guard ON subscriptions;
 DROP FUNCTION IF EXISTS subscriptions_access_guard();
-ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_limited_check, DROP CONSTRAINT IF EXISTS subscriptions_grace_check;
-ALTER TABLE subscriptions DROP COLUMN IF EXISTS "graceStart", DROP COLUMN IF EXISTS "graceEnd", DROP COLUMN IF EXISTS "extendedUntil", DROP COLUMN IF EXISTS "limitedSince";
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_notice_check, DROP CONSTRAINT IF EXISTS subscriptions_limited_check,
+  DROP CONSTRAINT IF EXISTS subscriptions_grace_check;
+ALTER TABLE subscriptions DROP COLUMN IF EXISTS "graceStart", DROP COLUMN IF EXISTS "graceEnd", DROP COLUMN IF EXISTS "extendedUntil", DROP COLUMN IF EXISTS "limitedSince",
+  DROP COLUMN IF EXISTS "noticeUntil", DROP COLUMN IF EXISTS "noticeGraceEnd";
 DROP TYPE IF EXISTS "RegularizationRequestStatus";
 
--- Délai de grâce inscrit par la migration (table en ajout seul : son contrôle est suspendu le temps de cette ligne).
+-- Paramètres inscrits par la migration (table en ajout seul : son contrôle est suspendu le temps de ces lignes).
 ALTER TABLE billing_parameters DISABLE TRIGGER billing_parameters_append_only;
-DELETE FROM billing_parameters WHERE key = 'GRACE_DAYS' AND "createdByName" = 'Mise à jour de Cahiora (lot G5d-1)';
+DELETE FROM billing_parameters WHERE key IN ('GRACE_DAYS', 'NOTICE_HOURS', 'EXTENSION_MAX_DAYS') AND "createdByName" = 'Mise à jour de Cahiora (lot G5d-1)';
 ALTER TABLE billing_parameters ENABLE TRIGGER billing_parameters_append_only;
 
 -- Acceptation des conditions commerciales du lot G5a, telle qu'elle était (CREATE OR REPLACE garde ses droits).

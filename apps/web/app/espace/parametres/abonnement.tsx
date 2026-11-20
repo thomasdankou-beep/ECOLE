@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CalendarClock, CheckCircle2, FileText, Send } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
 import { Badge, Button, Empty, ErrorNote, Field, Textarea, useToast } from '@/components/ui';
-import { accessChanged, counterText, LIMITED_KEEPS, LIMITED_WILL_KEEP, type AccessPhase } from '@/lib/access';
+import { accessChanged, accessCounter, LIMITED_KEEPS, LIMITED_WILL_KEEP, type AccessPhase } from '@/lib/access';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { useApi } from '@/lib/use-api';
@@ -37,6 +37,7 @@ type Data = {
 /** Accès selon le paiement (lot G5d-1), calculé par l'API au jour de l'établissement. */
 type Access = {
   today: string; status: Status; statusLabel: string; phase: AccessPhase; until: string | null; daysLeft: number | null; limitedFrom: string | null;
+  limitedAt: string | null; limitedAtLabel: string | null; hoursLeft: number | null;
   graceStart: string | null; graceEnd: string | null; extendedUntil: string | null; limitedSince: string | null; termsAccepted: boolean; pendingRequest: boolean; paymentMeansActive: boolean;
 };
 type RegularizationRequest = { id: string; status: 'PENDING' | 'ANSWERED'; message: string | null; requestedByName: string; requestedAt: string; answeredAt: string | null; answer: string | null };
@@ -194,9 +195,19 @@ function Acceptation({ d, reload }: { d: Data; reload: () => void }) {
 /** Délai d'accès complet en cours ou passé, sous l'état de l'abonnement (lot G5d-1). */
 function AccessLine({ a }: { a: Access }) {
   const pending = a.pendingRequest ? 'Votre demande de régularisation attend la réponse de Cahiora : tant qu’elle attend, l’accès ne sera pas limité.' : null;
-  const counter = a.daysLeft !== null && (
-    <span className="inline-flex items-center gap-1.5 rounded-full bg-warn-soft px-2.5 py-0.5 text-sm font-extrabold text-warn"><CalendarClock className="size-4" aria-hidden /> {counterText(a.daysLeft)}</span>
+  const text = accessCounter(a);
+  const counter = text && (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-warn-soft px-2.5 py-0.5 text-sm font-extrabold text-warn"><CalendarClock className="size-4" aria-hidden /> {text}</span>
   );
+  if (a.phase === 'NOTICE') {
+    return (
+      <div className="grid gap-1 rounded-lg border border-line p-3">
+        <p>Préavis après la réponse de Cahiora : accès complet jusqu’au <b>{a.limitedAtLabel}</b>.</p>
+        <div>{counter}</div>
+        <p className="text-sm text-muted">{pending ?? `Sans paiement validé, l’accès sera limité à partir de cette heure : ${LIMITED_WILL_KEEP}.`}</p>
+      </div>
+    );
+  }
   if (a.phase === 'GRACE' || a.phase === 'EXTENDED') {
     return (
       <div className="grid gap-1 rounded-lg border border-line p-3">

@@ -46,7 +46,7 @@ type Overview = {
   amountsFrom: Record<string, string>;
 };
 type Alert = { id: string; tenantName: string | null; kind: string; message: string; dueDate: string | null; readAt: string | null; createdAt: string };
-type Param = { key: string; currency: string | null; label: string; unit: 'money' | 'days' | 'months' | 'percent'; usedFrom: string; provisional?: string; value: number | null; since: string | null; next: { value: number; effectiveFrom: string } | null };
+type Param = { key: string; currency: string | null; label: string; unit: 'money' | 'hours' | 'days' | 'months' | 'percent'; usedFrom: string; provisional?: string; value: number | null; since: string | null; next: { value: number; effectiveFrom: string } | null };
 type Params = {
   today: string; currencies: string[];
   definitions: { key: string; label: string; unit: Param['unit']; min: number; max: number; usedFrom: string; provisional?: string }[];
@@ -66,7 +66,7 @@ const LATER: Partial<Record<Section, [string, string]>> = {
   rapports: ['G5d-2', 'Facturé, encaissé et impayés par période, établissement, groupe et état.'],
 };
 
-const UNIT_SUFFIX = { days: 'jours', months: 'mois' } as const;
+const UNIT_SUFFIX = { hours: 'heures', days: 'jours', months: 'mois' } as const;
 function paramValue(unit: Param['unit'], value: number | null, currency: string | null) {
   if (value === null) return 'INFORMATION MANQUANTE';
   if (unit === 'money') return money(value, currency);
@@ -676,7 +676,7 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
           <Select value={f.key} onChange={(x) => setF({ ...f, key: x.target.value })}>{p.definitions.map((d) => <option key={d.key} value={d.key}>{d.label}</option>)}</Select>
         </Field>
         {def.unit === 'money' && <Field label="Monnaie"><Select value={f.currency} onChange={(x) => setF({ ...f, currency: x.target.value })}>{p.currencies.map((c) => <option key={c} value={c}>{c}</option>)}</Select></Field>}
-        <Field label={def.unit === 'money' ? 'Montant' : def.unit === 'percent' ? 'Pourcentage' : def.unit === 'days' ? 'Nombre de jours' : 'Nombre de mois'} hint={def.unit === 'percent' ? 'Par exemple 15 pour 15 %.' : undefined}>
+        <Field label={def.unit === 'money' ? 'Montant' : def.unit === 'percent' ? 'Pourcentage' : def.unit === 'hours' ? 'Nombre d’heures' : def.unit === 'days' ? 'Nombre de jours' : 'Nombre de mois'} hint={def.unit === 'percent' ? 'Par exemple 15 pour 15 %.' : undefined}>
           <Input inputMode="decimal" value={f.value} onChange={(x) => setF({ ...f, value: x.target.value })} required />
         </Field>
         <Field label="Date d’effet" hint="Aujourd’hui au plus tôt."><Input type="date" min={p.today} value={f.effectiveFrom} onChange={(x) => setF({ ...f, effectiveFrom: x.target.value })} required /></Field>

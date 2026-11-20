@@ -273,7 +273,7 @@ model BillingParameter {
   key           String
   /// Monnaie d'un montant (XOF…) ; vide pour une durée ou un pourcentage.
   currency      String?
-  /// Montant dans la monnaie, nombre de jours ou de mois, ou pourcentage en centièmes (1500 = 15 %).
+  /// Montant dans la monnaie, nombre d'heures, de jours ou de mois, ou pourcentage en centièmes (1500 = 15 %).
   value         Int
   effectiveFrom DateTime @db.Date
   reason        String
@@ -355,6 +355,10 @@ model Subscription {
   extendedUntil          DateTime?               @db.Date
   /// Début de l'accès limité (statut LIMITED), posé par la tâche planifiée.
   limitedSince           DateTime?
+  /// Préavis après la réponse de Cahiora à une demande de régularisation (lecture 7 A, 20 novembre 2026) : fin du
+  /// préavis, et fin du délai de grâce de l'échéance pour laquelle il a été donné (une seule fois par échéance).
+  noticeUntil            DateTime?
+  noticeGraceEnd         DateTime?               @db.Date
   createdAt              DateTime                @default(now())
   updatedAt              DateTime                @updatedAt
   events                 SubscriptionEvent[]

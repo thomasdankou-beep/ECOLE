@@ -62,8 +62,9 @@ const OPEN_WRITES = [
 /**
  * Registre des routes publiques de l'établissement, hors Super Admin et console des groupes (qui ont leurs propres
  * gardes) : connexion et récupération d'un compte, pages publiques, vérification d'un document par son code, fichiers,
- * retour des paiements Mobile Money (caisse) et préinscription en ligne des familles (point présenté à Dankou le
- * 20 novembre 2026). Elles ne passent pas par la connexion de l'établissement, donc pas par le contrôle de l'accès limité.
+ * retour des paiements Mobile Money (caisse) et préinscription en ligne des familles, laissée ouverte pendant l'accès
+ * limité (décision de Dankou du 20 novembre 2026). Elles ne passent pas par la connexion de l'établissement, donc pas
+ * par le contrôle de l'accès limité.
  */
 const PUBLIC_ROUTES = [
   'GET /api/v1/files', 'GET /api/v1/health',

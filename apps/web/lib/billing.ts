@@ -34,6 +34,9 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.extension_reminder': 'Accès : rappel avant la fin de la prolongation',
   'billing.access_limited': 'Accès : accès limité, abonnement non régularisé',
   'billing.access_extended': 'Accès : accès complet prolongé par Cahiora',
+  'billing.access_extension_renewed': 'Accès : renouvellement exceptionnel d’une prolongation',
+  'billing.access_extension_shortened': 'Accès : fin d’une prolongation avancée',
+  'billing.notice_reminder': 'Accès : rappel avant la fin du préavis',
   'billing.regularization_requested': 'Accès : demande de régularisation de la direction',
   'billing.regularization_answered': 'Accès : réponse de Cahiora à une demande de régularisation',
 };
