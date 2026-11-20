@@ -53,6 +53,14 @@ model Tenant {
   billingDocumentLines   BillingDocumentLine[]
   /// Demandes de régularisation de la direction (lot G5d-1) : zone de la plateforme, lues par l'école par ses fonctions.
   regularizationRequests RegularizationRequest[]
+  /// Paiements de l'abonnement enregistrés par le Super Admin, imputations, crédit, remboursements et transferts (lot
+  /// G5d-2) : zone de la plateforme, lus par l'école par ses fonctions de la base.
+  billingPayments        BillingPayment[]
+  billingAllocations     BillingAllocation[]
+  billingCreditEntries   BillingCreditEntry[]
+  billingRefunds         BillingRefund[]
+  creditTransfersOut     BillingCreditTransfer[] @relation("BillingCreditTransferFrom")
+  creditTransfersIn      BillingCreditTransfer[] @relation("BillingCreditTransferTo")
 
   @@index([groupId])
   @@map("tenants")
@@ -68,7 +76,7 @@ enum TenantStatus {
 /// propre fiche, sans les notes internes (Row Level Security sur app.group_id, migration groupes_g1).
 /// Un groupe qui a des écoles ne peut pas être supprimé.
 model SchoolGroup {
-  id               String            @id @default(uuid()) @db.Uuid
+  id               String                  @id @default(uuid()) @db.Uuid
   name             String
   /// Raison sociale du promoteur (facultative).
   legalName        String?
@@ -76,20 +84,23 @@ model SchoolGroup {
   phone            String?
   email            String?
   address          String?
-  country          String            @default("BJ")
+  country          String                  @default("BJ")
   /// Identifiant fiscal (facultatif).
   taxId            String?
   /// Suspendu par le Super Admin : les comptes du groupe perdent aussitôt l'accès à leur console (lot G2).
   /// Sans effet sur les écoles.
-  status           GroupStatus       @default(ACTIVE)
+  status           GroupStatus             @default(ACTIVE)
   /// Notes internes de la plateforme, jamais visibles par le groupe ni par les écoles.
   notes            String?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
   tenants          Tenant[]
   accounts         GroupAccount[]
   /// Documents provisoires de Cahiora adressés au groupe, client de la facturation (lot G5c).
   billingDocuments BillingDocument[]
+  /// Paiements de ses établissements et transferts de crédit entre eux (lot G5d-2).
+  billingPayments  BillingPayment[]
+  creditTransfers  BillingCreditTransfer[]
 
   @@map("school_groups")
 }
@@ -737,6 +748,12 @@ model BillingDocument {
   createdByName     String
   createdAt         DateTime              @default(now())
   lines             BillingDocumentLine[]
+  /// Lot G5d-2 : paiements qui citent ce document, imputations reçues (paiements, avoirs, crédits) et, pour un avoir,
+  /// ses imputations et le crédit qu'il a laissé.
+  payments          BillingPayment[]
+  allocations       BillingAllocation[]   @relation("BillingAllocationDocument")
+  creditAllocations BillingAllocation[]   @relation("BillingAllocationCreditNote")
+  creditEntries     BillingCreditEntry[]
 
   @@index([groupId, issueDate])
   @@map("billing_documents")
@@ -789,6 +806,222 @@ enum BillingDocumentKind {
   CREDIT_NOTE
   SERVICE_QUOTE
   SERVICE_PROFORMA
+}
+
+/// Moyen de paiement de Cahiora (lot G5d-2, verrou 2) : suite de versions datées, en ajout seul. Un paiement exige un
+/// moyen activé le jour du paiement, et le verrou 1 du serveur ouvert. Nom et coordonnées viennent de Dankou
+/// (INFORMATION MANQUANTE tant qu'il ne les a pas donnés) : aucun moyen n'est créé par la migration.
+model BillingPaymentMeans {
+  id            String           @id @default(uuid()) @db.Uuid
+  /// Identifiant stable du moyen (lettres capitales, chiffres, « _ »), commun à ses versions.
+  code          String
+  version       Int
+  name          String
+  /// Coordonnées et instructions montrées aux établissements quand le moyen est activé.
+  instructions  String
+  currency      String
+  active        Boolean
+  effectiveFrom DateTime         @db.Date
+  reason        String
+  createdById   String?          @db.Uuid
+  createdByName String
+  createdAt     DateTime         @default(now())
+  payments      BillingPayment[]
+
+  @@unique([code, version])
+  @@map("billing_payment_means")
+}
+
+/// Paiement reçu, enregistré par le Super Admin (D-G5-17 A, §8) avec son justificatif : jamais modifié ni supprimé ;
+/// une saisie erronée s'annule par une contre-écriture motivée (cancelledAt…), une fois. Reçu provisoire « PROV-REC-… »,
+/// sans valeur fiscale. Une même référence de transaction ne s'enregistre qu'une fois (sauf saisie annulée).
+model BillingPayment {
+  id              String               @id @default(uuid()) @db.Uuid
+  tenantId        String               @map("tenant_id") @db.Uuid
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  groupId         String               @map("group_id") @db.Uuid
+  group           SchoolGroup          @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  /// Document concerné : proforma de l'abonnement, adressée à l'établissement seul.
+  documentId      String               @db.Uuid
+  document        BillingDocument      @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  currency        String
+  /// Reste à payer du document concerné au moment de la saisie.
+  expectedAmount  Int
+  amount          Int
+  paidOn          DateTime             @db.Date
+  meansId         String               @db.Uuid
+  means           BillingPaymentMeans  @relation(fields: [meansId], references: [id], onDelete: Restrict)
+  meansName       String
+  transactionRef  String
+  /// Référence normalisée (sans espaces, en capitales) : contrôle des doublons.
+  transactionKey  String
+  proofKey        String
+  proofMime       String
+  /// Commentaire interne de Cahiora, jamais montré à l'école.
+  note            String?
+  receiptSeq      Int                  @unique
+  receiptNumber   String               @unique
+  /// Part du paiement devenue un crédit de l'établissement (au-delà des documents à payer).
+  creditAmount    Int
+  recordedById    String?              @db.Uuid
+  recordedByName  String
+  recordedAt      DateTime             @default(now())
+  ip              String?
+  cancelledAt     DateTime?
+  cancelledById   String?              @db.Uuid
+  cancelledByName String?
+  cancelReason    String?
+  cancelIp        String?
+  allocations     BillingAllocation[]
+  creditEntries   BillingCreditEntry[]
+
+  @@index([tenantId, paidOn])
+  @@index([documentId])
+  @@map("billing_payments")
+}
+
+/// Source d'une imputation : paiement, avoir ou crédit de l'établissement.
+enum BillingAllocationSource {
+  PAYMENT
+  CREDIT_NOTE
+  CREDIT
+}
+
+/// Imputation d'un montant sur un document de l'abonnement (choix 1 A), en ajout seul ; une contre-écriture est
+/// négative et cite l'imputation qu'elle reprend.
+model BillingAllocation {
+  id            String                  @id @default(uuid()) @db.Uuid
+  tenantId      String                  @map("tenant_id") @db.Uuid
+  tenant        Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  documentId    String                  @db.Uuid
+  document      BillingDocument         @relation("BillingAllocationDocument", fields: [documentId], references: [id], onDelete: Restrict)
+  source        BillingAllocationSource
+  paymentId     String?                 @db.Uuid
+  payment       BillingPayment?         @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  creditNoteId  String?                 @db.Uuid
+  creditNote    BillingDocument?        @relation("BillingAllocationCreditNote", fields: [creditNoteId], references: [id], onDelete: Restrict)
+  creditEntryId String?                 @db.Uuid
+  creditEntry   BillingCreditEntry?     @relation(fields: [creditEntryId], references: [id], onDelete: Restrict)
+  amount        Int
+  reversesId    String?                 @db.Uuid
+  reverses      BillingAllocation?      @relation("BillingAllocationReverses", fields: [reversesId], references: [id], onDelete: Restrict)
+  reversedBy    BillingAllocation[]     @relation("BillingAllocationReverses")
+  createdAt     DateTime                @default(now())
+
+  @@index([documentId])
+  @@index([tenantId])
+  @@map("billing_allocations")
+}
+
+enum BillingCreditEntryKind {
+  /// Surplus d'un paiement, au-delà des documents à payer.
+  PAYMENT_SURPLUS
+  /// Avoir au-delà de ce qui restait à payer.
+  CREDIT_NOTE_SURPLUS
+  /// Déduction sur des documents à payer.
+  USE
+  /// Reprise d'une déduction (annulation du paiement qui l'avait permise).
+  USE_REVERSED
+  /// Retrait du surplus d'un paiement annulé.
+  PAYMENT_CANCELLED
+  REFUND
+  TRANSFER_OUT
+  TRANSFER_IN
+}
+
+/// Écriture du crédit d'un établissement (D-G5-15 A), en ajout seul : le crédit est la somme de ses écritures ; il
+/// appartient à l'établissement.
+model BillingCreditEntry {
+  id            String                 @id @default(uuid()) @db.Uuid
+  tenantId      String                 @map("tenant_id") @db.Uuid
+  tenant        Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  currency      String
+  kind          BillingCreditEntryKind
+  /// Positif (crédit gagné) ou négatif (crédit utilisé, remboursé, transféré, repris).
+  amount        Int
+  paymentId     String?                @db.Uuid
+  payment       BillingPayment?        @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  documentId    String?                @db.Uuid
+  document      BillingDocument?       @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  refundId      String?                @db.Uuid
+  refund        BillingRefund?         @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  transferId    String?                @db.Uuid
+  transfer      BillingCreditTransfer? @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  reversesId    String?                @db.Uuid
+  reverses      BillingCreditEntry?    @relation("BillingCreditEntryReverses", fields: [reversesId], references: [id], onDelete: Restrict)
+  reversedBy    BillingCreditEntry[]   @relation("BillingCreditEntryReverses")
+  data          Json?
+  /// system (tâche planifiée), platform (Super Admin) ou school (direction).
+  createdByKind String
+  createdById   String?                @db.Uuid
+  createdByName String
+  createdAt     DateTime               @default(now())
+  allocations   BillingAllocation[]
+
+  @@index([tenantId, createdAt])
+  @@map("billing_credit_entries")
+}
+
+enum BillingRefundStatus {
+  PENDING
+  REFUNDED
+  REFUSED
+}
+
+/// Demande de remboursement d'un crédit par la direction (D-G5-15 A) : le montant reste réservé jusqu'à la décision du
+/// Super Admin (remboursement avec sa preuve, ou refus motivé), qui s'inscrit une fois.
+model BillingRefund {
+  id              String               @id @default(uuid()) @db.Uuid
+  tenantId        String               @map("tenant_id") @db.Uuid
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  currency        String
+  amount          Int
+  status          BillingRefundStatus  @default(PENDING)
+  message         String?
+  requestedById   String?              @db.Uuid
+  requestedByName String
+  requestedAt     DateTime             @default(now())
+  ip              String?
+  decidedById     String?              @db.Uuid
+  decidedByName   String?
+  decidedAt       DateTime?
+  decisionNote    String?
+  refundedOn      DateTime?            @db.Date
+  refundMeans     String?
+  refundRef       String?
+  proofKey        String?
+  proofMime       String?
+  decisionIp      String?
+  entries         BillingCreditEntry[]
+
+  @@index([tenantId, requestedAt])
+  @@map("billing_refunds")
+}
+
+/// Transfert d'un crédit entre deux établissements d'un même groupe (§9) : autorisation (qui, par quel écrit) et motif
+/// obligatoires ; en ajout seul, avec ses deux écritures de crédit.
+model BillingCreditTransfer {
+  id            String               @id @default(uuid()) @db.Uuid
+  groupId       String               @map("group_id") @db.Uuid
+  group         SchoolGroup          @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  fromTenantId  String               @db.Uuid
+  fromTenant    Tenant               @relation("BillingCreditTransferFrom", fields: [fromTenantId], references: [id], onDelete: Restrict)
+  toTenantId    String               @db.Uuid
+  toTenant      Tenant               @relation("BillingCreditTransferTo", fields: [toTenantId], references: [id], onDelete: Restrict)
+  currency      String
+  amount        Int
+  authorizedBy  String
+  reason        String
+  proofKey      String?
+  proofMime     String?
+  createdById   String?              @db.Uuid
+  createdByName String
+  createdAt     DateTime             @default(now())
+  ip            String?
+  entries       BillingCreditEntry[]
+
+  @@index([groupId, createdAt])
+  @@map("billing_credit_transfers")
 }
 
 model Site {
