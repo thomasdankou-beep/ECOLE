@@ -14,11 +14,13 @@ import { groupLog, PlatformActor, platformLog, schoolLogInTx } from '../platform
 import { PlatformDb, PlatformGuard } from '../platform/platform';
 import {
   accessPhase, AccessPhase, AccessState, AccessView, AnswerOutcome, answerOutcome, answerOutcomeText, currentExtension, dayStart, extensionError, extensionKind,
-  extensionMaxUntil, frDateTime, PAYMENT_MEANS_ACTIVE, requestError, restoredStatus,
+  extensionMaxUntil, frDateTime, requestError, restoredStatus,
 } from './access-rules';
-import { BillingService } from './billing';
+import { BillingService, PLATFORM_TZ } from './billing';
 import { frDay, ParameterKey, STATUS_LABELS, SubscriptionStatus, versionOn } from './billing-rules';
 import { notifyDirection } from './billing-tasks';
+import { meansVersions, paymentMeansActiveFor } from './payments-access';
+import { meansOn, paymentsUnlocked } from './payments-rules';
 
 /**
  * Accès selon le paiement de l'abonnement (lot G5d-1), décisions de Dankou du 19 novembre 2026 (D-G5-30 A, D-G5-41 A,
@@ -32,8 +34,9 @@ import { notifyDirection } from './billing-tasks';
  * la limitation (préavis, une seule fois par échéance) et dit à la direction le jour et l'heure de la limitation ; le
  * Super Admin les lit avant d'envoyer sa réponse. Chaque prolongation dure 30 jours au plus ; une nouvelle prolongation
  * pour la même échéance est un renouvellement exceptionnel, avec son propre motif, marqué au journal et dans la liste.
- * Aucun paiement ni encaissement ici : le paiement validé, seul retour à l'accès complet hors prolongation, arrive avec
- * le lot G5d-2 (D-G5-33 et validation juridique et fiscale).
+ * Aucun paiement ni encaissement ici : le paiement validé, seul retour à l'accès complet hors prolongation, vient du
+ * lot G5d-2 (billing-payments, choix 2 A), fermé tant que D-G5-33 et la validation juridique et fiscale manquent ; un
+ * moyen de paiement activé pour l'établissement (verrou 1 ouvert, verrou 2 activé) lève la règle D-G5-42 A.
  */
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
@@ -62,7 +65,7 @@ export class AnswerDto {
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 export function cahioraMessage(e: unknown) {
   const text = e instanceof Error ? e.message : String(e);
-  const m = text.match(/CAHIORA: ([^\n"]+)/);
+  const m = text.match(/CAHIORA: ([^\n"`]+)/);
   if (!m) return null;
   const s = m[1].trim();
   return s.charAt(0).toUpperCase() + s.slice(1);
@@ -74,12 +77,14 @@ export const currentNotice = (s: { graceEnd: Date | null; noticeUntil: Date | nu
 
 /**
  * État d'accès d'un abonnement pour les règles du lot (sans base). `noticeUntil` : fin du préavis de l'échéance en
- * cours seulement (currentNotice, ou la fonction de l'école qui le filtre déjà).
+ * cours seulement (currentNotice, ou la fonction de l'école qui le filtre déjà). `paymentMeansActive` : l'établissement
+ * peut payer Cahiora ce jour-là (lot G5d-2 ; faux tant que les verrous sont fermés).
  */
 export const accessStateOf = (
   s: { status: SubscriptionStatus | DbStatus; graceEnd: Date | null; extendedUntil: Date | null }, pendingRequest: boolean, noticeUntil: Date | null, timezone: string,
+  paymentMeansActive = false,
 ): AccessState => ({
-  status: s.status as SubscriptionStatus, graceEnd: iso(s.graceEnd), extendedUntil: iso(s.extendedUntil), pendingRequest, paymentMeansActive: PAYMENT_MEANS_ACTIVE,
+  status: s.status as SubscriptionStatus, graceEnd: iso(s.graceEnd), extendedUntil: iso(s.extendedUntil), pendingRequest, paymentMeansActive,
   notice: noticeUntil ? { until: noticeUntil, lastDay: localDay(timezone, noticeUntil) } : null,
 });
 
@@ -113,11 +118,16 @@ export async function schoolAccess(tx: Tx, timezone: string, now = new Date()) {
   const [r] = await tx.$queryRaw<AccessRow[]>`SELECT * FROM current_tenant_subscription_access()`;
   if (!r) return null;
   const today = localDay(timezone, now);
-  const view = accessPhase(accessStateOf({ status: r.status, graceEnd: r.grace_end, extendedUntil: r.extended_until }, r.pending_request, r.notice_until, timezone), today, now);
+  // Moyens de paiement activés pour l'école ce jour-là (lot G5d-2) : aucun tant que le verrou 1 est fermé, ni pour l'école d'un groupe.
+  const means = paymentsUnlocked() ? await tx.$queryRaw<{ code: string }[]>`SELECT code FROM current_tenant_payment_means(${today}::date)` : [];
+  const paymentMeansActive = means.length > 0;
+  const view = accessPhase(
+    accessStateOf({ status: r.status, graceEnd: r.grace_end, extendedUntil: r.extended_until }, r.pending_request, r.notice_until, timezone, paymentMeansActive), today, now,
+  );
   return {
     today, status: r.status, statusLabel: STATUS_LABELS[r.status], ...view, limitedAtLabel: limitedAtLabel(view, timezone),
     graceStart: iso(r.grace_start), graceEnd: iso(r.grace_end), extendedUntil: iso(r.extended_until), limitedSince: r.limited_since,
-    termsAccepted: r.terms_accepted, pendingRequest: r.pending_request, paymentMeansActive: PAYMENT_MEANS_ACTIVE,
+    termsAccepted: r.terms_accepted, pendingRequest: r.pending_request, paymentMeansActive,
   };
 }
 
@@ -200,8 +210,10 @@ export class PlatformAccessService {
     const now = new Date();
     const subs = await this.db.subscription.findMany({
       where: { status: { in: ['AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT', 'LIMITED'] } },
-      include: { tenant: { select: { id: true, name: true, timezone: true, group: { select: { id: true, name: true } } } } },
+      include: { tenant: { select: { id: true, name: true, timezone: true, currency: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } } } },
     });
+    // Moyens de paiement (lot G5d-2) : aucun tant que le verrou 1 est fermé.
+    const versions = await meansVersions(this.db);
     const pending = new Map((await this.db.regularizationRequest.findMany({ where: { status: 'PENDING' } })).map((r) => [r.tenantId, r]));
     const requests = await this.db.regularizationRequest.findMany({ orderBy: { requestedAt: 'desc' }, take: 100, include: { tenant: { select: { name: true } } } });
     const params = (await this.db.billingParameter.findMany({ where: { key: { in: ['NOTICE_HOURS', 'EXTENSION_MAX_DAYS'] }, currency: null } }))
@@ -212,7 +224,8 @@ export class PlatformAccessService {
       const today = localDay(tz, now);
       const p = pending.get(s.tenantId) ?? null;
       const notice = currentNotice(s);
-      const view = accessPhase(accessStateOf(s, !!p, notice, tz), today, now);
+      const meansActive = paymentMeansActiveFor(versions, { currency: s.tenant.currency, alone: s.tenant.group._count.tenants === 1 }, today);
+      const view = accessPhase(accessStateOf(s, !!p, notice, tz, meansActive), today, now);
       const graceEnd = iso(s.graceEnd);
       const maxDays = versionOn(params, 'EXTENSION_MAX_DAYS', null, today)?.value ?? null;
       const afterAnswer = p
@@ -221,6 +234,7 @@ export class PlatformAccessService {
         : null;
       return {
         tenantId: s.tenantId, tenantName: s.tenant.name, group: s.tenant.group.name, today, status: s.status, statusLabel: STATUS_LABELS[s.status], statusSince: s.statusSince,
+        paymentMeansActive: meansActive,
         ...view, limitedAtLabel: limitedAtLabel(view, tz),
         graceStart: iso(s.graceStart), graceEnd, extendedUntil: iso(s.extendedUntil), limitedSince: s.limitedSince, termsAccepted: !!s.acceptedAt,
         noticeUntil: notice, noticeUntilLabel: notice ? frDateTime(notice, tz) : null,
@@ -233,7 +247,8 @@ export class PlatformAccessService {
       };
     }).sort((a, b) => PHASE_ORDER[a.phase] - PHASE_ORDER[b.phase] || (a.daysLeft ?? 0) - (b.daysLeft ?? 0) || a.tenantName.localeCompare(b.tenantName));
     return {
-      paymentMeansActive: PAYMENT_MEANS_ACTIVE,
+      // Au moins un moyen de paiement activé aujourd'hui (verrou 1 ouvert) ; chaque client dit s'il peut payer.
+      paymentMeansActive: paymentsUnlocked() && meansOn(versions, localDay(PLATFORM_TZ, now)).some((m) => m.active),
       clients,
       requests: requests.map((r) => ({
         id: r.id, tenantId: r.tenantId, tenantName: r.tenant.name, status: r.status, subscriptionStatus: r.subscriptionStatus, subscriptionStatusLabel: STATUS_LABELS[r.subscriptionStatus],

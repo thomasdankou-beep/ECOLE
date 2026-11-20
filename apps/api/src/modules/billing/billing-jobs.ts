@@ -6,12 +6,13 @@ import { forgetAccess, Public } from '../../common/auth';
 import { localDay } from '../../common/country';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
 import { accessStateOf, currentNotice } from './access';
-import { accessPhase, dueReminder, frDateTime, graceWindow, LIMITED_KEEPS, noticeReminderDue, PAYMENT_MEANS_ACTIVE, whenText } from './access-rules';
+import { accessPhase, dueReminder, frDateTime, graceWindow, LIMITED_KEEPS, noticeReminderDue, whenText } from './access-rules';
 import { PLATFORM_TZ } from './billing';
 import { addDays, daysLeft, dueAlerts, frDay, versionOn } from './billing-rules';
 import { AlreadyDone, jobOnce, notifyDirection, SYSTEM, systemJournals } from './billing-tasks';
 import { CountsService } from './counts';
 import { BillingDocumentsService } from './documents';
+import { meansVersions, paymentMeansActiveFor } from './payments-access';
 
 /**
  * Tâches planifiées de la facturation (lot G5a) : fin d'un essai, alertes avant la fin d'un pilote, fin d'un pilote.
@@ -32,7 +33,7 @@ import { BillingDocumentsService } from './documents';
 const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
-type Sub = Subscription & { tenant: { id: string; name: string; timezone: string; groupId: string } };
+type Sub = Subscription & { tenant: { id: string; name: string; timezone: string; groupId: string; currency: string; group: { _count: { tenants: number } } } };
 
 @Injectable()
 export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
@@ -69,8 +70,10 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
       const done: string[] = [];
       const subs: Sub[] = await this.db.subscription.findMany({
         where: { status: { in: ['TRIAL', 'PILOT', 'AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT'] } },
-        include: { tenant: { select: { id: true, name: true, timezone: true, groupId: true } } },
+        include: { tenant: { select: { id: true, name: true, timezone: true, groupId: true, currency: true, group: { select: { _count: { select: { tenants: true } } } } } } },
       });
+      // Moyens de paiement (lot G5d-2) : un établissement qui peut payer n'est plus retenu par sa demande (D-G5-42 A).
+      const means = await meansVersions(this.db);
       // Délais des alertes du pilote (30 et 7 jours, provisoire : D-G5-38), en vigueur ce jour ; délai de grâce
       // (D-G5-30 A), celui en vigueur le premier jour de grâce.
       const params = await this.db.billingParameter.findMany({ where: { key: { in: ['PILOT_ALERT_FIRST_DAYS', 'PILOT_ALERT_LAST_DAYS', 'GRACE_DAYS'] } } });
@@ -102,7 +105,8 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
           }
           if (s.status === 'AWAITING_ACCEPTANCE' || s.status === 'AWAITING_PAYMENT') {
             const notice = currentNotice(s);
-            const view = accessPhase(accessStateOf(s, pending.has(s.tenantId), notice, s.tenant.timezone), today, now);
+            const meansActive = paymentMeansActiveFor(means, { currency: s.tenant.currency, alone: s.tenant.group._count.tenants === 1 }, today);
+            const view = accessPhase(accessStateOf(s, pending.has(s.tenantId), notice, s.tenant.timezone, meansActive), today, now);
             if ((view.phase === 'GRACE' || view.phase === 'EXTENDED') && view.until) {
               const n = dueReminder(today, view.until);
               if (n !== null && (await this.accessReminder(s, view.phase, view.until, n, today, pending.has(s.tenantId)))) {
@@ -111,7 +115,7 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
             } else if (view.phase === 'NOTICE' && notice) {
               if (noticeReminderDue(notice, now) && (await this.noticeReminder(s, notice, pending.has(s.tenantId)))) done.push(`notice-reminder:${s.tenant.name}`);
             } else if (view.phase === 'DUE') {
-              if (await this.limit(s, notice)) done.push(`access-limited:${s.tenant.name}`);
+              if (await this.limit(s, notice, meansActive)) done.push(`access-limited:${s.tenant.name}`);
             }
           }
         } catch (e) {
@@ -226,7 +230,7 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
    * demande envoyée ou une réponse donnée au même instant (avec son préavis) retient encore la limitation. Rien n'est
    * supprimé.
    */
-  private async limit(s: Sub, notice: Date | null) {
+  private async limit(s: Sub, notice: Date | null, meansActive: boolean) {
     const graceEnd = iso(s.graceEnd);
     const until = iso(s.extendedUntil);
     const lastDay = [graceEnd, until].filter((x): x is string => !!x).sort().pop()!;
@@ -235,7 +239,7 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
     const firstLimitedDay = notice ? localDay(tz, notice) : addDays(lastDay, 1);
     const done = await this.once(`access-limited:${s.id}:${graceEnd ?? '-'}:${until ?? '-'}`, 'ACCESS_LIMITED', s.tenantId, firstLimitedDay, async (tx) => {
       await tx.$queryRaw`SELECT id FROM subscriptions WHERE id = ${s.id}::uuid FOR UPDATE`;
-      if (!PAYMENT_MEANS_ACTIVE && (await tx.regularizationRequest.count({ where: { tenantId: s.tenantId, status: 'PENDING' } }))) throw new AlreadyDone();
+      if (!meansActive && (await tx.regularizationRequest.count({ where: { tenantId: s.tenantId, status: 'PENDING' } }))) throw new AlreadyDone();
       const now = new Date();
       const n = await tx.subscription.updateMany({
         where: { id: s.id, status: s.status, graceEnd: s.graceEnd, extendedUntil: s.extendedUntil, noticeUntil: s.noticeUntil },

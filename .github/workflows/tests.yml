@@ -98,6 +98,10 @@ jobs:
           CLAMAV_HOST: ''
           ENFORCE_2FA: 'false'
           API_DOCS: 'false'
+          # Verrou 1 du lot G5d-2 ouvert pour ce serveur d'essai seulement : établissements et paiements fictifs de la base
+          # de test, aucun prestataire appelé (le Super Admin enregistre à la main). Partout ailleurs, production comprise,
+          # elle vaut false par défaut (docker-compose.yml) : verrou fermé, aucune écriture de paiement possible.
+          BILLING_PAYMENTS_UNLOCKED: 'true'
         run: |
           # Jeu de démonstration remis à neuf après les tests de l'API (base de test seulement).
           (cd apps/api && DATABASE_ADMIN_URL=$DB_OWNER NODE_ENV=development npx ts-node --transpile-only prisma/seed.ts)

@@ -11,7 +11,8 @@ import { CodeField, frDate, useSubmit } from './facturation-outils';
  * établissements en attente d'acceptation ou de paiement, ou en accès limité, avec leur délai d'accès complet ;
  * demandes de régularisation de leur direction, auxquelles Cahiora répond une fois ; prolongation exceptionnelle de
  * l'accès complet (date de fin obligatoire, motif interne jamais montré à l'école). Chaque réponse et chaque
- * prolongation demandent un code actuel de l'application d'authentification. Rien n'est payé ni encaissé ici.
+ * prolongation demandent un code actuel de l'application d'authentification. Rien n'est payé ni encaissé ici : les
+ * paiements s'enregistrent dans la rubrique Paiements (lot G5d-2).
  * Lectures 7 A et 9 A (20 novembre 2026) : avant d'envoyer une réponse, le Super Admin lit le jour et l'heure de la
  * limitation qui en découle (préavis de 48 heures, une fois par échéance) ; une prolongation dure 30 jours au plus, et
  * une nouvelle prolongation pour la même échéance est un renouvellement exceptionnel, avec son propre motif, marqué ici.
@@ -33,6 +34,8 @@ type Client = {
   afterAnswer: AfterAnswer | null;
   /** Lecture 9 A : prolongation de l'échéance en cours, date de fin la plus tardive possible, renouvellements exceptionnels. */
   extension: { current: string | null; maxDays: number | null; maxUntil: string; renewals: number };
+  /** Lot G5d-2 : l'établissement peut payer (verrou du serveur ouvert, moyen activé dans sa monnaie, seul dans son groupe). */
+  paymentMeansActive: boolean;
 };
 type Request = {
   id: string; tenantId: string; tenantName: string; status: 'PENDING' | 'ANSWERED'; subscriptionStatus: Status; subscriptionStatusLabel: string;
@@ -97,7 +100,7 @@ export function Acces() {
       </div>
       {!d.paymentMeansActive && (
         <p className="rounded-lg bg-sunk p-3 text-sm">
-          Aucun moyen de paiement n’est activé (lot G5d-2) : une demande de régularisation qui attend votre réponse retient la limitation automatique (D-G5-42 A).
+          Aucun moyen de paiement n’est activé (verrou du serveur fermé, ou aucun moyen activé dans Paiements) : une demande de régularisation qui attend votre réponse retient la limitation automatique (D-G5-42 A).
           Votre réponse met fin à cette retenue ; pour laisser l’accès complet après le délai, donnez une prolongation (D-G5-43 A).
         </p>
       )}
@@ -143,6 +146,7 @@ export function Acces() {
                 <p>{accessDetail(c)}</p>
                 {c.noticeUntil && c.phase !== 'NOTICE' && <p className="text-muted">Préavis déjà donné pour cette échéance, jusqu’au {c.noticeUntilLabel} : une nouvelle réponse n’en ouvre pas d’autre.</p>}
                 {c.pendingRequest && <p className="text-muted">Demande de régularisation du {dateTime(c.pendingRequest.requestedAt)} en attente de votre réponse.</p>}
+                {c.pendingRequest && c.paymentMeansActive && <p className="text-muted">Un moyen de paiement est activé pour cet établissement : sa demande ne retient pas la limitation (D-G5-42 A).</p>}
                 {!c.termsAccepted && <p className="text-muted">Conditions commerciales pas encore acceptées.</p>}
                 <div><Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'extend', c })} aria-label={`Prolonger l’accès de ${c.tenantName}`}><CalendarPlus className="size-4" /> Prolonger l’accès</Button></div>
               </li>

@@ -1,6 +1,6 @@
 import {
   accessPhase, AccessState, answerOutcome, answerOutcomeText, dayStart, dueReminder, extensionError, extensionKind, extensionMaxUntil, frDateTime, graceWindow,
-  LIMITED_REFUSAL, limitationDue, noticeReminderDue, PAYMENT_MEANS_ACTIVE, requestError, restoredStatus, whenText,
+  LIMITED_REFUSAL, limitationDue, noticeReminderDue, requestError, restoredStatus, whenText,
 } from './access-rules';
 import { addDays, trialEndDay } from './billing-rules';
 
@@ -71,7 +71,6 @@ describe('Accès G5d-1 : rappels, délai de grâce et limitation (D-G5-30 A)', (
 
 describe('Accès G5d-1 : demande de régularisation (D-G5-42 A) et prolongation (D-G5-43 A)', () => {
   it('une demande en attente, sans moyen de paiement activé, empêche la limitation', () => {
-    expect(PAYMENT_MEANS_ACTIVE).toBe(false);
     expect(accessPhase(state({ pendingRequest: true }), J(30)).phase).toBe('HELD');
     expect(limitationDue(state({ pendingRequest: true }), J(45))).toBe(false);
     // Pendant la grâce, la demande ne change rien au compteur.

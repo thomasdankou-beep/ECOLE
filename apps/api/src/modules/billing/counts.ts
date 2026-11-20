@@ -48,7 +48,7 @@ const DEPARTURE_BASES: CountBasis[] = ['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN', '
 
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 function cahioraMessage(e: unknown) {
-  const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"]+)/);
+  const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"`]+)/);
   return m ? m[1].trim() : null;
 }
 

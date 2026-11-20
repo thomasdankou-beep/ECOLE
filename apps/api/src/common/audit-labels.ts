@@ -188,6 +188,18 @@ export const AUDIT_LABELS: Record<string, string> = {
   'billing.notice_reminder': 'Cahiora : rappel avant la fin du préavis',
   'billing.regularization_requested': 'Demande de régularisation de l’abonnement envoyée à Cahiora',
   'billing.regularization_answered': 'Cahiora : réponse à la demande de régularisation',
+  // Paiements de l'abonnement Cahiora, reçus provisoires, crédits et remboursements (lot G5d-2).
+  'billing.payment_recorded': 'Cahiora : paiement enregistré, reçu provisoire (sans valeur fiscale)',
+  'billing.payment_cancelled': 'Cahiora : saisie d’un paiement annulée par une contre-écriture',
+  'billing.subscription_paid': 'Cahiora : abonnement payé, accès complet',
+  'billing.subscription_payment_reversed': 'Cahiora : abonnement de nouveau en attente de paiement (saisie annulée)',
+  'billing.credit_used': 'Cahiora : crédit de l’établissement déduit d’un document',
+  'billing.credit_note_imputed': 'Cahiora : avoir imputé sur les documents de l’abonnement',
+  'billing.refund_requested': 'Demande de remboursement du crédit envoyée à Cahiora',
+  'billing.refund_refunded': 'Cahiora : crédit remboursé',
+  'billing.refund_refused': 'Cahiora : demande de remboursement refusée',
+  'billing.credit_transferred_out': 'Cahiora : crédit transféré à un autre établissement du groupe',
+  'billing.credit_transferred_in': 'Cahiora : crédit reçu d’un autre établissement du groupe',
 };
 
 export const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action;

@@ -5,12 +5,14 @@ import { Prisma } from '@prisma/client';
 import { Equals, IsBoolean, IsUUID } from 'class-validator';
 import { AuditService } from '../../common/audit.service';
 import { Actor, AllowedWhenLimited, Can, CurrentActor, WholeSchool } from '../../common/auth';
-import { localDay } from '../../common/country';
+import { localDay, money } from '../../common/country';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { RawValue } from '../../common/util';
 import { schoolAccess, schoolRequests } from './access';
 import { daysLeft, STATUS_LABELS, subscriptionKindLabel, SubscriptionStatus } from './billing-rules';
+import { schoolPayments } from './billing-payments';
 import { BillingDocumentsService, documentLabel, GROUP_SCHOOL_PENDING, PROVISIONAL_MENTION } from './documents';
+import { documentPayment, paymentsUnlocked, RECEIPT_MENTION } from './payments-rules';
 
 /**
  * Abonnement Cahiora vu par la direction (lot G5a) : état, dates de gratuité, calendrier de facturation, tarif en
@@ -20,6 +22,8 @@ import { BillingDocumentsService, documentLabel, GROUP_SCHOOL_PENDING, PROVISION
  * Lot G5d-1 (D-G5-30 A) : la page sert aussi à la régularisation (bouton « Régulariser mon abonnement ») : accès
  * (délai de grâce, prolongation, accès limité, compteur), montant demandé par les documents provisoires, échéance,
  * état du paiement, moyens de paiement activés (aucun avant le lot G5d-2) et demandes de régularisation.
+ * Lot G5d-2 : état du paiement de chaque document, reçus provisoires, crédit et demandes de remboursement ; moyens de
+ * paiement montrés seulement une fois activés par Cahiora (verrous 1 et 2).
  */
 
 export class AcceptTermsDto {
@@ -45,7 +49,7 @@ type DocumentRow = {
 /** Erreur de la fonction d'acceptation (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 function acceptanceMessage(e: unknown) {
   const text = e instanceof Error ? e.message : String(e);
-  const m = text.match(/CAHIORA: ([^\n"]+)/);
+  const m = text.match(/CAHIORA: ([^\n"`]+)/);
   return m ? m[1].trim() : null;
 }
 
@@ -91,7 +95,7 @@ export class SchoolSubscriptionService {
         history: events.map((e) => ({ kind: e.kind, label: subscriptionKindLabel(e.kind), fromStatus: e.from_status, toStatus: e.to_status, data: e.data, actorName: e.actor_name, createdAt: e.created_at })),
         access: await schoolAccess(tx, t.timezone),
         requests: s ? await schoolRequests(tx) : [],
-        regularization: s ? await this.regularization(tx, t.currency) : null,
+        regularization: s ? await this.regularization(tx, t.currency, today) : null,
       };
     });
   }
@@ -106,8 +110,11 @@ export class SchoolSubscriptionService {
    * sur l'année et non sur un seul document ; l'échéance est la plus proche des documents à payer, c'est-à-dire celle du
    * premier document (dernier jour de grâce) : les documents suivants n'ont pas encore d'échéance (INFORMATION
    * MANQUANTE dans G5c), ce que l'écran dit. Chaque document et chaque avoir est détaillé.
+   * Lot G5d-2 : chaque document porte l'état de son paiement (avoirs, paiements et crédits imputés) ; l'échéance est
+   * celle du plus ancien document qui reste à payer ; la page montre les reçus provisoires, le crédit et les demandes de
+   * remboursement, et les moyens de paiement seulement quand Cahiora les a activés.
    */
-  private async regularization(tx: Tx, currency: string) {
+  private async regularization(tx: Tx, currency: string, today: string) {
     const [v] = await tx.$queryRaw<{ visible: boolean | null }[]>`SELECT current_tenant_sees_billing_documents() AS visible`;
     const visible = v?.visible !== false;
     const docs = visible
@@ -119,7 +126,15 @@ export class SchoolSubscriptionService {
     const subscription = ordered.filter((d) => d.kind === 'SUBSCRIPTION');
     const credits = ordered.filter((d) => d.kind === 'CREDIT_NOTE');
     const requested = visible && subscription.length ? subscription.reduce((n, d) => n + d.total, 0) - credits.reduce((n, d) => n + d.total, 0) : null;
-    const toPay = requested !== null && requested > 0 ? subscription.filter((d) => d.total > 0) : [];
+    const pay = visible ? await schoolPayments(tx, today) : null;
+    const state = (d: DocumentRow) => {
+      const b = pay?.balances.get(d.document_id);
+      return documentPayment({ total: d.total, credited: b?.credited ?? 0, paid: b?.paid ?? 0, dueDate: iso(d.due_date) }, today);
+    };
+    const toPay = requested !== null && requested > 0 ? subscription.filter((d) => d.total > 0 && state(d).balance > 0) : [];
+    const paid = subscription.reduce((n, d) => n + (d.total > 0 ? state(d).paid : 0), 0);
+    const balance = subscription.reduce((n, d) => n + (d.total > 0 ? state(d).balance : 0), 0);
+    const means = pay?.means ?? [];
     const references = new Map(docs.map((d) => [d.document_id, d.reference]));
     return {
       currency,
@@ -133,11 +148,25 @@ export class SchoolSubscriptionService {
         kind: d.kind, label: documentLabel(d.kind, d.total), reference: d.reference, yearLabel: d.year_label, issueDate: iso(d.issue_date), dueDate: iso(d.due_date),
         amount: d.kind === 'CREDIT_NOTE' ? -d.total : d.total,
         relatedReference: d.related_document_id ? references.get(d.related_document_id) ?? null : null,
+        payment: d.kind === 'SUBSCRIPTION' && visible ? state(d) : null,
       })),
       mention: PROVISIONAL_MENTION,
-      payment: 'Aucun paiement validé par Cahiora pour le moment.',
-      paymentMeans: [] as { kind: string; label: string }[],
-      paymentMeansNote: 'Aucun moyen de paiement n’est encore activé par Cahiora : envoyez une demande de régularisation, Cahiora vous répondra.',
+      paid: visible ? paid : null,
+      balance: visible && subscription.length ? balance : null,
+      payment: paid > 0
+        ? `Payé : ${money(paid, currency)}${balance > 0 ? ` ; reste à payer : ${money(balance, currency)}` : ' ; rien ne reste à payer'}.`
+        : 'Aucun paiement validé par Cahiora pour le moment.',
+      paymentMeans: means,
+      paymentMeansNote: means.length
+        ? 'Payez par l’un des moyens ci-dessous, avec la référence du document : Cahiora enregistre votre paiement et vous recevez un reçu provisoire.'
+        : 'Aucun moyen de paiement n’est encore activé par Cahiora : envoyez une demande de régularisation, Cahiora vous répondra.',
+      paymentsOpen: paymentsUnlocked(),
+      receiptMention: RECEIPT_MENTION,
+      receipts: pay?.receipts ?? [],
+      credit: pay?.credit ?? null,
+      refunds: pay?.refunds ?? [],
+      refundOpen: pay?.refundOpen ?? false,
+      refundNote: pay?.refundNote ?? null,
     };
   }
 
