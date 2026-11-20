@@ -53,10 +53,14 @@ async function tientEnLargeur(page: Page) {
 }
 
 let secret = '';
-/** Code du moment, jamais à moins de 3 secondes de la fin de sa période de 30 secondes. */
+/**
+ * Code de l'application d'authentification, assez loin de la fin de sa fenêtre de 30 secondes pour être encore bon
+ * à l'envoi. Avec les captures, la marge couvre leur attente de la fin des messages (jusqu'à 8 secondes).
+ */
 async function code(page: Page) {
+  const marge = SHOTS ? 12_000 : 3000;
   const reste = 30_000 - (Date.now() % 30_000);
-  if (reste < 3000) await page.waitForTimeout(reste + 200);
+  if (reste < marge) await page.waitForTimeout(reste + 200);
   return authenticator.generate(secret) as string;
 }
 

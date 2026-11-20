@@ -197,7 +197,8 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     const v = (await school(S.A.direction).get('/settings/subscription')).body;
     expect(v.access).toMatchObject({ phase: 'GRACE', graceStart: J(15), graceEnd: J(29), paymentMeansActive: false });
     expect(v.regularization).toEqual({
-      currency: 'XOF', groupPending: null, documents: 0, requested: null, dueDate: null, mention: 'Document provisoire, sans valeur fiscale : ce n’est pas une facture.',
+      currency: 'XOF', groupPending: null, documents: 0, requested: null, dueDate: null, dueDatePending: false, lines: [],
+      mention: 'Document provisoire, sans valeur fiscale : ce n’est pas une facture.',
       payment: 'Aucun paiement validé par Cahiora pour le moment.', paymentMeans: [],
       paymentMeansNote: 'Aucun moyen de paiement n’est encore activé par Cahiora : envoyez une demande de régularisation, Cahiora vous répondra.',
     });
@@ -329,7 +330,7 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
 
   it('conditions acceptées pendant l’accès limité : tarif figé, l’accès reste limité (seul un paiement validé ou une prolongation le rend complet)', async () => {
     const body = 'Texte fictif publié par les tests automatiques du lot G5d-1. Ce ne sont pas les conditions commerciales de Cahiora.';
-    const t = await pf.post('/billing/terms', { title: `Conditions fictives G5d-1 ${stamp}`, body, effectiveFrom: today, code: await code() });
+    const t = await pf.post('/billing/terms', { title: `Conditions fictives G5d-1 ${stamp}`, body, effectiveFrom: today, definitive: true, code: await code() });
     expect(t.status).toBe(201);
     termsId = t.body.id;
     const since = (await subscriptionOf(S.A.id)).statusSince;

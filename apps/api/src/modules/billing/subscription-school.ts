@@ -7,9 +7,10 @@ import { AuditService } from '../../common/audit.service';
 import { Actor, AllowedWhenLimited, Can, CurrentActor, WholeSchool } from '../../common/auth';
 import { localDay } from '../../common/country';
 import { PrismaService, Tx } from '../../common/prisma.service';
+import { RawValue } from '../../common/util';
 import { schoolAccess, schoolRequests } from './access';
 import { daysLeft, STATUS_LABELS, subscriptionKindLabel, SubscriptionStatus } from './billing-rules';
-import { BillingDocumentsService, GROUP_SCHOOL_PENDING, PROVISIONAL_MENTION } from './documents';
+import { BillingDocumentsService, documentLabel, GROUP_SCHOOL_PENDING, PROVISIONAL_MENTION } from './documents';
 
 /**
  * Abonnement Cahiora vu par la direction (lot G5a) : état, dates de gratuité, calendrier de facturation, tarif en
@@ -24,7 +25,7 @@ import { BillingDocumentsService, GROUP_SCHOOL_PENDING, PROVISIONAL_MENTION } fr
 export class AcceptTermsDto {
   @IsUUID('all', { message: 'Version des conditions invalide' }) termsId: string;
   /** Case « J'ai lu et j'accepte » cochée. */
-  @IsBoolean() @Equals(true, { message: 'Cochez la case pour accepter les conditions' }) accepted: boolean;
+  @RawValue() @IsBoolean({ message: 'Cochez la case pour accepter les conditions' }) @Equals(true, { message: 'Cochez la case pour accepter les conditions' }) accepted: boolean;
 }
 
 type SubscriptionRow = {
@@ -36,7 +37,10 @@ const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : 
 /** Les conditions s'acceptent en attente d'acceptation, ou en accès limité avant toute acceptation (lot G5d-1). */
 const awaitsAcceptance = (s: SubscriptionRow | null) => !!s && (s.status === 'AWAITING_ACCEPTANCE' || (s.status === 'LIMITED' && !s.accepted_at));
 
-type DocumentRow = { document_id: string; kind: string; currency: string; total: number; due_date: Date | null; issue_date: Date; created_at: Date };
+type DocumentRow = {
+  document_id: string; kind: 'SUBSCRIPTION' | 'CREDIT_NOTE'; reference: string; total: number; due_date: Date | null; issue_date: Date; created_at: Date;
+  related_document_id: string | null; year_label: string | null;
+};
 
 /** Erreur de la fonction d'acceptation (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 function acceptanceMessage(e: unknown) {
@@ -94,26 +98,42 @@ export class SchoolSubscriptionService {
 
   /**
    * Ce que la direction doit régulariser (D-G5-30 A) : montant demandé par les documents provisoires de l'abonnement
-   * (lot G5c, avoirs déduits), échéance du plus récent, état du paiement et moyens de paiement activés. Aucun paiement
-   * n'est encore validé par Cahiora (lot G5d-2) et aucun moyen de paiement n'est activé : la demande de régularisation
-   * est la seule voie. L'école d'un groupe de plusieurs établissements ne voit pas les documents du groupe (D-G5-19).
+   * (lot G5c), échéance, état du paiement et moyens de paiement activés. Aucun paiement n'est encore validé par Cahiora
+   * (lot G5d-2) et aucun moyen de paiement n'est activé : la demande de régularisation est la seule voie. L'école d'un
+   * groupe de plusieurs établissements ne voit pas les documents du groupe (D-G5-19).
+   * Réserve de Dankou du 20 novembre 2026 (lecture 14), selon les règles de G5c : le montant est la somme des documents
+   * d'abonnement successifs (premier document puis compléments, relevés à 0 F compris) moins tous les avoirs, qui portent
+   * sur l'année et non sur un seul document ; l'échéance est la plus proche des documents à payer, c'est-à-dire celle du
+   * premier document (dernier jour de grâce) : les documents suivants n'ont pas encore d'échéance (INFORMATION
+   * MANQUANTE dans G5c), ce que l'écran dit. Chaque document et chaque avoir est détaillé.
    */
   private async regularization(tx: Tx, currency: string) {
     const [v] = await tx.$queryRaw<{ visible: boolean | null }[]>`SELECT current_tenant_sees_billing_documents() AS visible`;
     const visible = v?.visible !== false;
     const docs = visible
       ? await tx.$queryRaw<DocumentRow[]>`
-          SELECT DISTINCT document_id, kind::text AS kind, currency, total, due_date, issue_date, created_at FROM current_tenant_billing_documents()`
+          SELECT DISTINCT document_id, kind, reference, total, due_date, issue_date, created_at, related_document_id, year_label
+          FROM current_tenant_billing_documents() WHERE kind IN ('SUBSCRIPTION', 'CREDIT_NOTE')`
       : [];
-    const subscription = docs.filter((d) => d.kind === 'SUBSCRIPTION');
-    const credits = docs.filter((d) => d.kind === 'CREDIT_NOTE');
-    const last = [...subscription].sort((a, b) => b.issue_date.getTime() - a.issue_date.getTime() || b.created_at.getTime() - a.created_at.getTime())[0];
+    const ordered = [...docs].sort((a, b) => a.issue_date.getTime() - b.issue_date.getTime() || a.created_at.getTime() - b.created_at.getTime());
+    const subscription = ordered.filter((d) => d.kind === 'SUBSCRIPTION');
+    const credits = ordered.filter((d) => d.kind === 'CREDIT_NOTE');
+    const requested = visible && subscription.length ? subscription.reduce((n, d) => n + d.total, 0) - credits.reduce((n, d) => n + d.total, 0) : null;
+    const toPay = requested !== null && requested > 0 ? subscription.filter((d) => d.total > 0) : [];
+    const references = new Map(docs.map((d) => [d.document_id, d.reference]));
     return {
       currency,
       groupPending: visible ? null : GROUP_SCHOOL_PENDING,
       documents: subscription.length,
-      requested: visible && subscription.length ? subscription.reduce((n, d) => n + d.total, 0) - credits.reduce((n, d) => n + d.total, 0) : null,
-      dueDate: iso(last?.due_date),
+      requested,
+      dueDate: toPay.map((d) => iso(d.due_date)).filter((x): x is string => !!x).sort()[0] ?? null,
+      /** Un document à payer n'a pas encore d'échéance (compléments des régularisations, lot G5c). */
+      dueDatePending: toPay.some((d) => !d.due_date),
+      lines: ordered.map((d) => ({
+        kind: d.kind, label: documentLabel(d.kind, d.total), reference: d.reference, yearLabel: d.year_label, issueDate: iso(d.issue_date), dueDate: iso(d.due_date),
+        amount: d.kind === 'CREDIT_NOTE' ? -d.total : d.total,
+        relatedReference: d.related_document_id ? references.get(d.related_document_id) ?? null : null,
+      })),
       mention: PROVISIONAL_MENTION,
       payment: 'Aucun paiement validé par Cahiora pour le moment.',
       paymentMeans: [] as { kind: string; label: string }[],

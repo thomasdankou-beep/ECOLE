@@ -130,10 +130,14 @@ async function tientEnLargeur(page: Page) {
 }
 
 let secret = '';
-/** Code du moment, jamais à moins de 3 secondes de la fin de sa période de 30 secondes. */
+/**
+ * Code de l'application d'authentification, assez loin de la fin de sa fenêtre de 30 secondes pour être encore bon
+ * à l'envoi. Avec les captures, la marge couvre leur attente de la fin des messages (jusqu'à 8 secondes).
+ */
 async function code(page: Page) {
+  const marge = SHOTS ? 12_000 : 3000;
   const reste = 30_000 - (Date.now() % 30_000);
-  if (reste < 3000) await page.waitForTimeout(reste + 200);
+  if (reste < marge) await page.waitForTimeout(reste + 200);
   return authenticator.generate(secret) as string;
 }
 
@@ -180,6 +184,15 @@ test('Direction en délai de grâce : alerte à la connexion, compteur, « Régu
   await tientEnLargeur(page);
   await shot(page, 'g5d-1-alerte-connexion');
 
+  // Lecture 3 ajustée le 20 novembre 2026 : un autre onglet de la même connexion ne répète pas l'alerte.
+  const onglet = await page.context().newPage();
+  await onglet.goto(`${adresse(G)}/espace`);
+  await expect(onglet.getByRole('region', { name: 'Abonnement Cahiora' }).getByTestId('compteur-acces')).toHaveText('Encore 13 jours d’accès complet');
+  await onglet.waitForTimeout(500);
+  await expect(onglet.getByRole('alertdialog')).toHaveCount(0);
+  await onglet.close();
+  await expect(alerte).toBeVisible();
+
   // Le bouton de la carte répond alors que l'alerte est ouverte : elle ne bloque rien.
   await carte.getByRole('link', { name: 'Régulariser mon abonnement' }).click();
   await page.waitForURL((u) => u.pathname === '/espace/parametres' && u.hash === '#regulariser');
@@ -218,10 +231,20 @@ test('Direction en délai de grâce : alerte à la connexion, compteur, « Régu
   await tientEnLargeur(page);
   await shot(page, 'g5d-3-demande-envoyee');
 
-  // Une seule alerte par connexion : rien au rechargement.
+  // Une seule alerte par connexion : rien au rechargement, ni dans un nouvel onglet.
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Régulariser mon abonnement', exact: true })).toBeVisible();
   await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  const autre = await page.context().newPage();
+  await autre.goto(`${adresse(G)}/espace`);
+  await expect(autre.getByRole('region', { name: 'Abonnement Cahiora' }).getByTestId('compteur-acces')).toHaveText('Encore 13 jours d’accès complet');
+  await autre.waitForTimeout(500);
+  await expect(autre.getByRole('alertdialog')).toHaveCount(0);
+  await autre.close();
+
+  // Nouvelle connexion dans le même navigateur : l'alerte revient.
+  await connexion(page, G, G.direction);
+  await expect(page.getByRole('alertdialog', { name: 'Abonnement Cahiora : en attente d’acceptation des conditions' })).toBeVisible();
 });
 
 test('Accès limité : bandeau pour tout le personnel, saisie refusée avec son motif, consultation et régularisation ouvertes', async ({ page }) => {

@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import { createCipheriv, createDecipheriv, randomBytes, randomInt } from 'crypto';
 import { config } from '../config';
 import { Tx } from './prisma.service';
@@ -12,6 +13,13 @@ export async function nextNumber(tx: Tx, tenantId: string, key: string): Promise
 }
 
 export const pad = (n: number, len = 5) => String(n).padStart(len, '0');
+
+/**
+ * Case à cocher qui engage (acceptation, attestation) : la valeur reçue est contrôlée telle quelle. Sans cela, la
+ * conversion implicite des DTO ferait de "false", "oui" ou 1 un vrai (Boolean("false") vaut true).
+ * À placer avec @IsBoolean() @Equals(true).
+ */
+export const RawValue = () => Transform(({ obj, key }) => (obj as Record<string, unknown>)[key]);
 
 /** Code de vérification imprimé dans les QR codes : non devinable, sans caractère ambigu. */
 export function verifyCode(len = 12): string {

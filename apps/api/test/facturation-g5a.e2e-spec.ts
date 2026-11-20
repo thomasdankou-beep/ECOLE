@@ -254,18 +254,37 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
     expect(unknown.status).toBe(400);
     expect((await school(S.A.direction).post('/settings/subscription/accept', { termsId: '00000000-0000-4000-8000-000000000000', accepted: false })).status).toBe(400);
     expect((await school(S.A.comptable!).post('/settings/subscription/accept', { termsId: '00000000-0000-4000-8000-000000000000', accepted: true })).status).toBe(403);
+    // La case doit être cochée pour de vrai : "false", "oui" ou 1 ne valent pas une acceptation.
+    for (const accepted of ['false', 'oui', 1]) {
+      const r = await school(S.A.direction).post('/settings/subscription/accept', { termsId: '00000000-0000-4000-8000-000000000000', accepted });
+      expect(r.status).toBe(400);
+      expect(String(r.body.message)).toMatch(/Cochez la case pour accepter les conditions/);
+    }
 
     // Conditions fictives : une version future, puis une version en vigueur aujourd'hui.
     const body = 'Texte fictif publié par les tests automatiques du lot G5a. Ce ne sont pas les conditions commerciales de Cahiora.';
-    expect((await pf.post('/billing/terms', { title: 'Conditions fictives (test)', body, effectiveFrom: addDays(today, -1), code: await code() })).status).toBe(400);
-    const f = await pf.post('/billing/terms', { title: `Conditions fictives futures ${stamp}`, body, effectiveFrom: addDays(today, 1), code: await code() });
+    expect((await pf.post('/billing/terms', { title: 'Conditions fictives (test)', body, effectiveFrom: addDays(today, -1), definitive: true, code: await code() })).status).toBe(400);
+    // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est publié
+    // (jamais de conditions d'essai présentées comme un contrat réel).
+    const versionsBefore = await admin.commercialTerms.count();
+    for (const definitive of [undefined, false, 'false', 'oui', 1]) {
+      const r = await pf.post('/billing/terms', { title: `Conditions sans attestation ${stamp}`, body, effectiveFrom: today, ...(definitive === undefined ? {} : { definitive }), code: await code() });
+      expect(r.status).toBe(400);
+      expect(String(r.body.message)).toMatch(/seule la version définitive et validée des conditions commerciales de Cahiora peut être publiée/);
+    }
+    expect(await admin.commercialTerms.count()).toBe(versionsBefore);
+    const f = await pf.post('/billing/terms', { title: `Conditions fictives futures ${stamp}`, body, effectiveFrom: addDays(today, 1), definitive: true, code: await code() });
     expect(f.status).toBe(201);
     terms.future = f.body.id;
-    const c = await pf.post('/billing/terms', { title: `Conditions fictives ${stamp}`, body, effectiveFrom: today, code: await code() });
+    const c = await pf.post('/billing/terms', { title: `Conditions fictives ${stamp}`, body, effectiveFrom: today, definitive: true, code: await code() });
     expect(c.status).toBe(201);
     terms.current = c.body.id;
     expect(c.body.version).toBe(f.body.version + 1);
     expect((await pf.get('/billing/terms')).body.current.id).toBe(terms.current);
+    const published = await admin.platformAuditLog.findMany({ where: { action: 'billing.terms_published', adminId: sa.id }, orderBy: { createdAt: 'asc' } });
+    expect(published.slice(-2).map((l) => l.data)).toEqual([f.body.version, c.body.version].map((version) => expect.objectContaining({
+      version, attestation: 'Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora, validée pour être proposée aux établissements. Ce n’est ni un texte d’essai ni un exemple.',
+    })));
     const v = (await school(S.A.direction).get('/settings/subscription')).body;
     expect(v.terms).toMatchObject({ id: terms.current, title: `Conditions fictives ${stamp}`, effectiveFrom: today });
 

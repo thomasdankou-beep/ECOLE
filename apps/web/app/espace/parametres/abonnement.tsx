@@ -41,7 +41,11 @@ type Access = {
 };
 type RegularizationRequest = { id: string; status: 'PENDING' | 'ANSWERED'; message: string | null; requestedByName: string; requestedAt: string; answeredAt: string | null; answer: string | null };
 type Regularization = {
-  currency: string; groupPending: string | null; documents: number; requested: number | null; dueDate: string | null; mention: string; payment: string;
+  currency: string; groupPending: string | null; documents: number; requested: number | null; mention: string; payment: string;
+  /** Échéance la plus proche des documents à payer (celle du premier document, lot G5c) ; dueDatePending : un document à payer n'en a pas encore. */
+  dueDate: string | null; dueDatePending: boolean;
+  /** Documents d'abonnement et avoirs pris en compte, dans l'ordre d'émission ; un avoir est en négatif. */
+  lines: { kind: 'SUBSCRIPTION' | 'CREDIT_NOTE'; label: string; reference: string; yearLabel: string | null; issueDate: string; dueDate: string | null; amount: number; relatedReference: string | null }[];
   paymentMeans: { kind: string; label: string }[]; paymentMeansNote: string;
 };
 type DocKind = 'SUBSCRIPTION' | 'CREDIT_NOTE' | 'SERVICE_QUOTE' | 'SERVICE_PROFORMA';
@@ -270,12 +274,37 @@ function Regulariser({ d, reload }: { d: Data; reload: () => void }) {
                 </>
               ) : <span className="text-sm">{a.termsAccepted ? 'Pas encore indiqué : Cahiora prépare votre document à partir du comptage de vos élèves.' : 'Indiqué après l’acceptation des conditions et le comptage de vos élèves.'}</span>}
             </Item>
-            <Item label="Échéance">{r.dueDate ? <b>{frDate(r.dueDate)}</b> : <span className="text-sm">Pas encore fixée</span>}</Item>
+            <Item label="Échéance">
+              {r.dueDate ? (
+                <>
+                  <b>{frDate(r.dueDate)}</b>{r.dueDate < d.today ? <span className="text-sm text-bad"> (passée)</span> : null}
+                  {r.dueDatePending && <span className="block text-xs text-muted">Celle du premier document. Les documents suivants n’ont pas encore d’échéance : Cahiora la fixera.</span>}
+                </>
+              ) : <span className="text-sm">{r.dueDatePending ? 'À fixer par Cahiora' : 'Pas encore fixée'}</span>}
+            </Item>
             <Item label="État du paiement"><span className="text-sm">{r.payment}</span></Item>
             <Item label="Moyens de paiement">
               {r.paymentMeans.length ? <ul className="text-sm">{r.paymentMeans.map((m) => <li key={m.kind}>{m.label}</li>)}</ul> : <span className="text-sm">{r.paymentMeansNote}</span>}
             </Item>
           </dl>
+          {r.lines.length > 0 && (
+            <details className="rounded-lg border border-line p-3 text-sm">
+              <summary className="cursor-pointer font-bold">Détail des documents provisoires ({r.lines.length})</summary>
+              <ul className="mt-2 grid gap-1.5" aria-label="Documents provisoires pris en compte">
+                {r.lines.map((l) => (
+                  <li key={l.reference} className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 border-t border-line pt-1.5 first:border-0 first:pt-0">
+                    <span className="min-w-0">
+                      <b>{l.label}</b> <span className="tabular text-muted">{l.reference}</span>
+                      <span className="block text-xs text-muted">
+                        Du {frDate(l.issueDate)}{l.kind === 'CREDIT_NOTE' ? (l.relatedReference ? `, sur le document ${l.relatedReference}` : '') : l.amount > 0 ? (l.dueDate ? `, échéance le ${frDate(l.dueDate)}` : ', échéance à fixer par Cahiora') : ''}
+                      </span>
+                    </span>
+                    <b className="tabular">{l.amount < 0 ? `− ${money(-l.amount, r.currency)}` : money(l.amount, r.currency)}</b>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           <h3 className="font-bold">Demande de régularisation</h3>
           {pending ? (
             <p className="rounded-lg border border-line p-3 text-sm">Votre demande du <b>{dateTime(pending.requestedAt)}</b> attend la réponse de Cahiora.{limited ? '' : ' Tant qu’elle attend, l’accès ne sera pas limité.'}</p>

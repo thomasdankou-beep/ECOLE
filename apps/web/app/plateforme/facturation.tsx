@@ -690,14 +690,19 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
 }
 
 function TermsDialog({ today, done }: { today: string; done: () => void }) {
-  const [f, setF] = useState({ title: '', body: '', effectiveFrom: today, code: '' });
+  const [f, setF] = useState({ title: '', body: '', effectiveFrom: today, definitive: false, code: '' });
   const { busy, error, submit } = useSubmit(done, 'Conditions commerciales publiées');
   return (
-    <DialogContent title="Publier une version des conditions commerciales" description="Le texte vient de vous : Cahiora ne le rédige pas à votre place. La direction l’accepte à la fin de son essai ou de son pilote.">
+    <DialogContent title="Publier une version des conditions commerciales" description="Le texte vient de vous : Cahiora ne le rédige pas à votre place. La direction l’accepte au nom de l’établissement, comme un contrat réel, à la fin de son essai ou de son pilote : ne publiez jamais un texte d’essai.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', '/billing/terms', f)); }}>
         <Field label="Titre"><Input value={f.title} minLength={3} maxLength={160} onChange={(x) => setF({ ...f, title: x.target.value })} required /></Field>
         <Field label="Texte des conditions"><Textarea rows={10} value={f.body} minLength={20} maxLength={30000} onChange={(x) => setF({ ...f, body: x.target.value })} required /></Field>
         <Field label="Date d’effet"><Input type="date" min={today} value={f.effectiveFrom} onChange={(x) => setF({ ...f, effectiveFrom: x.target.value })} required /></Field>
+        {/* Réserve de Dankou du 20 novembre 2026 : jamais de conditions d'essai présentées comme un contrat réel. */}
+        <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-lg border border-line p-3 text-sm">
+          <input type="checkbox" className="mt-1 size-5 flex-none accent-[var(--brand)]" checked={f.definitive} onChange={(x) => setF({ ...f, definitive: x.target.checked })} required />
+          <span>Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora, validée pour être proposée aux établissements. Ce n’est ni un texte d’essai ni un exemple.</span>
+        </label>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
         <Button type="submit" loading={busy}>Publier</Button>

@@ -4,12 +4,12 @@ import {
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Prisma, Subscription } from '@prisma/client';
-import { IsIn, IsInt, IsOptional, IsString, Length, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { Equals, IsBoolean, IsIn, IsInt, IsOptional, IsString, Length, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import type { Request } from 'express';
 import { authenticator } from 'otplib';
 import { Public } from '../../common/auth';
 import { CURRENCIES, localDay } from '../../common/country';
-import { decrypt } from '../../common/util';
+import { decrypt, RawValue } from '../../common/util';
 import { config } from '../../config';
 import { groupLog, PlatformActor, platformLog, schoolLogInTx } from '../platform/group-journal';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
@@ -46,10 +46,20 @@ export class ParameterDto extends CodeDto {
   @IsString(MOTIF) @MinLength(5, MOTIF) @MaxLength(300, MOTIF) reason: string;
 }
 
+/**
+ * Réserve de Dankou du 20 novembre 2026 : aucune condition fictive ou de test ne doit être présentée comme un contrat réel.
+ * Une version publiée est montrée aux directions, qui l'acceptent au nom de l'établissement (même en accès limité) :
+ * le Super Admin atteste à chaque publication qu'il s'agit du texte définitif et validé. L'attestation est inscrite au journal.
+ */
+export const TERMS_ATTESTATION =
+  'Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora, validée pour être proposée aux établissements. Ce n’est ni un texte d’essai ni un exemple.';
+const ATTEST = { message: 'Cochez la confirmation : seule la version définitive et validée des conditions commerciales de Cahiora peut être publiée, jamais un texte d’essai.' };
+
 export class TermsDto extends CodeDto {
   @IsString() @MinLength(3, { message: 'Titre : au moins 3 caractères' }) @MaxLength(160) title: string;
   @IsString() @MinLength(20, { message: 'Texte des conditions : au moins 20 caractères' }) @MaxLength(30000) body: string;
   @Matches(/^\d{4}-\d{2}-\d{2}$/, DAY) effectiveFrom: string;
+  @RawValue() @IsBoolean(ATTEST) @Equals(true, ATTEST) definitive: boolean;
 }
 
 export class TrialDto extends CodeDto {
@@ -234,7 +244,7 @@ export class BillingService {
         const t = await tx.commercialTerms.create({
           data: { version: (last?.version ?? 0) + 1, title: dto.title.trim(), body: dto.body.trim(), effectiveFrom: day(dto.effectiveFrom), createdById: actor.id, createdByName: actor.name },
         });
-        await platformLog(tx, actor, 'billing.terms_published', null, { version: t.version, title: t.title, effectiveFrom: dto.effectiveFrom });
+        await platformLog(tx, actor, 'billing.terms_published', null, { version: t.version, title: t.title, effectiveFrom: dto.effectiveFrom, attestation: TERMS_ATTESTATION });
         return { id: t.id, version: t.version };
       });
     } catch (e) {

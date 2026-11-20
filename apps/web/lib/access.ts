@@ -67,24 +67,44 @@ export const showsAccess = (a: SchoolAccess | null | undefined): a is SchoolAcce
 
 const ALERT_KEY = 'cahiora.alerte-abonnement';
 
-/** L'alerte de la direction s'affiche une fois par connexion (et par onglet) : la clé s'efface à la connexion et à la déconnexion. */
+/** Empreinte courte de la connexion (personne et session) : le navigateur ne garde ni l'une ni l'autre en clair. */
+function fingerprint(userId: string, sessionId: string | null) {
+  let h = 0x811c9dc5;
+  for (const c of `${userId}:${sessionId ?? ''}`) h = Math.imul(h ^ c.charCodeAt(0), 0x01000193) >>> 0;
+  return h.toString(36);
+}
+
+/**
+ * L'alerte de la direction s'affiche une fois par connexion, pour tous les onglets de cette connexion (lecture 3,
+ * ajustée par Dankou le 20 novembre 2026) : la marque, posée dès que l'alerte s'affiche, est partagée par les onglets
+ * du navigateur ; une nouvelle connexion ouvre une autre session, donc une nouvelle alerte. La marque s'efface aussi à
+ * la connexion et à la déconnexion.
+ */
 export const loginAlert = {
-  seen(userId: string) {
+  /** Vrai si l'alerte n'a pas encore été montrée pendant cette connexion ; la marque est alors posée aussitôt. */
+  take(userId: string, sessionId: string | null): boolean {
+    const mark = fingerprint(userId, sessionId);
     try {
-      return sessionStorage.getItem(ALERT_KEY) === userId;
+      if (localStorage.getItem(ALERT_KEY) === mark) return false;
+      localStorage.setItem(ALERT_KEY, mark);
     } catch {
-      return false;
+      /* stockage indisponible : l'alerte s'affiche, comme à une nouvelle connexion */
     }
+    return true;
   },
-  done(userId: string) {
-    try {
-      sessionStorage.setItem(ALERT_KEY, userId);
-    } catch {
-      /* stockage indisponible : l'alerte reviendra au prochain chargement de la page */
-    }
+  /** Deux onglets ouverts au même instant : celui qui voit la marque posée par l'autre ferme son alerte. */
+  onShownElsewhere(userId: string, sessionId: string | null, fn: () => void) {
+    const mark = fingerprint(userId, sessionId);
+    const listener = (e: StorageEvent) => {
+      if (e.key === ALERT_KEY && e.newValue === mark) fn();
+    };
+    window.addEventListener('storage', listener);
+    return () => window.removeEventListener('storage', listener);
   },
   reset() {
     try {
+      localStorage.removeItem(ALERT_KEY);
+      // Marque de l'ancienne règle (une alerte par onglet), si elle traîne encore.
       sessionStorage.removeItem(ALERT_KEY);
     } catch {
       /* rien à effacer */

@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, CalendarClock, Lock, X } from 'lucide-react';
 import { Button, Card } from '@/components/ui';
 import { accessText, type AccessPhase, counterText, loginAlert, REGULARIZE_HREF, type SchoolAccess, showsAccess } from '@/lib/access';
+import { currentSessionId } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 
@@ -86,8 +87,9 @@ export function AccessCard() {
 const LOGIN_ALERT_PHASES: AccessPhase[] = ['GRACE', 'EXTENDED', 'HELD', 'DUE', 'LIMITED'];
 
 /**
- * Alerte à chaque connexion de la direction (une fois par connexion et par onglet), jamais pendant un mot de passe
- * provisoire. Elle ne couvre pas la page : on peut travailler sans la fermer.
+ * Alerte à chaque connexion de la direction, une seule fois par connexion même avec plusieurs onglets (lecture 3,
+ * ajustée le 20 novembre 2026), jamais pendant un mot de passe provisoire. Elle ne couvre pas la page : on peut
+ * travailler sans la fermer.
  */
 export function AccessLoginAlert() {
   const { auth, a } = useAccess();
@@ -95,13 +97,14 @@ export function AccessLoginAlert() {
   const due = !!a && a.direction && LOGIN_ALERT_PHASES.includes(a.phase) && !auth.me?.user.mustChangePassword;
   const [open, setOpen] = useState(false);
   useEffect(() => {
-    if (due && !loginAlert.seen(userId)) setOpen(true);
+    if (due && loginAlert.take(userId, currentSessionId())) setOpen(true);
   }, [due, userId]);
+  useEffect(() => {
+    if (!open) return;
+    return loginAlert.onShownElsewhere(userId, currentSessionId(), () => setOpen(false));
+  }, [open, userId]);
   if (!a || !due || !open) return null;
-  const close = () => {
-    loginAlert.done(userId);
-    setOpen(false);
-  };
+  const close = () => setOpen(false);
   const t = accessText(a);
   return (
     <div
