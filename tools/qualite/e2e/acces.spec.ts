@@ -366,7 +366,7 @@ test('Super Admin : réponse à la demande de régularisation et prolongation qu
 
   await rubrique(page, 'Rubrique', 'Commercial et facturation');
   await rubrique(page, 'Commercial et facturation', 'Accès des clients');
-  await expect(page.getByText('Aucun moyen de paiement n’est activé (lot G5d-2)', { exact: false })).toBeVisible();
+  await expect(page.getByText('Aucun moyen de paiement n’est activé (verrou du serveur fermé', { exact: false })).toBeVisible();
   const enAttente = page.getByRole('list', { name: 'Demandes de régularisation en attente' }).locator(':scope > li', { hasText: G.name });
   await expect(enAttente).toContainText(`« ${MESSAGE} »`);
   await expect(enAttente).toContainText('En attente d’acceptation des conditions');

@@ -1,9 +1,10 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { CalendarClock, CheckCircle2, FileText, Send } from 'lucide-react';
+import { CalendarClock, CheckCircle2, FileText, Printer, Send, Wallet } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
-import { Badge, Button, Empty, ErrorNote, Field, Textarea, useToast } from '@/components/ui';
+import { Badge, Button, Empty, ErrorNote, Field, Input, Textarea, useToast } from '@/components/ui';
 import { accessChanged, accessCounter, LIMITED_KEEPS, LIMITED_WILL_KEEP, type AccessPhase } from '@/lib/access';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -14,7 +15,9 @@ import { useApi } from '@/lib/use-api';
  * historique, et acceptation des conditions commerciales à la fin de l'essai ou du pilote ; documents provisoires de
  * Cahiora (lot G5c), jamais une facture fiscale, pour une école indépendante (D-G5-19) ; accès selon le paiement et
  * « Régulariser mon abonnement » (lot G5d-1, D-G5-30 A) : montant demandé, échéance, état du paiement, moyens de
- * paiement activés (aucun avant le lot G5d-2) et demande de régularisation à Cahiora. Aucun paiement ici.
+ * paiement activés et demande de régularisation à Cahiora. Lot G5d-2 : état du paiement de chaque document, reçus
+ * provisoires à imprimer (sans valeur fiscale), crédit de l'établissement et demande de remboursement ; les moyens de
+ * paiement n'apparaissent qu'une fois activés par Cahiora. Aucun paiement en ligne ici : Cahiora enregistre ce qu'il reçoit.
  */
 
 type Status = 'TRIAL' | 'PILOT' | 'AWAITING_ACCEPTANCE' | 'AWAITING_PAYMENT' | 'ACTIVE' | 'LIMITED';
@@ -41,13 +44,30 @@ type Access = {
   graceStart: string | null; graceEnd: string | null; extendedUntil: string | null; limitedSince: string | null; termsAccepted: boolean; pendingRequest: boolean; paymentMeansActive: boolean;
 };
 type RegularizationRequest = { id: string; status: 'PENDING' | 'ANSWERED'; message: string | null; requestedByName: string; requestedAt: string; answeredAt: string | null; answer: string | null };
+/** État du paiement d'un document (lot G5d-2) : avoirs, paiements et crédits imputés. */
+type DocPayment = { status: 'NOTHING_DUE' | 'PENDING' | 'PARTIAL' | 'PAID' | 'CANCELLED'; label: string; overdue: boolean; due: number; paid: number; balance: number };
+type CahioraReceipt = {
+  id: string; receiptNumber: string; documentReference: string; currency: string; amount: number; paidOn: string; meansName: string; transactionRef: string;
+  creditAmount: number; recordedAt: string; cancelled: boolean; statusLabel: string; allocations: { reference: string; amount: number }[];
+};
+type CreditEntry = { id: string; kind: string; label: string; amount: number; createdAt: string; receiptNumber: string | null; documentReference: string | null };
+type Refund = {
+  id: string; amount: number; currency: string; status: 'PENDING' | 'REFUNDED' | 'REFUSED'; statusLabel: string; message: string | null; requestedByName: string; requestedAt: string;
+  decidedAt: string | null; decisionNote: string | null; refundedOn: string | null; refundMeans: string | null; refundRef: string | null;
+};
 type Regularization = {
   currency: string; groupPending: string | null; documents: number; requested: number | null; mention: string; payment: string;
+  /** Lot G5d-2 : payé et reste à payer sur les documents de l'abonnement (null : rien à montrer). */
+  paid: number | null; balance: number | null;
   /** Échéance la plus proche des documents à payer (celle du premier document, lot G5c) ; dueDatePending : un document à payer n'en a pas encore. */
   dueDate: string | null; dueDatePending: boolean;
   /** Documents d'abonnement et avoirs pris en compte, dans l'ordre d'émission ; un avoir est en négatif. */
-  lines: { kind: 'SUBSCRIPTION' | 'CREDIT_NOTE'; label: string; reference: string; yearLabel: string | null; issueDate: string; dueDate: string | null; amount: number; relatedReference: string | null }[];
-  paymentMeans: { kind: string; label: string }[]; paymentMeansNote: string;
+  lines: { kind: 'SUBSCRIPTION' | 'CREDIT_NOTE'; label: string; reference: string; yearLabel: string | null; issueDate: string; dueDate: string | null; amount: number; relatedReference: string | null; payment: DocPayment | null }[];
+  /** Moyens activés par Cahiora pour l'établissement, avec leurs coordonnées ; aucun tant que le verrou du serveur est fermé. */
+  paymentMeans: { code: string; name: string; instructions: string }[]; paymentMeansNote: string;
+  paymentsOpen: boolean; receiptMention: string; receipts: CahioraReceipt[];
+  credit: { balance: number; reserved: number; available: number; entries: CreditEntry[] } | null;
+  refunds: Refund[]; refundOpen: boolean; refundNote: string | null;
 };
 type DocKind = 'SUBSCRIPTION' | 'CREDIT_NOTE' | 'SERVICE_QUOTE' | 'SERVICE_PROFORMA';
 type DocLine = {
@@ -69,6 +89,7 @@ const money = (n: number, currency: string) => `${new Intl.NumberFormat('fr-FR')
 const daysText = (n: number) => `${n} jour${n > 1 ? 's' : ''}`;
 const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
 const KIND_TONE: Record<DocKind, 'info' | 'good' | 'accent' | 'warn'> = { SUBSCRIPTION: 'info', CREDIT_NOTE: 'good', SERVICE_QUOTE: 'accent', SERVICE_PROFORMA: 'warn' };
+const PAY_TONE: Record<DocPayment['status'], 'info' | 'good' | 'warn' | 'accent'> = { NOTHING_DUE: 'info', PENDING: 'warn', PARTIAL: 'accent', PAID: 'good', CANCELLED: 'info' };
 const dateTime = (d: string | null) => (d ? new Date(d).toLocaleString('fr-FR', { dateStyle: 'long', timeStyle: 'short' }) : '—');
 
 /** Abonnement à régulariser : en attente d'acceptation ou de paiement, ou en accès limité (D-G5-30 A). */
@@ -86,6 +107,7 @@ export function Abonnement({ openCounts }: { openCounts?: () => void }) {
             <Etat d={d} />
             {toRegularize(d.subscription) && <Regulariser d={d} reload={q.reload} />}
             {awaitsAcceptance(d.subscription) && <Acceptation d={d} reload={q.reload} />}
+            {d.regularization && !d.regularization.groupPending && <PaiementsCahiora d={d} reload={q.reload} />}
             <Documents />
           </div>
           <div className="grid content-start gap-4">
@@ -295,7 +317,14 @@ function Regulariser({ d, reload }: { d: Data; reload: () => void }) {
             </Item>
             <Item label="État du paiement"><span className="text-sm">{r.payment}</span></Item>
             <Item label="Moyens de paiement">
-              {r.paymentMeans.length ? <ul className="text-sm">{r.paymentMeans.map((m) => <li key={m.kind}>{m.label}</li>)}</ul> : <span className="text-sm">{r.paymentMeansNote}</span>}
+              {r.paymentMeans.length ? (
+                <>
+                  <span className="block text-xs text-muted">{r.paymentMeansNote}</span>
+                  <ul className="mt-1 grid gap-1.5 text-sm" aria-label="Moyens de paiement activés par Cahiora">
+                    {r.paymentMeans.map((m) => <li key={m.code}><b>{m.name}</b><span className="block whitespace-pre-wrap">{m.instructions}</span></li>)}
+                  </ul>
+                </>
+              ) : <span className="text-sm">{r.paymentMeansNote}</span>}
             </Item>
           </dl>
           {r.lines.length > 0 && (
@@ -310,7 +339,10 @@ function Regulariser({ d, reload }: { d: Data; reload: () => void }) {
                         Du {frDate(l.issueDate)}{l.kind === 'CREDIT_NOTE' ? (l.relatedReference ? `, sur le document ${l.relatedReference}` : '') : l.amount > 0 ? (l.dueDate ? `, échéance le ${frDate(l.dueDate)}` : ', échéance à fixer par Cahiora') : ''}
                       </span>
                     </span>
-                    <b className="tabular">{l.amount < 0 ? `− ${money(-l.amount, r.currency)}` : money(l.amount, r.currency)}</b>
+                    <span className="text-right">
+                      <b className="tabular">{l.amount < 0 ? `− ${money(-l.amount, r.currency)}` : money(l.amount, r.currency)}</b>
+                      {l.payment && l.amount > 0 && <span className="block"><Badge tone={l.payment.overdue ? 'bad' : PAY_TONE[l.payment.status]}>{l.payment.label}</Badge></span>}
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -336,6 +368,118 @@ function Regulariser({ d, reload }: { d: Data; reload: () => void }) {
                   <span className="flex flex-wrap items-center justify-between gap-2"><b>Demande du {dateTime(x.requestedAt)}</b><Badge tone={x.status === 'PENDING' ? 'warn' : 'good'}>{x.status === 'PENDING' ? 'En attente de Cahiora' : 'Réponse reçue'}</Badge></span>
                   <span className="text-muted">Par {x.requestedByName}{x.message ? ` : « ${x.message} »` : ''}</span>
                   {x.answer && <p className="whitespace-pre-wrap rounded-lg bg-sunk p-2"><b>Réponse de Cahiora, le {dateTime(x.answeredAt)} :</b> {x.answer}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/**
+ * Paiements de l'abonnement (lot G5d-2) : état du paiement de chaque document, reçus provisoires à imprimer (sans valeur
+ * fiscale), crédit de l'établissement et ses mouvements, demandes de remboursement. La direction de tout
+ * l'établissement demande le remboursement de son crédit disponible ; Cahiora décide avec sa preuve.
+ */
+function PaiementsCahiora({ d, reload }: { d: Data; reload: () => void }) {
+  const auth = useAuth();
+  const toast = useToast();
+  const r = d.regularization!;
+  const [f, setF] = useState({ amount: '', message: '' });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const docs = r.lines.filter((l) => l.kind === 'SUBSCRIPTION' && l.amount > 0 && l.payment);
+  const credit = r.credit;
+  const can = !!auth.me?.access?.canRegularize;
+  if (!docs.length && !r.receipts.length && !(credit && (credit.balance > 0 || credit.entries.length)) && !r.refunds.length) return null;
+  async function ask() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post('/settings/subscription/refund-requests', { amount: Number(f.amount), message: f.message.trim() || undefined });
+      toast('Demande de remboursement envoyée à Cahiora');
+      setF({ amount: '', message: '' });
+      reload();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div id="paiements-cahiora" className="scroll-mt-20">
+      <Section title="Paiements et crédit">
+        <div className="grid gap-3 text-[15px]">
+          <p className="text-sm">{r.payment}</p>
+          {docs.length > 0 && (
+            <ul className="grid gap-1.5 text-sm" aria-label="État du paiement des documents">
+              {docs.map((l) => (
+                <li key={l.reference} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-sunk p-2">
+                  <span className="min-w-0"><span className="font-mono text-xs">{l.reference}</span><span className="block text-xs text-muted">Payé {money(l.payment!.paid, r.currency)} sur {money(l.payment!.due, r.currency)}{l.payment!.balance > 0 ? `, reste ${money(l.payment!.balance, r.currency)}` : ''}</span></span>
+                  <Badge tone={l.payment!.overdue ? 'bad' : PAY_TONE[l.payment!.status]}>{l.payment!.label}</Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+          <h3 className="font-bold">Reçus provisoires</h3>
+          <p className="rounded-lg bg-warn-soft p-2 text-sm font-bold">{r.receiptMention} Ce n’est pas une facture.</p>
+          {r.receipts.length === 0 ? <p className="text-sm text-muted">Aucun paiement enregistré par Cahiora pour le moment.</p> : (
+            <ul className="grid gap-2" aria-label="Reçus provisoires">
+              {r.receipts.map((x) => (
+                <li key={x.id} className="grid gap-1 rounded-lg border border-line p-3 text-sm">
+                  <span className="flex flex-wrap items-start justify-between gap-2">
+                    <span className="min-w-0"><b className={`font-mono ${x.cancelled ? 'line-through' : ''}`}>{x.receiptNumber}</b><span className="block text-xs text-muted">{x.statusLabel} · paiement du {frDate(x.paidOn)}, {x.meansName}</span></span>
+                    <b>{money(x.amount, x.currency)}</b>
+                  </span>
+                  <span className="text-muted">Document {x.documentReference}{x.allocations.length ? ` · imputé sur ${x.allocations.map((a) => `${a.reference} (${money(a.amount, x.currency)})`).join(', ')}` : ''}{x.creditAmount > 0 ? ` · ${money(x.creditAmount, x.currency)} en crédit` : ''}</span>
+                  <Link href={`/espace/recu-cahiora/${x.id}`} className="inline-flex min-h-11 items-center gap-1.5 font-bold text-brand underline"><Printer className="size-4" /> Voir et imprimer le reçu {x.receiptNumber}</Link>
+                </li>
+              ))}
+            </ul>
+          )}
+          {credit && (
+            <>
+              <h3 className="flex items-center gap-2 font-bold"><Wallet className="size-4" /> Crédit de l’établissement</h3>
+              <p className="text-sm">Disponible : <b>{money(credit.available, r.currency)}</b>{credit.reserved > 0 ? ` (${money(credit.reserved, r.currency)} réservés par votre demande de remboursement)` : ''}. Un crédit se déduit automatiquement du document suivant.</p>
+              {credit.entries.length > 0 && (
+                <details className="rounded-lg border border-line p-3 text-sm">
+                  <summary className="cursor-pointer font-bold">Mouvements du crédit ({credit.entries.length})</summary>
+                  <ul className="mt-2 grid gap-1">
+                    {credit.entries.map((x) => (
+                      <li key={x.id} className="flex flex-wrap justify-between gap-2 border-t border-line pt-1 first:border-0 first:pt-0">
+                        <span>{x.label}{x.receiptNumber ? ` · reçu ${x.receiptNumber}` : ''}{x.documentReference ? ` · ${x.documentReference}` : ''}<span className="block text-xs text-muted">{dateTime(x.createdAt)}</span></span>
+                        <b>{x.amount < 0 ? '− ' : '+ '}{money(Math.abs(x.amount), r.currency)}</b>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              <h3 className="font-bold">Remboursement du crédit</h3>
+              {r.refundOpen && can ? (
+                <div className="grid gap-3">
+                  <p className="text-sm text-muted">Cahiora rembourse sur demande seulement, après vérification, avec sa preuve. Le montant demandé est réservé jusqu’à la décision.</p>
+                  <Field label="Montant à rembourser" hint={`Au plus ${money(credit.available, r.currency)}.`}>
+                    <Input inputMode="numeric" value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value.replace(/\D/g, '') })} className="max-w-48" />
+                  </Field>
+                  <Field label="Message pour Cahiora (facultatif)" hint="1 000 caractères au plus.">
+                    <Textarea rows={2} maxLength={1000} value={f.message} onChange={(e) => setF({ ...f, message: e.target.value })} placeholder="Par exemple : moyen de remboursement souhaité" />
+                  </Field>
+                  <ErrorNote error={error} />
+                  <Button onClick={ask} loading={busy} disabled={!f.amount} className="justify-self-start"><Send className="size-4" /> Demander le remboursement</Button>
+                </div>
+              ) : <p className="text-sm text-muted">{r.refundNote ?? (r.refundOpen ? 'Seule la direction de tout l’établissement demande un remboursement.' : credit.available > 0 ? 'Le remboursement n’est pas ouvert pendant l’accès limité.' : 'Aucun crédit disponible à rembourser.')}</p>}
+            </>
+          )}
+          {r.refunds.length > 0 && (
+            <ul className="grid gap-2" aria-label="Demandes de remboursement">
+              {r.refunds.map((x) => (
+                <li key={x.id} className="grid gap-1 rounded-lg border border-line p-3 text-sm">
+                  <span className="flex flex-wrap items-center justify-between gap-2"><b>Demande de {money(x.amount, x.currency)} du {dateTime(x.requestedAt)}</b><Badge tone={x.status === 'PENDING' ? 'warn' : x.status === 'REFUNDED' ? 'good' : 'bad'}>{x.statusLabel}</Badge></span>
+                  <span className="text-muted">Par {x.requestedByName}{x.message ? ` : « ${x.message} »` : ''}</span>
+                  {x.status === 'REFUNDED' && <span>Remboursé par Cahiora le {frDate(x.refundedOn)} ({x.refundMeans}, référence {x.refundRef}).</span>}
+                  {x.status === 'REFUSED' && <span>Refusé par Cahiora le {dateTime(x.decidedAt)} : {x.decisionNote} Le montant reste dans votre crédit.</span>}
                 </li>
               ))}
             </ul>
@@ -417,7 +561,7 @@ function Documents() {
                 {d.documents.map((doc) => <DocumentItem key={doc.id} doc={doc} related={d.documents.find((x) => x.id === doc.relatedDocumentId) ?? null} />)}
               </ul>
             )}
-            <p className="text-xs text-muted">Un document émis ne change plus. Aucun paiement ici.</p>
+            <p className="text-xs text-muted">Un document émis ne change plus. L’état de son paiement est dans « Paiements et crédit ».</p>
           </div>
         )}
       </Loader>

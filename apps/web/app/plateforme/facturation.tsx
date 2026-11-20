@@ -7,6 +7,7 @@ import { pf } from '@/lib/platform';
 import { Acces } from './acces';
 import { Documents } from './documents';
 import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { AvoirsCredits, moneyRows, Paiements, Rapports } from './paiements';
 import { Prestations } from './prestations';
 
 /**
@@ -14,7 +15,8 @@ import { Prestations } from './prestations';
  * paramètres tarifaires datés et conditions commerciales ; prestations complémentaires (lot G5g, ./prestations.tsx) ;
  * comptages des élèves de chaque établissement, en nombres seulement (lot G5b) ; documents provisoires, exclusions à
  * décider, devis et proformas de prestations (lot G5c, ./documents.tsx) ; accès des clients selon le paiement, demandes de
- * régularisation et prolongations (lot G5d-1, ./acces.tsx). Les autres rubriques arrivent avec les lots G5d-2 à G5h.
+ * régularisation et prolongations (lot G5d-1, ./acces.tsx) ; paiements, avoirs et crédits, rapports financiers (lot
+ * G5d-2, ./paiements.tsx, verrou du serveur fermé par défaut). Les autres rubriques arrivent avec les lots G5e à G5h.
  * Chaque opération financière demande un code actuel de l'application d'authentification.
  */
 
@@ -43,6 +45,8 @@ type Overview = {
   counts: { establishments: number; none: number } & Record<Status, number>;
   soon: { tenantId: string; tenantName: string; group: string; kind: 'TRIAL' | 'PILOT'; lastDay: string; daysLeft: number }[];
   unreadAlerts: number;
+  /** Par monnaie (lot G5d-2) ; null tant que le lot qui les apporte n'est pas là (amountsFrom). */
+  amounts: Record<string, { currency: string; amount: number }[] | null>;
   amountsFrom: Record<string, string>;
 };
 type Alert = { id: string; tenantName: string | null; kind: string; message: string; dueDate: string | null; readAt: string | null; createdAt: string };
@@ -58,12 +62,9 @@ type Event = { id: string; kind: string; label: string; createdAt: string; actor
 
 type Section = 'ensemble' | 'abonnements' | 'acces' | 'etablissements' | 'documents' | 'paiements' | 'avoirs' | 'prestations' | 'parrainage' | 'partenaires' | 'sms' | 'rapports' | 'parametres';
 const LATER: Partial<Record<Section, [string, string]>> = {
-  paiements: ['G5d-2', 'Saisie et vérification des paiements, statuts, reçus provisoires.'],
-  avoirs: ['G5d-2', 'Trop-perçus en crédits, utilisation, demandes de remboursement.'],
   parrainage: ['G5h', 'Codes de parrainage, écoles filleules et crédits de 5 000 FCFA après le premier paiement confirmé.'],
   partenaires: ['G5h', 'Apporteurs d’affaires et partenaires premium, commissions et versements.'],
   sms: ['G5e', 'Crédits SMS prépayés par établissement (prix et forfaits : INFORMATION MANQUANTE).'],
-  rapports: ['G5d-2', 'Facturé, encaissé et impayés par période, établissement, groupe et état.'],
 };
 
 const UNIT_SUFFIX = { hours: 'heures', days: 'jours', months: 'mois' } as const;
@@ -109,6 +110,9 @@ export function Facturation() {
       {section === 'acces' && <Acces />}
       {section === 'etablissements' && <Etablissements />}
       {section === 'documents' && <Documents />}
+      {section === 'paiements' && <Paiements />}
+      {section === 'avoirs' && <AvoirsCredits />}
+      {section === 'rapports' && <Rapports />}
       {section === 'prestations' && <Prestations />}
       {section === 'parametres' && <Parametres open={setSection} />}
       {later && <Empty title={`Prévu au lot ${later[0]}`}>{later[1]}</Empty>}
@@ -138,7 +142,7 @@ function Ensemble() {
         <Stat label="Établissements" value={c.establishments} detail={`${c.none} sans abonnement`} />
         <Stat label="En essai" value={c.TRIAL} />
         <Stat label="Écoles pilotes" value={c.PILOT} />
-        <Stat label="Abonnés actifs" value={c.ACTIVE} detail="Paiement vérifié (lot G5d-2)" />
+        <Stat label="Abonnés actifs" value={c.ACTIVE} detail="Document de la fin de la gratuité payé" />
         <Stat label="Conditions à accepter" value={c.AWAITING_ACCEPTANCE} tone={c.AWAITING_ACCEPTANCE ? 'warn' : undefined} />
         <Stat label="En attente de paiement" value={c.AWAITING_PAYMENT} tone={c.AWAITING_PAYMENT ? 'warn' : undefined} />
         <Stat label="Accès limité" value={c.LIMITED} detail="Abonnement non régularisé (lot G5d-1)" tone={c.LIMITED ? 'bad' : undefined} />
@@ -146,11 +150,16 @@ function Ensemble() {
       </div>
       <Card className="grid gap-2">
         <h3 className="font-bold">Montants</h3>
-        <p className="text-sm text-muted">Facturé et encaissé ne se confondent jamais. Ces montants arriveront avec les documents et les paiements :</p>
-        <ul className="grid gap-1 text-sm sm:grid-cols-2">
-          {([['billed', 'Facturé'], ['collected', 'Encaissé'], ['unpaid', 'Impayés'], ['clientCredits', 'Crédits des clients'], ['servicesRevenue', 'Prestations'], ['commissionsDue', 'Commissions dues'], ['commissionsPaid', 'Commissions payées']] as const).map(([k, label]) => (
-            <li key={k} className="flex justify-between gap-2 rounded bg-sunk px-3 py-1.5"><span>{label}</span><span className="text-muted">— (lot {o.amountsFrom[k]})</span></li>
-          ))}
+        <p className="text-sm text-muted">Facturé et encaissé ne se confondent jamais : chaque montant est donné par monnaie, documents provisoires d’un côté, paiements validés par Cahiora de l’autre. Le détail est dans Rapports financiers.</p>
+        <ul className="grid gap-1 text-sm sm:grid-cols-2" aria-label="Montants">
+          {([['billed', 'Facturé'], ['credited', 'Avoirs'], ['collected', 'Encaissé'], ['refunded', 'Remboursé'], ['unpaid', 'Impayés'], ['groupPending', 'Documents de groupe en attente'], ['clientCredits', 'Crédits des clients'], ['servicesRevenue', 'Prestations'], ['commissionsDue', 'Commissions dues'], ['commissionsPaid', 'Commissions payées']] as const).map(([k, label]) => {
+            const rows = o.amounts[k];
+            return (
+              <li key={k} className="flex justify-between gap-2 rounded bg-sunk px-3 py-1.5">
+                <span>{label}</span>{rows ? <b className="tabular text-right">{moneyRows(rows)}</b> : <span className="text-muted">— (lot {o.amountsFrom[k]})</span>}
+              </li>
+            );
+          })}
         </ul>
       </Card>
       <Card className="grid gap-2">

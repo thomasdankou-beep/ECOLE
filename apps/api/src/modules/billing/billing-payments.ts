@@ -228,7 +228,8 @@ export class BillingPaymentsService {
         })),
         graceDocument: g ? { id: g.document_id, reference: g.reference, balance: g.balance } : null,
         credit: await this.credit(this.db, t.id),
-        means: activeMeans(means.versions, t.currency, tToday, unlocked).map((m) => ({ code: m.code, name: m.name })),
+        // Un établissement de groupe ne paie pas encore (D-G5-19, D-G5-32) : aucun moyen pour lui.
+        means: alone ? activeMeans(means.versions, t.currency, tToday, unlocked).map((m) => ({ code: m.code, name: m.name })) : [],
       });
     }
     const payments = await this.db.billingPayment.findMany({ orderBy: { recordedAt: 'desc' }, take: 200, include: PAYMENT_INCLUDE });
@@ -404,7 +405,7 @@ export class BillingPaymentsService {
       },
     });
     return {
-      unlocked: paymentsUnlocked(), lockMessage: paymentsUnlocked() ? null : PAYMENTS_LOCKED,
+      unlocked: paymentsUnlocked(), lockMessage: paymentsUnlocked() ? null : PAYMENTS_LOCKED, today: localDay(PLATFORM_TZ),
       establishments,
       creditNotes: notes.map((d) => {
         const credit = d.creditEntries.reduce((n, e) => n + e.amount, 0);
