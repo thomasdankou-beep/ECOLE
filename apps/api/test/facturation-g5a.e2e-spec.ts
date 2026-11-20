@@ -478,12 +478,21 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
     expect((await admin.platformAlert.findUniqueOrThrow({ where: { id: alert.id } })).readById).toBe(sa.id);
   });
 
-  it('Vue d’ensemble du Super Admin : états par établissement, montants absents tant que les documents et les paiements n’existent pas', async () => {
+  it('Vue d’ensemble du Super Admin : états par établissement ; montants par monnaie (lot G5d-2), prestations et commissions absentes', async () => {
     const o = (await pf.get('/billing/overview')).body;
     expect(o.counts.establishments).toBeGreaterThanOrEqual(3);
     expect(o.counts.AWAITING_PAYMENT).toBeGreaterThanOrEqual(1);
     expect(o.counts.AWAITING_ACCEPTANCE).toBeGreaterThanOrEqual(1);
-    expect(Object.values(o.amounts)).toEqual([null, null, null, null, null, null, null]);
+    // Facturé et encaissé ne se confondent jamais (§14) : chaque montant est une liste par monnaie, jamais additionnée.
+    const money = expect.arrayContaining([]) as unknown;
+    expect(o.amounts).toEqual({
+      billed: money, credited: money, collected: money, refunded: money, unpaid: money, groupPending: money, clientCredits: money,
+      servicesRevenue: null, commissionsDue: null, commissionsPaid: null,
+    });
+    for (const k of ['billed', 'credited', 'collected', 'refunded', 'unpaid', 'groupPending', 'clientCredits']) {
+      for (const row of o.amounts[k] as unknown[]) expect(row).toEqual({ currency: expect.stringMatching(/^[A-Z]{3}$/), amount: expect.any(Number) });
+    }
+    expect(o.amountsFrom).toEqual({ servicesRevenue: 'G5g', commissionsDue: 'G5h', commissionsPaid: 'G5h' });
     const list = (await pf.get('/billing/establishments')).body as { id: string; subscription: { status: string; acceptedTariff: unknown } | null; group: { id: string } }[];
     const byId = new Map(list.map((e) => [e.id, e]));
     expect(byId.get(S.A.id)!.subscription).toMatchObject({ status: 'AWAITING_PAYMENT', acceptedTariff: { pricePerPupil: 500 } });

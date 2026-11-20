@@ -295,6 +295,9 @@ const KIND_LABELS: Record<string, string> = {
   ACCESS_EXTENSION_RENEWED: 'Renouvellement exceptionnel : accès complet prolongé à nouveau par Cahiora',
   ACCESS_EXTENSION_SHORTENED: 'Fin de la prolongation avancée par Cahiora',
   REGULARIZATION_REQUESTED: 'Demande de régularisation envoyée par la direction', REGULARIZATION_ANSWERED: 'Réponse de Cahiora à la demande de régularisation',
+  // Lot G5d-2 : paiement validé par Cahiora (choix 2 A) ou saisie annulée.
+  SUBSCRIPTION_PAID: 'Document de la fin de la gratuité entièrement payé : abonnement actif, accès complet',
+  SUBSCRIPTION_PAYMENT_REVERSED: 'Saisie d’un paiement annulée par Cahiora : abonnement de nouveau en attente de paiement',
 };
 
 /** Libellé d'une ligne de l'historique d'un abonnement. */

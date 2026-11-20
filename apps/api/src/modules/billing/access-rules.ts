@@ -13,9 +13,9 @@ import { addDays, daysBetween, daysLeft, frDay, isDay, STATUS_LABELS, Subscripti
  * - D-G5-43 A : un paiement partiel laisse l'accès limité, sauf prolongation exceptionnelle avec une date de fin
  *   obligatoire et un motif.
  * Précisions du même jour : chaque demande est horodatée et journalisée ; pendant l'accès complet, les alertes ne
- * gênent pas le travail. Le paiement validé (retour à l'accès complet) et les moyens de paiement arrivent avec le lot
- * G5d-2, fermé tant que D-G5-33 et la validation juridique et fiscale manquent. Les dates sont des jours du
- * calendrier de l'établissement (AAAA-MM-JJ).
+ * gênent pas le travail. Le paiement validé (retour à l'accès complet, choix 2 A) et les moyens de paiement viennent
+ * du lot G5d-2 (payments-access), fermés tant que D-G5-33 et la validation juridique et fiscale manquent. Les dates
+ * sont des jours du calendrier de l'établissement (AAAA-MM-JJ).
  * Lectures 7 A et 9 A, validées par Dankou le 20 novembre 2026 :
  * - jamais moins de 48 heures (paramètre daté NOTICE_HOURS) entre la réponse de Cahiora à une demande de régularisation
  *   et la limitation : l'accès reste complet pendant ce préavis, donné une seule fois par échéance (une nouvelle demande
@@ -45,9 +45,6 @@ export function graceWindow(lastFreeDay: string, graceDays: number) {
   return { graceStart: addDays(lastFreeDay, 1), graceEnd: addDays(lastFreeDay, graceDays) };
 }
 
-/** Moyens de paiement activés par Cahiora : aucun avant le lot G5d-2 et la réponse à D-G5-33. */
-export const PAYMENT_MEANS_ACTIVE = false;
-
 export const AWAITING_STATUSES: SubscriptionStatus[] = ['AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT'];
 
 /** Statut rendu quand la limitation est levée : en attente d'acceptation tant que les conditions ne sont pas acceptées. */
@@ -61,7 +58,11 @@ export interface AccessState {
   extendedUntil: string | null;
   /** Demande de régularisation en attente de la réponse de Cahiora. */
   pendingRequest: boolean;
-  /** Au moins un moyen de paiement activé par Cahiora. */
+  /**
+   * L'établissement peut payer Cahiora (lot G5d-2) : verrou 1 du serveur ouvert, un moyen activé ce jour-là dans sa
+   * monnaie, établissement seul dans son groupe (payments-access, paymentMeansActiveFor). Toujours faux tant que la
+   * validation juridique et fiscale de Cahiora (D-G5-33) manque.
+   */
   paymentMeansActive: boolean;
   /**
    * Préavis donné après une réponse de Cahiora pour l'échéance en cours (lecture 7 A) : sa fin, et le jour de

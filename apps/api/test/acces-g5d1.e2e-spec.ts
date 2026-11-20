@@ -204,6 +204,10 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
       mention: 'Document provisoire, sans valeur fiscale : ce n’est pas une facture.',
       payment: 'Aucun paiement validé par Cahiora pour le moment.', paymentMeans: [],
       paymentMeansNote: 'Aucun moyen de paiement n’est encore activé par Cahiora : envoyez une demande de régularisation, Cahiora vous répondra.',
+      // Lot G5d-2, verrou 1 fermé : ni moyen de paiement, ni remboursement ; reçus et crédit vides.
+      paid: 0, balance: null, paymentsOpen: false, receiptMention: 'Reçu provisoire, sans valeur fiscale.', receipts: [],
+      credit: { balance: 0, reserved: 0, available: 0, entries: [] }, refunds: [], refundOpen: false,
+      refundNote: 'Les remboursements ne sont pas encore ouverts par Cahiora : votre crédit disponible est déduit de votre prochain document.',
     });
   });
 

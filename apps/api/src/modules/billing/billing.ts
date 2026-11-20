@@ -18,6 +18,7 @@ import {
   ParameterKey, PARAMETERS, pilotEndDay, retroactiveChanges, STATUS_LABELS, subscriptionKindLabel, trialEndDay, versionOn, yearDatesError,
 } from './billing-rules';
 import { CountRecord, countView, sortCounts } from './counts-rules';
+import { financialTotals } from './payments-totals';
 
 /**
  * Facturation de Cahiora, lot G5a : paramètres tarifaires datés, conditions commerciales, calendriers des
@@ -477,11 +478,16 @@ export class BillingService {
       }
     }
     const unreadAlerts = await this.db.platformAlert.count({ where: { readAt: null } });
+    const totals = await financialTotals(this.db);
     return {
       counts, soon: soon.sort((a, b) => a.daysLeft - b.daysLeft), unreadAlerts,
-      // Facturé et encaissé ne se confondent jamais (§14) ; ils arrivent avec les documents et les paiements.
-      amounts: { billed: null, collected: null, unpaid: null, clientCredits: null, servicesRevenue: null, commissionsDue: null, commissionsPaid: null },
-      amountsFrom: { billed: 'G5c', collected: 'G5d', unpaid: 'G5d', clientCredits: 'G5d', servicesRevenue: 'G5g', commissionsDue: 'G5h', commissionsPaid: 'G5h' },
+      // Facturé et encaissé ne se confondent jamais (§14), comptés par monnaie (lot G5d-2) ; prestations et commissions
+      // arrivent avec leurs lots.
+      amounts: {
+        billed: totals.billed, credited: totals.credited, collected: totals.collected, refunded: totals.refunded, unpaid: totals.unpaid, groupPending: totals.groupPending,
+        clientCredits: totals.credits, servicesRevenue: null, commissionsDue: null, commissionsPaid: null,
+      },
+      amountsFrom: { servicesRevenue: 'G5g', commissionsDue: 'G5h', commissionsPaid: 'G5h' },
     };
   }
 

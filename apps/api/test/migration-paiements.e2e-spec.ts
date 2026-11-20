@@ -33,7 +33,7 @@ const SCHOOL_TABLES = ['users', 'user_roles', 'audit_logs', 'notifications'];
 const TABLES = ['billing_allocations', 'billing_credit_entries', 'billing_credit_transfers', 'billing_payment_means', 'billing_payments', 'billing_refunds'];
 const FUNCTIONS = [
   'add_billing_payment_means', 'apply_billing_credit', 'billing_credit_balance', 'billing_credit_reserved', 'billing_grace_document', 'billing_payable_documents',
-  'billing_plan_allocations', 'billing_write_allocations', 'cancel_billing_payment', 'current_tenant_billing_balances', 'current_tenant_billing_credit_entries',
+  'billing_plan_allocations', 'billing_write_allocations', 'cancel_billing_payment', 'current_tenant_billing_balances', 'current_tenant_billing_credit', 'current_tenant_billing_credit_entries',
   'current_tenant_billing_payments', 'current_tenant_billing_refunds', 'current_tenant_payment_means', 'decide_billing_refund', 'impute_billing_credit_note',
   'record_billing_payment', 'request_billing_refund', 'transfer_billing_credit',
 ];
@@ -183,6 +183,8 @@ describe('Lot G5d-2 · migration des paiements sur une base qui a déjà les lot
     expect(await inSchool(upsilon.id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_billing_balances()`)).toEqual([
       { document_id: DOCS.d2, total: 40000, credited: 40000, paid: 0, balance: 0 },
     ]);
+    expect(await inSchool(upsilon.id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_billing_credit()`)).toEqual([{ balance: 3000, reserved: 0 }]);
+    expect(await inSchool(phi.id, (tx) => tx.$queryRaw`SELECT * FROM current_tenant_billing_credit()`)).toEqual([]);
     expect(await inSchool(upsilon.id, (tx) => tx.$queryRaw`SELECT kind, amount, currency, receipt_number, document_reference FROM current_tenant_billing_credit_entries()`)).toEqual([
       { kind: 'CREDIT_NOTE_SURPLUS', amount: 3000, currency: 'XOF', receipt_number: null, document_reference: 'PROV-AV-FICTIF-0003' },
     ]);
@@ -216,7 +218,7 @@ describe('Lot G5d-2 · migration des paiements sur une base qui a déjà les lot
       FROM unnest(ARRAY['erp_app', 'erp_group', 'erp_stats', 'erp_platform']) AS r, pg_proc p
       WHERE p.proname = ANY(${FUNCTIONS}) ORDER BY 1, 2`;
     expect(fns.filter((f) => f.ok).map((f) => `${f.role}:${f.fn}`)).toEqual([
-      'erp_app:current_tenant_billing_balances', 'erp_app:current_tenant_billing_credit_entries', 'erp_app:current_tenant_billing_payments',
+      'erp_app:current_tenant_billing_balances', 'erp_app:current_tenant_billing_credit', 'erp_app:current_tenant_billing_credit_entries', 'erp_app:current_tenant_billing_payments',
       'erp_app:current_tenant_billing_refunds', 'erp_app:current_tenant_payment_means', 'erp_app:request_billing_refund',
       'erp_platform:add_billing_payment_means', 'erp_platform:apply_billing_credit', 'erp_platform:billing_credit_balance', 'erp_platform:billing_credit_reserved',
       'erp_platform:billing_grace_document', 'erp_platform:billing_payable_documents', 'erp_platform:billing_plan_allocations', 'erp_platform:cancel_billing_payment',

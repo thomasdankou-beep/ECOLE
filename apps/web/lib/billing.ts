@@ -1,4 +1,4 @@
-/** Libellés des actions de la facturation (lots G5a, G5b, G5c, G5d-1 et G5g) dans les journaux de la plateforme et des groupes. */
+/** Libellés des actions de la facturation (lots G5a, G5b, G5c, G5d-1, G5d-2 et G5g) dans les journaux de la plateforme et des groupes. */
 export const BILLING_ACTIONS: Record<string, string> = {
   'billing.trial_opened': 'Facturation : essai gratuit ouvert',
   'billing.pilot_opened': 'Facturation : école pilote partenaire activée',
@@ -39,4 +39,17 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.notice_reminder': 'Accès : rappel avant la fin du préavis',
   'billing.regularization_requested': 'Accès : demande de régularisation de la direction',
   'billing.regularization_answered': 'Accès : réponse de Cahiora à une demande de régularisation',
+  'billing.payment_means_added': 'Paiements : nouvelle version d’un moyen de paiement',
+  'billing.payment_recorded': 'Paiements : paiement enregistré, reçu provisoire (sans valeur fiscale)',
+  'billing.payment_cancelled': 'Paiements : saisie annulée par une contre-écriture',
+  'billing.subscription_paid': 'Paiements : document de la fin de la gratuité payé, accès complet',
+  'billing.subscription_payment_reversed': 'Paiements : abonnement de nouveau en attente de paiement (saisie annulée)',
+  'billing.credit_used': 'Crédits : crédit déduit d’un document',
+  'billing.credit_note_imputed': 'Crédits : avoir imputé sur les documents de l’abonnement',
+  'billing.credit_notes_imputed': 'Crédits : avoirs déjà émis imputés (mise à jour de Cahiora)',
+  'billing.refund_requested': 'Crédits : demande de remboursement de la direction',
+  'billing.refund_refunded': 'Crédits : crédit remboursé, avec sa preuve',
+  'billing.refund_refused': 'Crédits : demande de remboursement refusée',
+  'billing.credit_transferred_out': 'Crédits : crédit transféré à un autre établissement du groupe',
+  'billing.credit_transferred_in': 'Crédits : crédit reçu d’un autre établissement du groupe',
 };

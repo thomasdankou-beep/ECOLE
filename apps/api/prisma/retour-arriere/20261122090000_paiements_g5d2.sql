@@ -42,6 +42,7 @@ DROP FUNCTION IF EXISTS current_tenant_payment_means(date);
 DROP FUNCTION IF EXISTS current_tenant_billing_refunds();
 DROP FUNCTION IF EXISTS current_tenant_billing_credit_entries();
 DROP FUNCTION IF EXISTS current_tenant_billing_payments();
+DROP FUNCTION IF EXISTS current_tenant_billing_credit();
 DROP FUNCTION IF EXISTS current_tenant_billing_balances();
 DROP FUNCTION IF EXISTS transfer_billing_credit(uuid, uuid, integer, text, text, text, text, uuid, text, text);
 DROP FUNCTION IF EXISTS decide_billing_refund(uuid, text, text, date, text, text, text, text, uuid, text, text, date);

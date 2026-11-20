@@ -32,6 +32,12 @@ export const PAYMENTS_LOCK_ENV = 'BILLING_PAYMENTS_UNLOCKED';
 /** Verrou 1 : ouvert seulement si la variable du serveur vaut exactement « true » ; fermé par défaut, donc en production. */
 export const paymentsUnlocked = (env: Record<string, string | undefined> = process.env) => env[PAYMENTS_LOCK_ENV] === 'true';
 
+/** Document de plusieurs établissements : son paiement (et l'imputation de ses avoirs) attend D-G5-19 et D-G5-32. */
+export const GROUP_PAYMENT_PENDING = 'Document de plusieurs établissements : son paiement attend les décisions D-G5-19 et D-G5-32';
+
+/** Ce que lit la direction tant que le verrou 1 est fermé (son crédit reste déduit du document suivant). */
+export const REFUNDS_CLOSED = 'Les remboursements ne sont pas encore ouverts par Cahiora : votre crédit disponible est déduit de votre prochain document.';
+
 /** Message de tout refus dû au verrou 1. */
 export const PAYMENTS_LOCKED =
   'Les paiements de Cahiora sont fermés sur ce serveur : aucun paiement réel avant la validation juridique et fiscale de Cahiora (D-G5-33). Rien n’est enregistré.';

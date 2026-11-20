@@ -16,6 +16,7 @@ import { RecoveryController, RecoveryService } from './modules/auth/recovery';
 import { PlatformAccessController, PlatformAccessService, SchoolAccessController, SchoolAccessService } from './modules/billing/access';
 import { BillingController, BillingService } from './modules/billing/billing';
 import { BillingJobsController, BillingJobsService } from './modules/billing/billing-jobs';
+import { BillingPaymentsController, BillingPaymentsService, SchoolBillingPaymentsController, SchoolBillingPaymentsService } from './modules/billing/billing-payments';
 import { CountsController, CountsService } from './modules/billing/counts';
 import { BillingDocumentsController, BillingDocumentsService, SchoolBillingDocumentsController } from './modules/billing/documents';
 import { ServiceDocumentsController, ServiceDocumentsService } from './modules/billing/service-documents';
@@ -77,9 +78,9 @@ class CoreModule {}
     }),
   ],
   controllers: [
-    // Facturation de Cahiora (lots G5a, G5b, G5c, G5d-1 et G5g).
+    // Facturation de Cahiora (lots G5a, G5b, G5c, G5d-1, G5d-2 et G5g).
     BillingController, BillingJobsController, SchoolSubscriptionController, ServicesController, CountsController, BillingDocumentsController, SchoolBillingDocumentsController,
-    SchoolAccessController, PlatformAccessController,
+    SchoolAccessController, PlatformAccessController, BillingPaymentsController, SchoolBillingPaymentsController,
     ServiceDocumentsController,
     HealthController, AuthController, RecoveryController, SettingsController, StudentsController, AdmissionsController, DocumentsController,
     TimetableController, LessonsController, AttendanceController, EvaluationController, ReportCardsController,
@@ -89,9 +90,9 @@ class CoreModule {}
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },
-    // Facturation de Cahiora (lots G5a, G5b, G5c, G5d-1 et G5g).
+    // Facturation de Cahiora (lots G5a, G5b, G5c, G5d-1, G5d-2 et G5g).
     BillingService, BillingJobsService, SchoolSubscriptionService, ServicesService, CountsService, BillingDocumentsService, ServiceDocumentsService,
-    SchoolAccessService, PlatformAccessService,
+    SchoolAccessService, PlatformAccessService, BillingPaymentsService, SchoolBillingPaymentsService,
     AuthService, RecoveryService, SettingsService, StudentsService, AdmissionsService, DocumentsService, TimetableService, LessonsService,
     AttendanceService, EvaluationService, ReportCardsService, FinanceService, PaymentsService, CommunicationService,
     PublicService, DashboardService, InternshipsService, PlatformDb, PlatformGuard, PlatformService, PlatformGroupsService, HonorsService,

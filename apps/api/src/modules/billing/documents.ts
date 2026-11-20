@@ -17,6 +17,7 @@ import { BillingService, PLATFORM_TZ } from './billing';
 import { addDays, frDay, isDay } from './billing-rules';
 import { notifyDirection, SYSTEM } from './billing-tasks';
 import { COUNT_KIND_LABELS, CountKind } from './counts-rules';
+import { accessSentence, creditNoteSentence, creditSentence, imputeCreditNote, useCredit } from './payments-access';
 import {
   CountFact, CreditPlan, creditLine, creditLineLabel, EstablishmentFacts, GroupPlan, groupPlan, LineFact, nextLine, NextLine, PlannedEstablishment,
   subscriptionLineLabel,
@@ -315,11 +316,14 @@ export class BillingDocumentsService {
         if (c.establishments.length === 1) {
           const l = plan.lines[0];
           const label = documentLabel('SUBSCRIPTION', r.document_total);
+          // Lot G5d-2 (D-G5-15 A) : le crédit disponible de l'établissement se déduit aussitôt de ses documents à payer.
+          const used = r.document_total > 0 ? await useCredit(tx, { id: l.tenantId, name: l.name, groupId: c.group.id }, null) : null;
           await notifyDirection(tx, l.tenantId, 'billing.document_issued',
             r.document_total ? `Document provisoire de votre abonnement Cahiora : ${money(r.document_total, currency)}` : 'Relevé de votre abonnement Cahiora : rien à payer',
             `${label} ${r.document_reference} du ${frDay(issueDay)} : ${pupilsText(l.line.pupils)} au ${frDay(l.count.date)} (${COUNT_KIND_LABELS[l.count.kind].toLowerCase()}), `
             + `${r.document_total ? `${money(r.document_total, currency)}${dueDate ? `, échéance le ${frDay(dueDate)}` : ''}` : 'rien de plus à payer à cette date'}. `
-            + `${PROVISIONAL_MENTION} Il est dans Paramètres › Abonnement Cahiora.`);
+            + `${PROVISIONAL_MENTION} Il est dans Paramètres › Abonnement Cahiora.`
+            + (used ? ` ${creditSentence(used, currency)}${accessSentence(used.access, currency) ? ` ${accessSentence(used.access, currency)}` : ''}` : ''));
         }
         return r;
       }, { timeout: 60000 });
@@ -446,7 +450,7 @@ export class BillingDocumentsService {
         const t = await tx.tenant.findUniqueOrThrow({
           where: { id: dto.tenantId }, select: { id: true, name: true, currency: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
         });
-        let credit: { documentId: string; reference: string; total: number } | null = null;
+        let credit: Awaited<ReturnType<BillingDocumentsService['issueCredit']>> | null = null;
         let message: string | null = null;
         if (dto.decision === 'VALIDATED') {
           const c = await this.creditFor(tx, t.id, d.year_label, false);
@@ -469,6 +473,7 @@ export class BillingDocumentsService {
           ? `Le Super Admin de Cahiora a refusé l’exclusion demandée : ${dto.note!.trim()}`
           : credit && sees
             ? `Le Super Admin de Cahiora a validé l’exclusion demandée. Avoir provisoire ${credit.reference} de ${money(credit.total, t.currency)}, dans Paramètres › Abonnement Cahiora. ${PROVISIONAL_MENTION}`
+              + (credit.imputed ? [creditNoteSentence(credit.imputed, t.currency), accessSentence(credit.imputed.access, t.currency)].filter(Boolean).map((x) => ` ${x}`).join('') : '')
             : `Le Super Admin de Cahiora a validé l’exclusion demandée.${message ? ` ${message}.` : ''}`;
         await notifyDirection(tx, t.id, action, dto.decision === 'VALIDATED' ? 'Exclusion validée par Cahiora' : 'Exclusion refusée par Cahiora', body);
         return { status: dto.decision, credit, message };
@@ -509,7 +514,9 @@ export class BillingDocumentsService {
       documentId: r.document_id, reference: r.document_reference, kind: 'CREDIT_NOTE', total: r.document_total, yearLabel, issueDate: issueDay,
       relatedDocumentId: related.documentId,
     }, [{ tenant: { id: t.id, name: t.name }, data: { pupils: y.pupils, amount: plan.amount, correctionId } }], admin);
-    return { documentId: r.document_id, reference: r.document_reference, total: r.document_total };
+    // Lot G5d-2 (choix 1 A) : l'avoir s'impute aussitôt sur le document qu'il corrige, puis les autres, puis le crédit.
+    const imputed = await imputeCreditNote(tx, r.document_id, { id: t.id, name: t.name, groupId: t.group.id }, admin);
+    return { documentId: r.document_id, reference: r.document_reference, total: r.document_total, imputed };
   }
 
   // ---------------------------------------------------------------- Direction de l'établissement

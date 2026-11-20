@@ -982,6 +982,13 @@ CREATE OR REPLACE FUNCTION current_tenant_billing_balances() RETURNS TABLE (docu
   WHERE coalesce(current_tenant_sees_billing_documents(), false)
 $$;
 
+-- Crédit de l'école : solde de toutes ses écritures et montant réservé par sa demande de remboursement en attente.
+CREATE OR REPLACE FUNCTION current_tenant_billing_credit() RETURNS TABLE (balance integer, reserved integer)
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT billing_credit_balance(app_current_tenant()), billing_credit_reserved(app_current_tenant())
+  WHERE coalesce(current_tenant_sees_billing_documents(), false)
+$$;
+
 -- Reçus provisoires de l'école, les plus récents d'abord, avec l'imputation de chaque paiement.
 CREATE OR REPLACE FUNCTION current_tenant_billing_payments() RETURNS TABLE (
   id uuid, receipt_number text, document_reference text, currency text, expected_amount integer, amount integer, paid_on date, means_name text,
@@ -1068,13 +1075,14 @@ REVOKE ALL ON FUNCTION billing_payable_documents(uuid), billing_credit_balance(u
   record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date), cancel_billing_payment(uuid, text, uuid, text, text),
   apply_billing_credit(uuid, text, uuid, text), impute_billing_credit_note(uuid), request_billing_refund(uuid, text, integer, text, text),
   decide_billing_refund(uuid, text, text, date, text, text, text, text, uuid, text, text, date),
-  transfer_billing_credit(uuid, uuid, integer, text, text, text, text, uuid, text, text), current_tenant_billing_balances(), current_tenant_billing_payments(),
-  current_tenant_billing_credit_entries(), current_tenant_billing_refunds(), current_tenant_payment_means(date) FROM PUBLIC;
+  transfer_billing_credit(uuid, uuid, integer, text, text, text, text, uuid, text, text), current_tenant_billing_balances(), current_tenant_billing_credit(),
+  current_tenant_billing_payments(), current_tenant_billing_credit_entries(), current_tenant_billing_refunds(), current_tenant_payment_means(date) FROM PUBLIC;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_app') THEN
-    GRANT EXECUTE ON FUNCTION current_tenant_billing_balances(), current_tenant_billing_payments(), current_tenant_billing_credit_entries(),
-      current_tenant_billing_refunds(), current_tenant_payment_means(date), request_billing_refund(uuid, text, integer, text, text) TO erp_app;
+    GRANT EXECUTE ON FUNCTION current_tenant_billing_balances(), current_tenant_billing_credit(), current_tenant_billing_payments(),
+      current_tenant_billing_credit_entries(), current_tenant_billing_refunds(), current_tenant_payment_means(date), request_billing_refund(uuid, text, integer, text, text)
+      TO erp_app;
   END IF;
 END $$;
 

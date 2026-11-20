@@ -56,6 +56,9 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-sandbox}
       ALLOW_SANDBOX_PAYMENTS: ${ALLOW_SANDBOX_PAYMENTS:-false}
+      # Lot G5d-2, verrou 1 : paiements de l'abonnement Cahiora fermés par défaut ; seul Dankou l'ouvre (true), après la
+      # validation juridique et fiscale de Cahiora (D-G5-33).
+      BILLING_PAYMENTS_UNLOCKED: ${BILLING_PAYMENTS_UNLOCKED:-false}
       CINETPAY_API_KEY: ${CINETPAY_API_KEY:-}
       CINETPAY_SITE_ID: ${CINETPAY_SITE_ID:-}
       CINETPAY_SECRET_KEY: ${CINETPAY_SECRET_KEY:-}
