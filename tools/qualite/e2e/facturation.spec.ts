@@ -60,10 +60,14 @@ async function tientEnLargeur(page: Page) {
 }
 
 let secret = '';
-/** Code du moment, jamais à moins de 3 secondes de la fin de sa période de 30 secondes. */
+/**
+ * Code de l'application d'authentification, assez loin de la fin de sa fenêtre de 30 secondes pour être encore bon
+ * à l'envoi. Avec les captures, la marge couvre leur attente de la fin des messages (jusqu'à 8 secondes).
+ */
 async function code(page: Page) {
+  const marge = SHOTS ? 12_000 : 3000;
   const reste = 30_000 - (Date.now() % 30_000);
-  if (reste < 3000) await page.waitForTimeout(reste + 200);
+  if (reste < marge) await page.waitForTimeout(reste + 200);
   return authenticator.generate(secret) as string;
 }
 
@@ -87,7 +91,7 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
 
   await rubrique(page, 'Rubrique', 'Commercial et facturation');
   await expect(page.getByRole('heading', { name: 'Commercial et facturation' })).toBeVisible();
-  for (const nom of ['Vue d’ensemble', 'Abonnements', 'Établissements clients', 'Factures et documents', 'Paiements', 'Avoirs et crédits', 'Prestations complémentaires', 'Parrainage', 'Partenaires et commissions', 'SMS et crédits', 'Rapports financiers', 'Paramètres tarifaires']) {
+  for (const nom of ['Vue d’ensemble', 'Abonnements', 'Accès des clients', 'Établissements clients', 'Factures et documents', 'Paiements', 'Avoirs et crédits', 'Prestations complémentaires', 'Parrainage', 'Partenaires et commissions', 'SMS et crédits', 'Rapports financiers', 'Paramètres tarifaires']) {
     await expect(page.getByRole('group', { name: 'Commercial et facturation' }).getByRole('button', { name: nom, exact: true })).toBeVisible();
   }
   await expect(page.getByText('Facturé et encaissé ne se confondent jamais', { exact: false })).toBeVisible();
@@ -103,6 +107,14 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   const publier = page.getByRole('dialog');
   await publier.getByLabel('Titre').fill(titre);
   await publier.getByLabel('Texte des conditions').fill('Texte fictif publié par les tests de navigateur du lot G5a. Ce ne sont pas les conditions commerciales de Cahiora.');
+  // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est envoyé.
+  const attestation = publier.getByLabel(/Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora/);
+  await expect(attestation).not.toBeChecked();
+  await publier.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await publier.getByRole('button', { name: 'Publier' }).click();
+  await expect(publier).toBeVisible();
+  expect(await attestation.evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true);
+  await attestation.check();
   await publier.getByLabel('Code de votre application d’authentification').fill(await code(page));
   await publier.getByRole('button', { name: 'Publier' }).click();
   await expect(publier).toBeHidden();
@@ -195,7 +207,9 @@ test('Direction : lire et accepter les conditions commerciales à la fin de l’
   await connexion(page, COMPTES.direction);
   await page.goto('/espace/parametres?rubrique=abonnement');
   await expect(page.getByRole('heading', { name: 'Votre abonnement Cahiora' })).toBeVisible();
-  await expect(page.getByText('En attente d’acceptation des conditions')).toBeVisible();
+  // État de l'abonnement ; le bandeau du lot G5d-1 reprend ce libellé dans son titre (« Abonnement Cahiora : en attente… »).
+  await expect(page.getByText('En attente d’acceptation des conditions', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Abonnement Cahiora' })).toContainText('Votre période gratuite est terminée');
   await expect(page.getByText(titre)).toBeVisible();
   const accepter = page.getByRole('button', { name: 'Accepter les conditions' });
   await expect(accepter).toBeDisabled();

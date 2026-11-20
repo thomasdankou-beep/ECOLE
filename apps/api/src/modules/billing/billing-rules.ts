@@ -5,7 +5,7 @@
  * Les dates sont des jours du calendrier (AAAA-MM-JJ), sans heure.
  */
 
-export type ParameterUnit = 'money' | 'days' | 'months' | 'percent';
+export type ParameterUnit = 'money' | 'hours' | 'days' | 'months' | 'percent';
 
 export interface ParameterDef {
   label: string;
@@ -27,6 +27,11 @@ export const PARAMETERS = {
   PILOT_ALERT_FIRST_DAYS: { label: 'Première alerte avant la fin d’un pilote', unit: 'days', min: 1, max: 120, usedFrom: 'G5a', provisional: 'D-G5-38' },
   PILOT_ALERT_LAST_DAYS: { label: 'Dernière alerte avant la fin d’un pilote', unit: 'days', min: 1, max: 120, usedFrom: 'G5a', provisional: 'D-G5-38' },
   COUNT_REVIEW_DAYS: { label: 'Vérification des effectifs par la direction avant chaque régularisation', unit: 'days', min: 1, max: 60, usedFrom: 'G5b' },
+  GRACE_DAYS: { label: 'Délai de grâce en accès complet après la fin de la gratuité', unit: 'days', min: 1, max: 90, usedFrom: 'G5d' },
+  // Lectures 7 A et 9 A, validées par Dankou le 20 novembre 2026 : préavis après la réponse à une demande de
+  // régularisation (0 : pas de préavis), durée maximale de chaque prolongation exceptionnelle, renouvellements compris.
+  NOTICE_HOURS: { label: 'Préavis après la réponse à une demande de régularisation', unit: 'hours', min: 0, max: 168, usedFrom: 'G5d' },
+  EXTENSION_MAX_DAYS: { label: 'Durée maximale d’une prolongation exceptionnelle', unit: 'days', min: 1, max: 366, usedFrom: 'G5d' },
   REFERRAL_REWARD: { label: 'Crédit de parrainage par école filleule', unit: 'money', min: 0, max: 10_000_000, usedFrom: 'G5h' },
   COMMISSION_APPORTEUR: { label: 'Commission d’un apporteur d’affaires', unit: 'percent', min: 0, max: 10_000, usedFrom: 'G5h' },
   COMMISSION_PREMIUM: { label: 'Commission d’un partenaire premium', unit: 'percent', min: 0, max: 10_000, usedFrom: 'G5h' },
@@ -284,6 +289,12 @@ const KIND_LABELS: Record<string, string> = {
   TRIAL_OPENED: 'Essai gratuit ouvert', PILOT_OPENED: 'Statut d’école pilote partenaire activé', PILOT_END_CHANGED: 'Fin de la gratuité du pilote modifiée',
   TRIAL_ENDED: 'Essai terminé : conditions commerciales à accepter', PILOT_ENDED: 'Pilote terminé : conditions commerciales à accepter',
   TERMS_ACCEPTED: 'Conditions commerciales acceptées par la direction',
+  // Lot G5d-1 : accès selon le paiement.
+  ACCESS_LIMITED: 'Délai passé sans paiement validé : accès limité', ACCESS_EXTENDED: 'Accès complet prolongé par Cahiora',
+  // Lecture 9 A (20 novembre 2026) : renouvellement exceptionnel ou fin avancée d'une prolongation.
+  ACCESS_EXTENSION_RENEWED: 'Renouvellement exceptionnel : accès complet prolongé à nouveau par Cahiora',
+  ACCESS_EXTENSION_SHORTENED: 'Fin de la prolongation avancée par Cahiora',
+  REGULARIZATION_REQUESTED: 'Demande de régularisation envoyée par la direction', REGULARIZATION_ANSWERED: 'Réponse de Cahiora à la demande de régularisation',
 };
 
 /** Libellé d'une ligne de l'historique d'un abonnement. */

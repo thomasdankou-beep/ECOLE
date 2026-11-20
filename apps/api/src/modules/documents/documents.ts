@@ -2,7 +2,7 @@ import { Body, Controller, Get, Injectable, NotFoundException, Param, Post, Quer
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { DocumentKind, Prisma } from '@prisma/client';
 import { IsEnum, IsUUID } from 'class-validator';
-import { Actor, Can, CurrentActor, Public } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, Public } from '../../common/auth';
 import { AuditService } from '../../common/audit.service';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { ScopeService } from '../../common/scope.service';
@@ -118,12 +118,14 @@ export class DocumentsService {
 export class DocumentsController {
   constructor(private s: DocumentsService) {}
 
+  // Lot G5d-1 (D-G5-30 A) : délivrer une attestation ou un certificat tiré des données existantes reste possible pendant
+  // l'accès limité (impression).
   @ApiBearerAuth()
-  @Post('documents') @Can('documents.issue')
+  @Post('documents') @AllowedWhenLimited() @Can('documents.issue')
   issue(@CurrentActor() a: Actor, @Body() dto: IssueDto) { return this.s.issue(a, dto); }
 
   @ApiBearerAuth()
-  @Post('documents/batch') @Can('documents.issue')
+  @Post('documents/batch') @AllowedWhenLimited() @Can('documents.issue')
   batch(@CurrentActor() a: Actor, @Body() dto: BatchDto) { return this.s.batch(a, dto); }
 
   @ApiBearerAuth()

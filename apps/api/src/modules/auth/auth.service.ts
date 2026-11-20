@@ -12,6 +12,7 @@ import { AuditService, auditSubject, maskIdentifier } from '../../common/audit.s
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { decrypt, encrypt, normalizePhone } from '../../common/util';
 import { country } from '../../common/country';
+import { schoolAccess } from '../billing/access';
 import { createSmsProvider, sendQuietly } from '../notifications/sms.provider';
 import { NotificationsService } from '../notifications/notifications.service';
 import { generateRecoveryCodes, hashCode, looksLikeActivationCode, looksLikeRecoveryCode } from './recovery-codes';
@@ -389,8 +390,10 @@ export class AuthService {
         where: { id: actor.userId },
         select: { id: true, firstName: true, lastName: true, phone: true, email: true, totpEnabled: true, mustChangePassword: true, roles: { select: { role: true, siteId: true } } },
       });
-      const t = await this.db.tenant.findUniqueOrThrow({ where: { id: actor.tenantId }, select: { id: true, slug: true, name: true, shortName: true, country: true, currency: true, settings: true } });
-      const { settings, ...rest } = t;
+      const t = await this.db.tenant.findUniqueOrThrow({
+        where: { id: actor.tenantId }, select: { id: true, slug: true, name: true, shortName: true, country: true, currency: true, settings: true, timezone: true },
+      });
+      const { settings, timezone, ...rest } = t;
       const c = country(t.country);
       const tenant = { ...rest, dial: c.dial, einvoice: c.einvoice, logoUrl: logoUrl(t), primaryColor: tenantSettings(settings).branding.primaryColor };
       const sites = await tx.site.findMany({ where: { active: true }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
@@ -412,7 +415,16 @@ export class AuthService {
         });
         if (st) self = { id: st.id, firstName: st.firstName, lastName: st.lastName, className: st.enrollments[0]?.class.name ?? null };
       }
-      return { user, tenant, sites, year, children, self };
+      // Lot G5d-1 (D-G5-30 A) : accès selon l'abonnement, pour le bandeau et l'alerte de la direction ; le personnel ne
+      // lit que l'accès limité, une famille rien (elle n'a jamais affaire à l'abonnement de l'établissement).
+      const staff = user.roles.some((r) => r.role !== 'PARENT' && r.role !== 'ELEVE');
+      const a = staff ? await schoolAccess(tx, timezone) : null;
+      const access = a && {
+        status: a.status, statusLabel: a.statusLabel, phase: a.phase, until: a.until, daysLeft: a.daysLeft, limitedFrom: a.limitedFrom,
+        limitedAt: a.limitedAt, limitedAtLabel: a.limitedAtLabel, hoursLeft: a.hoursLeft, pendingRequest: a.pendingRequest,
+        termsAccepted: a.termsAccepted, direction: user.roles.some((r) => r.role === 'DIRECTION'), canRegularize: user.roles.some((r) => r.role === 'DIRECTION' && !r.siteId),
+      };
+      return { user, tenant, sites, year, children, self, access };
     });
   }
 

@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { IsBoolean, IsInt, IsString, IsUUID, MaxLength, Min } from 'class-validator';
 import type { Request } from 'express';
-import { Actor, Can, CurrentActor, Public } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, Public } from '../../common/auth';
 import { PaymentsService } from './payments.service';
 
 class InitiateDto {
@@ -18,6 +18,8 @@ class SandboxDecisionDto {
 }
 
 @ApiTags('Paiements en ligne')
+// Lot G5d-1 : la caisse reste ouverte pendant l'accès limité (paiements des familles).
+@AllowedWhenLimited()
 @Controller('payments')
 export class PaymentsController {
   constructor(private s: PaymentsService) {}

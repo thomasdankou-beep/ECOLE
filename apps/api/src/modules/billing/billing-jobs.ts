@@ -2,9 +2,11 @@ import { Controller, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Prisma, Subscription } from '@prisma/client';
-import { Public } from '../../common/auth';
+import { forgetAccess, Public } from '../../common/auth';
 import { localDay } from '../../common/country';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
+import { accessStateOf, currentNotice } from './access';
+import { accessPhase, dueReminder, frDateTime, graceWindow, LIMITED_KEEPS, noticeReminderDue, PAYMENT_MEANS_ACTIVE, whenText } from './access-rules';
 import { PLATFORM_TZ } from './billing';
 import { addDays, daysLeft, dueAlerts, frDay, versionOn } from './billing-rules';
 import { AlreadyDone, jobOnce, notifyDirection, SYSTEM, systemJournals } from './billing-tasks';
@@ -13,6 +15,12 @@ import { BillingDocumentsService } from './documents';
 
 /**
  * Tâches planifiées de la facturation (lot G5a) : fin d'un essai, alertes avant la fin d'un pilote, fin d'un pilote.
+ * Lot G5d-1 (D-G5-30 A, D-G5-41 A, D-G5-42 A) : rappels de l'essai 3 jours avant sa fin, la veille et le dernier jour
+ * (11e, 13e et 14e jours d'un essai de 14 jours) ; à la fin de la gratuité, délai de grâce en accès complet (paramètre
+ * daté, 15 jours) ; rappels avant la fin du délai de grâce ou d'une prolongation ; puis, sans paiement validé ni
+ * demande de régularisation en attente, accès limité, sans rien supprimer.
+ * Lecture 7 A (20 novembre 2026) : un préavis ouvert par la réponse de Cahiora à une demande retient la limitation
+ * jusqu'à son heure de fin ; un rappel part dans ses dernières 24 heures.
  * Elles passent toutes les heures, avec la date du jour de chaque établissement (son fuseau). Chaque tâche est
  * inscrite dans billing_jobs, sous une clé unique, dans la même transaction que son effet : relancée, interrompue ou
  * lancée deux fois en même temps, elle ne produit jamais de doublon. Rien n'est facturé ici, aucun SMS n'est envoyé :
@@ -60,26 +68,50 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
     try {
       const done: string[] = [];
       const subs: Sub[] = await this.db.subscription.findMany({
-        where: { status: { in: ['TRIAL', 'PILOT'] } },
+        where: { status: { in: ['TRIAL', 'PILOT', 'AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT'] } },
         include: { tenant: { select: { id: true, name: true, timezone: true, groupId: true } } },
       });
-      // Délais des alertes du pilote (30 et 7 jours, provisoire : D-G5-38), en vigueur ce jour.
-      const params = await this.db.billingParameter.findMany({ where: { key: { in: ['PILOT_ALERT_FIRST_DAYS', 'PILOT_ALERT_LAST_DAYS'] } } });
+      // Délais des alertes du pilote (30 et 7 jours, provisoire : D-G5-38), en vigueur ce jour ; délai de grâce
+      // (D-G5-30 A), celui en vigueur le premier jour de grâce.
+      const params = await this.db.billingParameter.findMany({ where: { key: { in: ['PILOT_ALERT_FIRST_DAYS', 'PILOT_ALERT_LAST_DAYS', 'GRACE_DAYS'] } } });
       const versions = params.map((p) => ({ ...p, effectiveFrom: iso(p.effectiveFrom)! }));
       const platformToday = localDay(PLATFORM_TZ, now);
       const delays = ['PILOT_ALERT_FIRST_DAYS', 'PILOT_ALERT_LAST_DAYS'].map((k) => versionOn(versions, k, null, platformToday)?.value).filter((v): v is number => !!v);
+      const graceDays = (lastFreeDay: string) => versionOn(versions, 'GRACE_DAYS', null, addDays(lastFreeDay, 1))?.value ?? null;
+      // Demandes de régularisation qui attendent Cahiora : elles retiennent la limitation (D-G5-42 A).
+      const pending = new Set((await this.db.regularizationRequest.findMany({ where: { status: 'PENDING' }, select: { tenantId: true } })).map((r) => r.tenantId));
       for (const s of subs) {
         const today = localDay(s.tenant.timezone, now);
         try {
-          if (s.status === 'TRIAL' && s.trialEnd && iso(s.trialEnd)! < today) {
-            if (await this.endFree(s, 'TRIAL')) done.push(`trial-end:${s.tenant.name}`);
+          if (s.status === 'TRIAL' && s.trialEnd) {
+            const end = iso(s.trialEnd)!;
+            if (end < today) {
+              if (await this.endFree(s, 'TRIAL', graceDays(end))) done.push(`trial-end:${s.tenant.name}`);
+            } else {
+              const n = dueReminder(today, end);
+              if (n !== null && (await this.trialReminder(s, end, n, today, graceDays(end)))) done.push(`trial-reminder-${n}:${s.tenant.name}`);
+            }
           }
           if (s.status === 'PILOT' && s.pilotEnd) {
             const end = iso(s.pilotEnd)!;
             if (end < today) {
-              if (await this.endFree(s, 'PILOT')) done.push(`pilot-end:${s.tenant.name}`);
+              if (await this.endFree(s, 'PILOT', graceDays(end))) done.push(`pilot-end:${s.tenant.name}`);
             } else {
               for (const n of dueAlerts(today, end, delays)) if (await this.pilotAlert(s, end, n, today)) done.push(`pilot-alert-${n}:${s.tenant.name}`);
+            }
+          }
+          if (s.status === 'AWAITING_ACCEPTANCE' || s.status === 'AWAITING_PAYMENT') {
+            const notice = currentNotice(s);
+            const view = accessPhase(accessStateOf(s, pending.has(s.tenantId), notice, s.tenant.timezone), today, now);
+            if ((view.phase === 'GRACE' || view.phase === 'EXTENDED') && view.until) {
+              const n = dueReminder(today, view.until);
+              if (n !== null && (await this.accessReminder(s, view.phase, view.until, n, today, pending.has(s.tenantId)))) {
+                done.push(`${view.phase === 'GRACE' ? 'grace' : 'extension'}-reminder-${n}:${s.tenant.name}`);
+              }
+            } else if (view.phase === 'NOTICE' && notice) {
+              if (noticeReminderDue(notice, now) && (await this.noticeReminder(s, notice, pending.has(s.tenantId)))) done.push(`notice-reminder:${s.tenant.name}`);
+            } else if (view.phase === 'DUE') {
+              if (await this.limit(s, notice)) done.push(`access-limited:${s.tenant.name}`);
             }
           }
         } catch (e) {
@@ -105,32 +137,129 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
     return notifyDirection(tx, tenantId, kind, title, body);
   }
 
-  /** Fin de l'essai ou du pilote : l'abonnement attend l'acceptation des conditions commerciales (§4, §13). */
-  private endFree(s: Sub, from: 'TRIAL' | 'PILOT') {
+  /**
+   * Fin de l'essai ou du pilote : l'abonnement attend l'acceptation des conditions commerciales (§4, §13). Lot G5d-1
+   * (D-G5-30 A) : le délai de grâce en accès complet commence le lendemain du dernier jour gratuit, pour la durée en
+   * vigueur ce jour-là ; sans durée en vigueur, pas de délai (jamais limité automatiquement).
+   */
+  private endFree(s: Sub, from: 'TRIAL' | 'PILOT', graceDays: number | null) {
     const lastDay = iso(from === 'TRIAL' ? s.trialEnd : s.pilotEnd)!;
     const trial = from === 'TRIAL';
+    const grace = graceDays ? graceWindow(lastDay, graceDays) : null;
     return this.once(`${trial ? 'trial-end' : 'pilot-end'}:${s.id}:${lastDay}`, trial ? 'TRIAL_END' : 'PILOT_END', s.tenantId, addDays(lastDay, 1), async (tx) => {
       const n = await tx.subscription.updateMany({
         where: { id: s.id, status: from, ...(trial ? { trialEnd: s.trialEnd } : { pilotEnd: s.pilotEnd }) },
-        data: { status: 'AWAITING_ACCEPTANCE', statusSince: new Date() },
+        data: { status: 'AWAITING_ACCEPTANCE', statusSince: new Date(), ...(grace ? { graceStart: day(grace.graceStart), graceEnd: day(grace.graceEnd) } : {}) },
       });
       if (n.count !== 1) throw new AlreadyDone();
       const kind = trial ? 'TRIAL_ENDED' : 'PILOT_ENDED';
-      const data = { lastFreeDay: lastDay };
+      const data = { lastFreeDay: lastDay, graceDays, graceStart: grace?.graceStart ?? null, graceEnd: grace?.graceEnd ?? null };
+      const graceText = grace
+        ? ` Délai de grâce en accès complet jusqu'au ${frDay(grace.graceEnd)} ; sans paiement validé ni demande de régularisation en attente, accès limité à partir du ${frDay(addDays(grace.graceEnd, 1))}.`
+        : '';
       await tx.subscriptionEvent.create({ data: { subscriptionId: s.id, tenantId: s.tenantId, kind, fromStatus: from, toStatus: 'AWAITING_ACCEPTANCE', data, actorKind: 'system', actorName: SYSTEM } });
       await tx.platformAlert.create({
         data: {
           tenantId: s.tenantId, kind, dueDate: day(lastDay),
-          message: trial
+          message: (trial
             ? `Essai terminé pour ${s.tenant.name} (dernier jour gratuit : ${frDay(lastDay)}). La direction doit accepter les conditions commerciales.`
-            : `Période pilote terminée pour ${s.tenant.name} (dernier jour gratuit : ${frDay(lastDay)}). La direction doit accepter les conditions commerciales ; rien n'est facturé pour la période pilote.`,
+            : `Période pilote terminée pour ${s.tenant.name} (dernier jour gratuit : ${frDay(lastDay)}). La direction doit accepter les conditions commerciales ; rien n'est facturé pour la période pilote.`) + graceText,
         },
       });
       await this.journals(tx, s, trial ? 'billing.trial_ended' : 'billing.pilot_ended', data);
       await this.notifyDirection(tx, s.tenantId, trial ? 'billing.trial_ended' : 'billing.pilot_ended',
         trial ? 'Votre essai de Cahiora est terminé' : 'Votre période pilote Cahiora est terminée',
-        `Votre ${trial ? 'essai gratuit' : 'période d’école pilote partenaire'} s’est terminé${trial ? '' : 'e'} le ${frDay(lastDay)}. Pour continuer, lisez et acceptez les conditions commerciales dans Paramètres › Abonnement Cahiora. Vos données sont conservées.`);
+        `Votre ${trial ? 'essai gratuit' : 'période d’école pilote partenaire'} s’est terminé${trial ? '' : 'e'} le ${frDay(lastDay)}. Pour continuer, lisez et acceptez les conditions commerciales dans Paramètres › Abonnement Cahiora. Vos données sont conservées.`
+        + (grace ? ` Vous gardez l’accès complet jusqu’au ${frDay(grace.graceEnd)} inclus (délai de grâce de ${graceDays} jours) ; ensuite, sans paiement validé, l’accès sera limité : ${LIMITED_KEEPS}.` : ''));
     });
+  }
+
+  /** Rappel avant la fin de l'essai (D-G5-30 A) : 3 jours avant, la veille et le dernier jour ; pour la direction seulement. */
+  private trialReminder(s: Sub, end: string, n: number, today: string, graceDays: number | null) {
+    return this.once(`trial-reminder:${s.id}:${end}:${n}`, 'TRIAL_REMINDER', s.tenantId, addDays(end, -n), async (tx) => {
+      await this.journals(tx, s, 'billing.trial_reminder', { trialEnd: end, daysBefore: n });
+      await this.notifyDirection(tx, s.tenantId, 'billing.trial_reminder',
+        n === 0 ? 'Dernier jour de votre essai de Cahiora' : `Votre essai de Cahiora se termine ${n === 1 ? 'demain' : `dans ${n} jours`}`,
+        `Votre essai gratuit se termine ${whenText(today, end)} (dernier jour gratuit). Ensuite, acceptez les conditions commerciales et régularisez votre abonnement dans Paramètres › Abonnement Cahiora.`
+        + (graceDays ? ` Vous gardez l’accès complet pendant ${graceDays} jours de grâce après l’essai.` : '') + ' Vos données sont conservées.');
+    });
+  }
+
+  /**
+   * Rappel avant la fin du délai de grâce ou d'une prolongation de Cahiora (D-G5-30 A, D-G5-41 A) : 3 jours avant, la
+   * veille et le dernier jour d'accès complet ; pour la direction seulement.
+   */
+  private accessReminder(s: Sub, phase: 'GRACE' | 'EXTENDED', until: string, n: number, today: string, pendingRequest: boolean) {
+    const grace = phase === 'GRACE';
+    const key = `${grace ? 'grace' : 'extension'}-reminder:${s.id}:${until}:${n}`;
+    return this.once(key, grace ? 'GRACE_REMINDER' : 'EXTENSION_REMINDER', s.tenantId, addDays(until, -n), async (tx) => {
+      const action = grace ? 'billing.grace_reminder' : 'billing.extension_reminder';
+      await this.journals(tx, s, action, { until, daysBefore: n, pendingRequest });
+      await this.notifyDirection(tx, s.tenantId, action,
+        n === 0 ? 'Dernier jour d’accès complet à Cahiora' : 'Régularisez votre abonnement Cahiora',
+        `${grace ? 'Le délai de grâce' : 'La prolongation accordée par Cahiora'} prend fin ${whenText(today, until)} : c’est le dernier jour d’accès complet. `
+        + (pendingRequest
+          ? 'Votre demande de régularisation attend la réponse de Cahiora : tant qu’elle attend, l’accès ne sera pas limité.'
+          : `Ensuite, sans paiement validé, l’accès sera limité : ${LIMITED_KEEPS}. Ouvrez Paramètres › Abonnement Cahiora et choisissez « Régulariser mon abonnement ».`));
+    });
+  }
+
+  /**
+   * Rappel du préavis (lecture 7 A) : dans ses dernières 24 heures, le jour et l'heure de la limitation ; pour la
+   * direction seulement, une fois par préavis.
+   */
+  private noticeReminder(s: Sub, until: Date, pendingRequest: boolean) {
+    const at = frDateTime(until, s.tenant.timezone);
+    return this.once(`notice-reminder:${s.id}:${until.toISOString()}`, 'NOTICE_REMINDER', s.tenantId, localDay(s.tenant.timezone, until), async (tx) => {
+      await this.journals(tx, s, 'billing.notice_reminder', { noticeUntil: until.toISOString(), graceEnd: iso(s.graceEnd), extendedUntil: iso(s.extendedUntil), pendingRequest });
+      await this.notifyDirection(tx, s.tenantId, 'billing.notice_reminder', 'Dernier jour du préavis : régularisez votre abonnement Cahiora',
+        `Le préavis donné par Cahiora après sa réponse à votre demande de régularisation prend fin le ${at} : jusque-là, l’accès reste complet. `
+        + (pendingRequest
+          ? 'Votre nouvelle demande de régularisation attend la réponse de Cahiora : tant qu’elle attend, l’accès ne sera pas limité.'
+          : `Ensuite, sans paiement validé, l’accès sera limité : ${LIMITED_KEEPS}. Ouvrez Paramètres › Abonnement Cahiora et choisissez « Régulariser mon abonnement ».`));
+    });
+  }
+
+  /**
+   * Accès limité (D-G5-30 A) : délai de grâce, prolongation et préavis passés (lecture 7 A), sans paiement validé ni
+   * demande de régularisation en attente (D-G5-42 A). L'abonnement est verrouillé le temps de la vérification : une
+   * demande envoyée ou une réponse donnée au même instant (avec son préavis) retient encore la limitation. Rien n'est
+   * supprimé.
+   */
+  private async limit(s: Sub, notice: Date | null) {
+    const graceEnd = iso(s.graceEnd);
+    const until = iso(s.extendedUntil);
+    const lastDay = [graceEnd, until].filter((x): x is string => !!x).sort().pop()!;
+    const tz = s.tenant.timezone;
+    const noticeAt = notice ? frDateTime(notice, tz) : null;
+    const firstLimitedDay = notice ? localDay(tz, notice) : addDays(lastDay, 1);
+    const done = await this.once(`access-limited:${s.id}:${graceEnd ?? '-'}:${until ?? '-'}`, 'ACCESS_LIMITED', s.tenantId, firstLimitedDay, async (tx) => {
+      await tx.$queryRaw`SELECT id FROM subscriptions WHERE id = ${s.id}::uuid FOR UPDATE`;
+      if (!PAYMENT_MEANS_ACTIVE && (await tx.regularizationRequest.count({ where: { tenantId: s.tenantId, status: 'PENDING' } }))) throw new AlreadyDone();
+      const now = new Date();
+      const n = await tx.subscription.updateMany({
+        where: { id: s.id, status: s.status, graceEnd: s.graceEnd, extendedUntil: s.extendedUntil, noticeUntil: s.noticeUntil },
+        data: { status: 'LIMITED', statusSince: now, limitedSince: now },
+      });
+      if (n.count !== 1) throw new AlreadyDone();
+      const data = { lastFullAccessDay: lastDay, graceEnd, extendedUntil: until, noticeUntil: notice?.toISOString() ?? null };
+      await tx.subscriptionEvent.create({ data: { subscriptionId: s.id, tenantId: s.tenantId, kind: 'ACCESS_LIMITED', fromStatus: s.status, toStatus: 'LIMITED', data, actorKind: 'system', actorName: SYSTEM } });
+      await tx.platformAlert.create({
+        data: {
+          tenantId: s.tenantId, kind: 'ACCESS_LIMITED', dueDate: day(firstLimitedDay),
+          message: `Accès limité pour ${s.tenant.name} : accès complet jusqu'au ${frDay(lastDay)}${noticeAt ? `, puis préavis après la réponse de Cahiora jusqu'au ${noticeAt}` : ''}, `
+            + 'sans paiement validé ni demande de régularisation en attente. Rien n\'est supprimé ; une prolongation se donne dans Commercial et facturation › Accès des clients.',
+        },
+      });
+      await this.journals(tx, s, 'billing.access_limited', data);
+      await this.notifyDirection(tx, s.tenantId, 'billing.access_limited', 'Accès limité à Cahiora',
+        (noticeAt
+          ? `Le préavis donné par Cahiora a pris fin le ${noticeAt} sans paiement validé : l’accès à Cahiora est désormais limité. `
+          : `L’accès complet de votre établissement a pris fin le ${frDay(lastDay)} sans paiement validé : l’accès à Cahiora est désormais limité. `)
+        + `${LIMITED_KEEPS.charAt(0).toUpperCase()}${LIMITED_KEEPS.slice(1)}. Pour retrouver l’accès complet, ouvrez Paramètres › Abonnement Cahiora et choisissez « Régulariser mon abonnement ».`);
+    });
+    if (done) forgetAccess(s.tenantId);
+    return done;
   }
 
   /** Alerte avant la fin de la gratuité d'un pilote, pour le Super Admin et pour la direction (§13). */

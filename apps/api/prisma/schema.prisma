@@ -43,14 +43,16 @@ model Tenant {
   updatedAt     DateTime     @updatedAt
 
   /// Facturation de Cahiora (lot G5a) : zone de la plateforme, jamais lue par le rôle des écoles.
-  subscription         Subscription?
-  billingCalendars     BillingCalendar[]
+  subscription           Subscription?
+  billingCalendars       BillingCalendar[]
   /// Prestations complémentaires (lot G5g) : tarifs particuliers, remises et gratuités propres à l'établissement.
-  serviceRates         ServiceRate[]
+  serviceRates           ServiceRate[]
   /// Comptages des élèves facturables (lot G5b) : des nombres seulement, la liste nominative reste dans l'école.
-  billingCounts        BillingCount[]
+  billingCounts          BillingCount[]
   /// Lignes des documents provisoires de Cahiora (lot G5c) qui concernent l'établissement.
-  billingDocumentLines BillingDocumentLine[]
+  billingDocumentLines   BillingDocumentLine[]
+  /// Demandes de régularisation de la direction (lot G5d-1) : zone de la plateforme, lues par l'école par ses fonctions.
+  regularizationRequests RegularizationRequest[]
 
   @@index([groupId])
   @@map("tenants")
@@ -271,7 +273,7 @@ model BillingParameter {
   key           String
   /// Monnaie d'un montant (XOF…) ; vide pour une durée ou un pourcentage.
   currency      String?
-  /// Montant dans la monnaie, nombre de jours ou de mois, ou pourcentage en centièmes (1500 = 15 %).
+  /// Montant dans la monnaie, nombre d'heures, de jours ou de mois, ou pourcentage en centièmes (1500 = 15 %).
   value         Int
   effectiveFrom DateTime @db.Date
   reason        String
@@ -328,28 +330,72 @@ enum SubscriptionStatus {
 /// Abonnement d'un établissement à Cahiora (§4 et §13) : un seul par établissement, jamais supprimé. L'état change
 /// par des transitions contrôlées, chacune inscrite dans subscription_events (en ajout seul).
 model Subscription {
-  id              String              @id @default(uuid()) @db.Uuid
-  tenantId        String              @unique @map("tenant_id") @db.Uuid
-  tenant          Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  status          SubscriptionStatus
-  statusSince     DateTime            @default(now())
-  trialStart      DateTime?           @db.Date
-  trialEnd        DateTime?           @db.Date
-  trialDays       Int?
-  pilotStart      DateTime?           @db.Date
-  pilotEnd        DateTime?           @db.Date
-  pilotMonths     Int?
+  id                     String                  @id @default(uuid()) @db.Uuid
+  tenantId               String                  @unique @map("tenant_id") @db.Uuid
+  tenant                 Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  status                 SubscriptionStatus
+  statusSince            DateTime                @default(now())
+  trialStart             DateTime?               @db.Date
+  trialEnd               DateTime?               @db.Date
+  trialDays              Int?
+  pilotStart             DateTime?               @db.Date
+  pilotEnd               DateTime?               @db.Date
+  pilotMonths            Int?
   /// Conditions commerciales acceptées par la direction : version, date et auteur.
-  acceptedTermsId String?             @db.Uuid
-  acceptedAt      DateTime?
-  acceptedByName  String?
+  acceptedTermsId        String?                 @db.Uuid
+  acceptedAt             DateTime?
+  acceptedByName         String?
   /// Tarif en vigueur le jour de l'acceptation, figé : un changement de tarif ultérieur ne le modifie jamais (§2).
-  acceptedTariff  Json?
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  events          SubscriptionEvent[]
+  acceptedTariff         Json?
+  /// Délai de grâce après la fin de la gratuité (lot G5d-1, D-G5-30 A) : accès complet du premier au dernier jour.
+  /// Fixé une seule fois, au passage en attente ; vide pour une gratuité finie avant ce lot (jamais limitée seule).
+  graceStart             DateTime?               @db.Date
+  graceEnd               DateTime?               @db.Date
+  /// Prolongation exceptionnelle du Super Admin (D-G5-43 A) : accès complet jusqu'à ce jour inclus.
+  extendedUntil          DateTime?               @db.Date
+  /// Début de l'accès limité (statut LIMITED), posé par la tâche planifiée.
+  limitedSince           DateTime?
+  /// Préavis après la réponse de Cahiora à une demande de régularisation (lecture 7 A, 20 novembre 2026) : fin du
+  /// préavis, et fin du délai de grâce de l'échéance pour laquelle il a été donné (une seule fois par échéance).
+  noticeUntil            DateTime?
+  noticeGraceEnd         DateTime?               @db.Date
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  events                 SubscriptionEvent[]
+  regularizationRequests RegularizationRequest[]
 
   @@map("subscriptions")
+}
+
+enum RegularizationRequestStatus {
+  PENDING
+  ANSWERED
+}
+
+/// Demande de régularisation de la direction (lot G5d-1, D-G5-42 A) : horodatée et journalisée ; seule la réponse de
+/// Cahiora s'y inscrit, une fois. Zone de la plateforme : l'école la lit et l'écrit par ses fonctions de la base.
+model RegularizationRequest {
+  id                 String                      @id @default(uuid()) @db.Uuid
+  tenantId           String                      @map("tenant_id") @db.Uuid
+  tenant             Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  subscriptionId     String                      @db.Uuid
+  subscription       Subscription                @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+  status             RegularizationRequestStatus @default(PENDING)
+  /// État de l'abonnement au moment de la demande (en attente ou accès limité).
+  subscriptionStatus SubscriptionStatus
+  message            String?
+  requestedById      String?                     @db.Uuid
+  requestedByName    String
+  requestedAt        DateTime                    @default(now())
+  ip                 String?
+  answeredById       String?                     @db.Uuid
+  answeredByName     String?
+  answeredAt         DateTime?
+  /// Réponse de Cahiora, lue par la direction (signée « Cahiora »).
+  answer             String?
+
+  @@index([tenantId, requestedAt])
+  @@map("regularization_requests")
 }
 
 /// Historique d'un abonnement, en ajout seul : ouverture, dates du pilote, fin d'essai, acceptation…

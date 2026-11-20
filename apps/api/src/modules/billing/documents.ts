@@ -35,8 +35,11 @@ import {
  * fiscale » (§16 ; les factures attendent les mentions légales et fiscales, lot G5f). Aucun paiement, aucun SMS.
  */
 
-/** Conditions commerciales acceptées (lot G5a) : seuls ces abonnements reçoivent des documents (D-G5-1). */
-export const ACCEPTED_STATUSES = ['AWAITING_PAYMENT', 'ACTIVE', 'LIMITED'] as const;
+/**
+ * Seuls les abonnements dont la direction a accepté les conditions commerciales (lot G5a) reçoivent des documents
+ * (D-G5-1). Depuis le lot G5d-1, un accès peut être limité avant toute acceptation : c'est la date d'acceptation qui
+ * compte, plus l'état de l'abonnement (la base fait le même contrôle à chaque ligne tirée d'un comptage).
+ */
 
 /** École d'un groupe de plusieurs établissements : ce qu'elle verra des documents du groupe attend D-G5-19. */
 export const GROUP_SCHOOL_PENDING = 'En attente de la décision D-G5-19 (ce que voit la direction d’un établissement de groupe) : les documents de Cahiora sont adressés à votre groupe.';
@@ -95,8 +98,8 @@ export function documentLabel(kind: DocumentKind, total: number) {
 }
 
 /** Tarif figé à l'acceptation des conditions (lot G5a), dans la monnaie de l'établissement ; null sinon. */
-function acceptedTariff(status: string | undefined, json: Prisma.JsonValue | null | undefined, currency: string) {
-  if (!status || !(ACCEPTED_STATUSES as readonly string[]).includes(status)) return { tariff: null, blocked: null };
+function acceptedTariff(acceptedAt: Date | null | undefined, json: Prisma.JsonValue | null | undefined, currency: string) {
+  if (!acceptedAt) return { tariff: null, blocked: null };
   const t = json as { currency?: unknown; pricePerPupil?: unknown; minimum?: unknown } | null;
   const valid = t && Number.isSafeInteger(t.pricePerPupil) && (t.pricePerPupil as number) >= 1 && Number.isSafeInteger(t.minimum) && (t.minimum as number) >= 0;
   if (!valid) return { tariff: null, blocked: 'INFORMATION MANQUANTE : tarif accepté illisible' };
@@ -161,7 +164,7 @@ export class BillingDocumentsService {
           orderBy: [{ name: 'asc' }, { createdAt: 'asc' }],
           select: {
             id: true, name: true, timezone: true, currency: true, groupId: true,
-            subscription: { select: { id: true, status: true, acceptedTariff: true, events: { where: { kind: { in: ['TRIAL_ENDED', 'PILOT_ENDED'] } }, select: { data: true } } } },
+            subscription: { select: { id: true, status: true, acceptedAt: true, acceptedTariff: true, graceEnd: true, events: { where: { kind: { in: ['TRIAL_ENDED', 'PILOT_ENDED'] } }, select: { data: true } } } },
             billingCalendars: { select: { yearLabel: true, version: true, startDate: true, endDate: true } },
             billingCounts: { where: { stage: 'FROZEN' }, select: { id: true, kind: true, stage: true, referenceDate: true, yearLabel: true, cumulative: true, academicYearId: true } },
             billingDocumentLines: {
@@ -176,9 +179,9 @@ export class BillingDocumentsService {
       },
     });
     if (!g) throw new NotFoundException('Client introuvable');
-    const establishments: (EstablishmentFacts & { timezone: string; currency: string; blocked: string | null })[] = [];
+    const establishments: (EstablishmentFacts & { timezone: string; currency: string; blocked: string | null; graceEnd: string | null })[] = [];
     for (const t of g.tenants) {
-      const { tariff, blocked } = acceptedTariff(t.subscription?.status, t.subscription?.acceptedTariff, t.currency);
+      const { tariff, blocked } = acceptedTariff(t.subscription?.acceptedAt, t.subscription?.acceptedTariff, t.currency);
       const lastFreeDay = (t.subscription?.events ?? []).map((e) => (e.data as Record<string, unknown> | null)?.lastFreeDay).filter(isDay).sort().pop() ?? null;
       // Élèves facturables de chaque comptage figé, exclusions validées depuis retirées (calculés par la base).
       const billable = new Map((await this.platform.$queryRaw<{ count_id: string; billable: number }[]>`SELECT * FROM billing_counts_billable(${t.id}::uuid)`)
@@ -199,7 +202,7 @@ export class BillingDocumentsService {
         const rows = await this.platform.inTenant(t.id, (tx) => tx.academicYear.findMany({ where: { id: { in: missing } }, select: { label: true, startDate: true, endDate: true } }));
         for (const y of rows) years[y.label] ??= { label: y.label, startDate: iso(y.startDate)!, endDate: iso(y.endDate)! };
       }
-      establishments.push({ tenantId: t.id, name: t.name, timezone: t.timezone, currency: t.currency, tariff, blocked, lastFreeDay, counts, lines, years });
+      establishments.push({ tenantId: t.id, name: t.name, timezone: t.timezone, currency: t.currency, tariff, blocked, lastFreeDay, graceEnd: iso(t.subscription?.graceEnd), counts, lines, years });
     }
     return { group: { id: g.id, name: g.name }, establishments };
   }
@@ -216,7 +219,7 @@ export class BillingDocumentsService {
   /** Clients dont au moins un établissement a accepté les conditions commerciales. */
   private async clientGroups() {
     return this.platform.schoolGroup.findMany({
-      where: { tenants: { some: { subscription: { status: { in: [...ACCEPTED_STATUSES] } } } } }, select: { id: true, name: true }, orderBy: { name: 'asc' },
+      where: { tenants: { some: { subscription: { acceptedAt: { not: null } } } } }, select: { id: true, name: true }, orderBy: { name: 'asc' },
     });
   }
 
@@ -277,8 +280,11 @@ export class BillingDocumentsService {
     if (currencies.length !== 1) throw new Error('Établissements d’un même document dans des monnaies différentes');
     const currency = currencies[0];
     const firstLine = plan.lines.find((l) => FREE_END_KINDS.includes(l.count.kind));
-    const lastFreeDay = firstLine ? tenants.find((t) => t.tenantId === firstLine.tenantId)!.lastFreeDay : null;
-    const dueDate = lastFreeDay ? firstDueDate(lastFreeDay, issueDay) : null;
+    const first = firstLine ? tenants.find((t) => t.tenantId === firstLine.tenantId)! : null;
+    const lastFreeDay = first?.lastFreeDay ?? null;
+    // Délai de grâce fixé dans l'abonnement à la fin de la gratuité (lot G5d-1), sinon 15 jours (D-G5-30 A).
+    const graceEnd = lastFreeDay ? first!.graceEnd ?? addDays(lastFreeDay, GRACE_DAYS) : null;
+    const dueDate = lastFreeDay ? firstDueDate(lastFreeDay, issueDay, graceEnd) : null;
     const lines = plan.lines.map((l) => ({
       tenantId: l.tenantId, label: subscriptionLineLabel(l.name, l.count.kind, l.count.date), amount: l.line.due, countId: l.count.id, pupils: l.line.pupils,
       pupilsChange: l.line.pupilsChange, pricePerPupil: l.line.pricePerPupil, minimum: l.line.minimum, minimumApplied: l.line.minimumApplied, fullYear: l.line.fullYear,
@@ -292,7 +298,7 @@ export class BillingDocumentsService {
       establishments: tenants.map((t) => ({ tenantId: t.tenantId, name: t.name })),
       tariff: { currency, pricePerPupil: plan.lines[0].line.pricePerPupil, minimum: plan.lines[0].line.minimum },
       countKind: kind, countDate: plan.date, statement: plan.total === 0,
-      graceEnd: lastFreeDay ? addDays(lastFreeDay, GRACE_DAYS) : null,
+      graceEnd,
       rounded: plan.lines.some((l) => l.line.rounded) ? 'FLOOR' : null,
       decisions: { ...this.decisions },
     };

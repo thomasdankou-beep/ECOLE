@@ -185,14 +185,18 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
       ['TRIAL_OPENED', null, 'TRIAL', 'platform'], ['TRIAL_ENDED', 'TRIAL', 'AWAITING_ACCEPTANCE', 'system'],
     ]);
     expect(await admin.platformAlert.count({ where: { tenantId: S.A.id, kind: 'TRIAL_ENDED' } })).toBe(1);
-    expect(await admin.billingJob.count({ where: { tenantId: S.A.id } })).toBe(1);
+    // Lot G5d-1 (D-G5-30 A) : le rappel du dernier jour de l'essai est parti la veille, puis la fin de l'essai.
+    expect(await admin.billingJob.count({ where: { tenantId: S.A.id } })).toBe(2);
     const notes = await notificationsOf(S.A.id);
-    expect(notes.map((n) => [n.kind, n.channel, n.userId])).toEqual([['billing.trial_ended', 'IN_APP', S.A.directionId]]);
-    expect(notes[0].body).toMatch(/Paramètres › Abonnement Cahiora/);
+    expect(notes.map((n) => [n.kind, n.channel, n.userId])).toEqual([['billing.trial_reminder', 'IN_APP', S.A.directionId], ['billing.trial_ended', 'IN_APP', S.A.directionId]]);
+    expect(notes[1].body).toMatch(/Paramètres › Abonnement Cahiora/);
     expect(await inTenant(S.A.id, (tx) => tx.user.count())).toBe(users);
     expect(await schoolJournal(S.A.id, 'billing.trial_ended')).toHaveLength(1);
     // Un pilote ne s'ouvre pas sur un abonnement qui attend l'acceptation.
     expect((await pf.post(`/billing/establishments/${S.A.id}/pilot`, { startDate: today, reason: 'Essai de conversion refusée', code: await code() })).status).toBe(409);
+    // Lot G5d-1 : les passages simulés des tests suivants vont des mois plus loin ; la demande de régularisation de la
+    // direction retient la limitation (D-G5-42 A), et A reste en attente d'acceptation pour la suite de ce fichier.
+    expect((await school(S.A.direction).post('/settings/subscription/regularization-requests', { message: 'Demande fictive (test)' })).status).toBe(201);
   });
 
   it('Tests 21 et 22 : école pilote, N mois gratuits depuis l’activation saisie, alertes à 30 et 7 jours puis fin, chacune une seule fois', async () => {
@@ -250,18 +254,37 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
     expect(unknown.status).toBe(400);
     expect((await school(S.A.direction).post('/settings/subscription/accept', { termsId: '00000000-0000-4000-8000-000000000000', accepted: false })).status).toBe(400);
     expect((await school(S.A.comptable!).post('/settings/subscription/accept', { termsId: '00000000-0000-4000-8000-000000000000', accepted: true })).status).toBe(403);
+    // La case doit être cochée pour de vrai : "false", "oui" ou 1 ne valent pas une acceptation.
+    for (const accepted of ['false', 'oui', 1]) {
+      const r = await school(S.A.direction).post('/settings/subscription/accept', { termsId: '00000000-0000-4000-8000-000000000000', accepted });
+      expect(r.status).toBe(400);
+      expect(String(r.body.message)).toMatch(/Cochez la case pour accepter les conditions/);
+    }
 
     // Conditions fictives : une version future, puis une version en vigueur aujourd'hui.
     const body = 'Texte fictif publié par les tests automatiques du lot G5a. Ce ne sont pas les conditions commerciales de Cahiora.';
-    expect((await pf.post('/billing/terms', { title: 'Conditions fictives (test)', body, effectiveFrom: addDays(today, -1), code: await code() })).status).toBe(400);
-    const f = await pf.post('/billing/terms', { title: `Conditions fictives futures ${stamp}`, body, effectiveFrom: addDays(today, 1), code: await code() });
+    expect((await pf.post('/billing/terms', { title: 'Conditions fictives (test)', body, effectiveFrom: addDays(today, -1), definitive: true, code: await code() })).status).toBe(400);
+    // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est publié
+    // (jamais de conditions d'essai présentées comme un contrat réel).
+    const versionsBefore = await admin.commercialTerms.count();
+    for (const definitive of [undefined, false, 'false', 'oui', 1]) {
+      const r = await pf.post('/billing/terms', { title: `Conditions sans attestation ${stamp}`, body, effectiveFrom: today, ...(definitive === undefined ? {} : { definitive }), code: await code() });
+      expect(r.status).toBe(400);
+      expect(String(r.body.message)).toMatch(/seule la version définitive et validée des conditions commerciales de Cahiora peut être publiée/);
+    }
+    expect(await admin.commercialTerms.count()).toBe(versionsBefore);
+    const f = await pf.post('/billing/terms', { title: `Conditions fictives futures ${stamp}`, body, effectiveFrom: addDays(today, 1), definitive: true, code: await code() });
     expect(f.status).toBe(201);
     terms.future = f.body.id;
-    const c = await pf.post('/billing/terms', { title: `Conditions fictives ${stamp}`, body, effectiveFrom: today, code: await code() });
+    const c = await pf.post('/billing/terms', { title: `Conditions fictives ${stamp}`, body, effectiveFrom: today, definitive: true, code: await code() });
     expect(c.status).toBe(201);
     terms.current = c.body.id;
     expect(c.body.version).toBe(f.body.version + 1);
     expect((await pf.get('/billing/terms')).body.current.id).toBe(terms.current);
+    const published = await admin.platformAuditLog.findMany({ where: { action: 'billing.terms_published', adminId: sa.id }, orderBy: { createdAt: 'asc' } });
+    expect(published.slice(-2).map((l) => l.data)).toEqual([f.body.version, c.body.version].map((version) => expect.objectContaining({
+      version, attestation: 'Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora, validée pour être proposée aux établissements. Ce n’est ni un texte d’essai ni un exemple.',
+    })));
     const v = (await school(S.A.direction).get('/settings/subscription')).body;
     expect(v.terms).toMatchObject({ id: terms.current, title: `Conditions fictives ${stamp}`, effectiveFrom: today });
 
@@ -446,7 +469,8 @@ describe('Lot G5a · facturation : abonnements, gratuités, tarifs, calendriers 
     await refused(`DELETE FROM platform_alerts WHERE tenant_id = '${A}'`);
     await refused(`UPDATE platform_alerts SET message = 'X' WHERE tenant_id = '${A}'`);
     for (const t of TABLES) await refused(`TRUNCATE ${t} CASCADE`);
-    expect(await admin.subscriptionEvent.count({ where: { tenantId: A } })).toBe(3);
+    // Ouverture, fin de l'essai, demande de régularisation (lot G5d-1) et acceptation.
+    expect(await admin.subscriptionEvent.count({ where: { tenantId: A } })).toBe(4);
     // Seule la lecture d'une alerte se note, une fois.
     const alert = await admin.platformAlert.findFirstOrThrow({ where: { tenantId: A } });
     expect((await pf.post(`/billing/alerts/${alert.id}/read`)).body).toEqual({ ok: true });

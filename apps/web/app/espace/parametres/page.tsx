@@ -1,5 +1,6 @@
 'use client';
 
+import { useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { ImageUp, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
@@ -34,10 +35,11 @@ const CYCLES: Record<string, string> = { COLLEGE: 'Collège', LYCEE_GENERAL: 'Ly
 export default function Parametres() {
   const q = useApi<Settings>('/settings');
   const [tab, setTab] = useState('etablissement');
+  // Rubrique demandée par l'adresse, relue à chaque navigation (ex. « Régulariser mon abonnement » depuis le bandeau).
+  const asked = useSearchParams().get('rubrique');
   useEffect(() => {
-    const r = new URLSearchParams(window.location.search).get('rubrique');
-    if (r) setTab(r);
-  }, []);
+    if (asked) setTab(asked);
+  }, [asked]);
   return (
     <>
       <PageHeader title="Paramètres" subtitle="Tout ce que l’école renseigne elle-même : identité officielle, logo et site public, classes, matières et coefficients, salles et ateliers, année, règles des bulletins." />

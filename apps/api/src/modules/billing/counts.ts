@@ -7,7 +7,7 @@ import { Throttle } from '@nestjs/throttler';
 import { Prisma, Subscription } from '@prisma/client';
 import { IsIn, IsOptional, IsString, IsUUID, Length, Matches, MaxLength } from 'class-validator';
 import { AuditService } from '../../common/audit.service';
-import { Actor, Can, CurrentActor, WholeSchool } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, WholeSchool } from '../../common/auth';
 import { localDay } from '../../common/country';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { FilesService, MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.service';
@@ -432,7 +432,7 @@ export class CountsController {
   @Get('settings/billing-counts/:id') @Can('settings.manage') @Header('Cache-Control', 'no-store')
   one(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.schoolCount(a, id); }
 
-  @Post('settings/billing-counts/:id/corrections') @Can('settings.manage') @WholeSchool('Seule la direction de tout l’établissement corrige un comptage')
+  @Post('settings/billing-counts/:id/corrections') @AllowedWhenLimited() @Can('settings.manage') @WholeSchool('Seule la direction de tout l’établissement corrige un comptage')
   @ApiConsumes('multipart/form-data')
   @Throttle(UPLOAD_THROTTLE)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
@@ -440,7 +440,7 @@ export class CountsController {
     return this.s.requestCorrection(a, id, dto, file);
   }
 
-  @Post('settings/billing-counts/corrections/:id/decision') @Can('settings.manage') @WholeSchool('Seule la direction de tout l’établissement décide d’une exclusion')
+  @Post('settings/billing-counts/corrections/:id/decision') @AllowedWhenLimited() @Can('settings.manage') @WholeSchool('Seule la direction de tout l’établissement décide d’une exclusion')
   @Throttle({ default: { limit: 30, ttl: 60000 } })
   decide(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CountDecisionDto) { return this.s.decide(a, id, dto); }
 }

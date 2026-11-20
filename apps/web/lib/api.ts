@@ -23,6 +23,22 @@ export function setSession(token: string | null) {
 export function setActiveRole(role: string | null) {
   activeRole = role;
 }
+
+/**
+ * Session de la connexion en cours, lue dans le jeton d'accès (le même pour tous les onglets de cette connexion,
+ * renouvellements compris) : sert à ce qui ne doit se produire qu'une fois par connexion. Rien n'est vérifié ici :
+ * l'API reste seule juge du jeton.
+ */
+export function currentSessionId(): string | null {
+  try {
+    const part = accessToken?.split('.')[1];
+    if (!part) return null;
+    const payload = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as { sid?: unknown };
+    return typeof payload.sid === 'string' ? payload.sid : null;
+  } catch {
+    return null;
+  }
+}
 export function onSessionLost(fn: () => void) {
   listeners.add(fn);
   return () => {

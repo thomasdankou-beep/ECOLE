@@ -172,6 +172,22 @@ export const AUDIT_LABELS: Record<string, string> = {
   'billing.service_rule_added': 'Cahiora : prix d’une prestation pour l’établissement (tarif particulier, remise ou gratuité)',
   'billing.service_rule_ended': 'Cahiora : règle de prix d’une prestation arrêtée',
   'billing.service_rule_cancelled': 'Cahiora : règle de prix d’une prestation annulée avant son début',
+  // Documents provisoires de Cahiora pour l'établissement (lot G5c).
+  'billing.document_issued': 'Cahiora : document provisoire de l’abonnement émis (pas une facture)',
+  'billing.credit_note_issued': 'Cahiora : avoir provisoire émis (pas une facture)',
+  'billing.service_quote_issued': 'Cahiora : devis d’une prestation émis',
+  'billing.service_proforma_issued': 'Cahiora : proforma d’une prestation émise (pas une facture)',
+  // Accès selon le paiement de l'abonnement (lot G5d-1).
+  'billing.trial_reminder': 'Cahiora : rappel avant la fin de l’essai',
+  'billing.grace_reminder': 'Cahiora : rappel avant la fin du délai de grâce',
+  'billing.extension_reminder': 'Cahiora : rappel avant la fin de la prolongation',
+  'billing.access_limited': 'Cahiora : accès limité, abonnement non régularisé (aucune donnée supprimée)',
+  'billing.access_extended': 'Cahiora : accès complet prolongé',
+  'billing.access_extension_renewed': 'Cahiora : accès complet prolongé à nouveau (renouvellement exceptionnel)',
+  'billing.access_extension_shortened': 'Cahiora : fin de la prolongation de l’accès complet avancée',
+  'billing.notice_reminder': 'Cahiora : rappel avant la fin du préavis',
+  'billing.regularization_requested': 'Demande de régularisation de l’abonnement envoyée à Cahiora',
+  'billing.regularization_answered': 'Cahiora : réponse à la demande de régularisation',
 };
 
 export const auditLabel = (action: string) => AUDIT_LABELS[action] ?? action;

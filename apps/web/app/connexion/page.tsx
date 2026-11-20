@@ -7,6 +7,7 @@ import { Eye, EyeOff } from 'lucide-react';
 import { AuthShell } from '@/components/site/auth-shell';
 import { RecoveryCodesPanel } from '@/components/recovery-codes';
 import { Button, ErrorNote, Field, Input } from '@/components/ui';
+import { loginAlert } from '@/lib/access';
 import { publicPost, setSession } from '@/lib/api';
 import { usePublicSchool } from '@/lib/public-school';
 import { tenantOrThrow } from '@/lib/tenant';
@@ -58,6 +59,7 @@ export default function Connexion() {
 
   async function open(r: Tokens) {
     leaving.current = true;
+    loginAlert.reset();
     setSession(r.accessToken);
     await auth.reload();
     router.replace(r.mustChangePassword ? '/espace/compte?premiere=1' : r.mustSetupTwoFactor ? '/espace/compte?securite=1' : '/espace');
@@ -76,6 +78,7 @@ export default function Connexion() {
       // Jeton de 10 minutes pour configurer le nouveau téléphone sans le code de l'ancien.
       try { sessionStorage.setItem('erp.reconfigure', r.reconfigureToken); } catch { /* il faudra un nouveau code de récupération */ }
       leaving.current = true;
+      loginAlert.reset();
       setSession(r.accessToken);
       await auth.reload();
       router.replace(r.mustChangePassword ? '/espace/compte?premiere=1' : `/espace/compte?reconfigurer=1&restants=${r.recoveryCodesRemaining ?? ''}`);
@@ -96,6 +99,7 @@ export default function Connexion() {
         go('newphone');
       } else if (step === 'newphone') {
         const r = await publicPost<Tokens & { recoveryCodes: string[] }>('/auth/2fa/reenroll/finish', { challenge, setupToken: setup?.setupToken, code: code.trim() });
+        loginAlert.reset();
         setSession(r.accessToken);
         setDone(r);
         setSetup(null);

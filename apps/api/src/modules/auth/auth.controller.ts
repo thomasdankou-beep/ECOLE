@@ -4,7 +4,7 @@ import { Throttle } from '@nestjs/throttler';
 import { IsNotEmpty, IsOptional, IsString, Length, MaxLength } from 'class-validator';
 import type { Request, Response } from 'express';
 import { config } from '../../config';
-import { Actor, AllowPendingPassword, CurrentActor, Public } from '../../common/auth';
+import { Actor, AllowPendingPassword, AllowedWhenLimited, CurrentActor, Public } from '../../common/auth';
 import { AuthService } from './auth.service';
 
 class LoginDto {
@@ -58,6 +58,8 @@ class EnableDto {
 const COOKIE = 'erp_rt';
 
 @ApiTags('Authentification')
+// Lot G5d-1 : la sécurité des comptes reste ouverte pendant l'accès limité de l'établissement.
+@AllowedWhenLimited()
 @Controller('auth')
 export class AuthController {
   constructor(private auth: AuthService) {}

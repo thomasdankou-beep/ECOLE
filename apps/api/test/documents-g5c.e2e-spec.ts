@@ -239,7 +239,7 @@ describe('Lot G5c · documents provisoires de l’abonnement (données fictives)
     expect(trialCount).toMatchObject({ stage: 'FROZEN', pupils: 90, cumulative: 90 });
 
     const body = 'Texte fictif publié par les tests automatiques du lot G5c. Ce ne sont pas les conditions commerciales de Cahiora.';
-    const terms = await pf.post('/billing/terms', { title: `Conditions fictives G5c ${stamp}`, body, effectiveFrom: T, code: await code() });
+    const terms = await pf.post('/billing/terms', { title: `Conditions fictives G5c ${stamp}`, body, effectiveFrom: T, definitive: true, code: await code() });
     expect(terms.status).toBe(201);
     termsId = terms.body.id;
     for (const s of [K, G1, G2]) {
@@ -764,6 +764,41 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     expect(mineOnly.map((x: Exclusion & { status: string }) => `${x.tenant.id === K.id ? 'K' : 'L'}:${x.status}`).sort()).toEqual([
       'K:REFUSED', 'K:VALIDATED', 'K:VALIDATED', 'L:VALIDATED',
     ]);
+  });
+
+  it('réserve de Dankou du 20 novembre 2026 (lecture 14) : montant demandé et échéance suivent les documents successifs et les avoirs', async () => {
+    type Line = { kind: string; reference: string; amount: number; dueDate: string | null; relatedReference: string | null; label: string };
+    const docs = (await docsOf(K.groupId)).filter((x) => x.kind === 'SUBSCRIPTION' || x.kind === 'CREDIT_NOTE');
+    const subs = docs.filter((x) => x.kind === 'SUBSCRIPTION');
+    const credits = docs.filter((x) => x.kind === 'CREDIT_NOTE');
+    // K : premier document (fin de l'essai), complément de la première régularisation, relevé à 0 F, puis deux avoirs.
+    expect(subs.map((x) => x.total)).toEqual([share(45_000), share(50_500) - share(45_000), 0]);
+    expect(credits).toHaveLength(2);
+    const r = (await as(K.direction).get('/settings/subscription')).body.regularization;
+    const expected = subs.reduce((n, x) => n + x.total, 0) - credits.reduce((n, x) => n + x.total, 0);
+    expect(expected).toBeGreaterThan(0);
+    expect(r.requested).toBe(expected);
+    // Chaque document et chaque avoir est détaillé, dans l'ordre d'émission ; la somme des lignes est le montant demandé.
+    expect((r.lines as Line[]).map((l) => [l.kind, l.reference, l.amount, l.dueDate, l.relatedReference])).toEqual(
+      docs.map((x) => [x.kind, x.reference, x.kind === 'CREDIT_NOTE' ? -x.total : x.total, dayOf(x.dueDate), docs.find((y) => y.id === x.relatedDocumentId)?.reference ?? null]),
+    );
+    expect((r.lines as Line[]).reduce((n, l) => n + l.amount, 0)).toBe(expected);
+    expect((r.lines as Line[]).map((l) => l.label)).toEqual([
+      'Proforma de l’abonnement', 'Proforma de l’abonnement', 'Relevé de l’abonnement, rien à payer', 'Avoir provisoire', 'Avoir provisoire',
+    ]);
+    // Échéance : celle du premier document, dernier jour de grâce (G5c) ; le complément n'en a pas encore, l'écran le dit.
+    expect(r).toMatchObject({ documents: 3, dueDate: d(8), dueDatePending: true, groupPending: null });
+
+    // L : un seul document, au minimum annuel, sans avoir ; son échéance est la sienne, rien n'est en attente.
+    const [docL] = await docsOf(L.groupId);
+    expect((await as(L.direction).get('/settings/subscription')).body.regularization).toMatchObject({
+      documents: 1, requested: docL.total, dueDate: dayOf(docL.dueDate), dueDatePending: false,
+      lines: [{ kind: 'SUBSCRIPTION', reference: docL.reference, amount: docL.total, dueDate: dayOf(docL.dueDate), relatedReference: null }],
+    });
+    // Établissement d'un groupe de plusieurs établissements : rien n'est montré tant que D-G5-19 attend.
+    expect((await as(G1.direction).get('/settings/subscription')).body.regularization).toMatchObject({
+      requested: null, documents: 0, dueDate: null, dueDatePending: false, lines: [], groupPending: expect.stringContaining('D-G5-19'),
+    });
   });
 });
 

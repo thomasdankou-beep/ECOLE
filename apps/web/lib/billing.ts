@@ -1,4 +1,4 @@
-/** Libellés des actions de la facturation (lots G5a, G5b et G5g) dans les journaux de la plateforme et des groupes. */
+/** Libellés des actions de la facturation (lots G5a, G5b, G5c, G5d-1 et G5g) dans les journaux de la plateforme et des groupes. */
 export const BILLING_ACTIONS: Record<string, string> = {
   'billing.trial_opened': 'Facturation : essai gratuit ouvert',
   'billing.pilot_opened': 'Facturation : école pilote partenaire activée',
@@ -12,8 +12,8 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.count_frozen': 'Comptages : comptage des élèves figé',
   'billing.count_blocked': 'Comptages : comptage en attente, année scolaire absente',
   'billing.count_exclusion_requested': 'Comptages : exclusion demandée par la direction',
-  'billing.count_exclusion_validated': 'Comptages : exclusion validée par la direction',
-  'billing.count_exclusion_refused': 'Comptages : exclusion refusée par la direction',
+  'billing.count_exclusion_validated': 'Comptages : exclusion validée',
+  'billing.count_exclusion_refused': 'Comptages : exclusion refusée',
   'billing.count_departure_dated': 'Comptages : date d’un départ fixée par la direction',
   'billing.terms_published': 'Facturation : conditions commerciales publiées',
   'billing.parameter_added': 'Facturation : nouvelle valeur d’un paramètre tarifaire',
@@ -25,4 +25,18 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.service_rule_added': 'Prestations : nouveau prix, remise, tarif particulier ou gratuité',
   'billing.service_rule_ended': 'Prestations : règle de prix arrêtée',
   'billing.service_rule_cancelled': 'Prestations : règle de prix annulée avant son début',
+  'billing.document_issued': 'Documents : document provisoire de l’abonnement émis (pas une facture)',
+  'billing.credit_note_issued': 'Documents : avoir provisoire émis (pas une facture)',
+  'billing.service_quote_issued': 'Documents : devis d’une prestation émis',
+  'billing.service_proforma_issued': 'Documents : proforma d’une prestation émise (pas une facture)',
+  'billing.trial_reminder': 'Accès : rappel avant la fin de l’essai',
+  'billing.grace_reminder': 'Accès : rappel avant la fin du délai de grâce',
+  'billing.extension_reminder': 'Accès : rappel avant la fin de la prolongation',
+  'billing.access_limited': 'Accès : accès limité, abonnement non régularisé',
+  'billing.access_extended': 'Accès : accès complet prolongé par Cahiora',
+  'billing.access_extension_renewed': 'Accès : renouvellement exceptionnel d’une prolongation',
+  'billing.access_extension_shortened': 'Accès : fin d’une prolongation avancée',
+  'billing.notice_reminder': 'Accès : rappel avant la fin du préavis',
+  'billing.regularization_requested': 'Accès : demande de régularisation de la direction',
+  'billing.regularization_answered': 'Accès : réponse de Cahiora à une demande de régularisation',
 };
