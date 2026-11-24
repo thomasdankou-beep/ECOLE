@@ -7,8 +7,18 @@
 # À la fin, un résumé : OK, ATTENTION ou BLOQUANT pour chaque point.
 # Il se relance tel quel juste avant et juste après la mise à jour : l'empreinte des données scolaires ne doit pas changer.
 #
-# Sur le serveur (Terminal hPanel), sans rien changer au code en ligne :
-#   cd ~/ecole && git fetch -q origin claude/project-thread-45wtn6-ajustements && sh -c "$(git show FETCH_HEAD:controle-production.sh)"
+# Ce qu'il lit sans rien écrire : la base (psql en lecture seule), l'état des conteneurs (docker compose ps, exec printenv,
+# exec node pour /api/v1/health), le .env (seulement « présent » ou « absent » pour un secret), git (log, rev-parse, status
+# sans verrou ni mise à jour de l'index), la crontab, les minuteries, la file des SMS (redis-cli, nombres seulement),
+# la place libre, les sauvegardes (lecture et gzip -t).
+# Il n'arrête, ne démarre, ne recrée et ne reconfigure rien ; il n'installe rien ; il n'écrit aucun fichier.
+#
+# Sur le serveur (Terminal hPanel), sans rien changer au code en ligne, depuis un COMMIT EXACT (jamais une branche, qui
+# peut bouger) : le rapport donne <COMMIT> (40 caractères) et l'empreinte sha256 attendue du script.
+#   cd ~/ecole && git fetch -q origin <COMMIT> && git show <COMMIT>:controle-production.sh | sha256sum
+#   (comparez avec l'empreinte du rapport ; si elle diffère, ne lancez rien)
+#   sh -c "$(git show <COMMIT>:controle-production.sh)"
+# git fetch n'ajoute que les objets de ce commit dans ~/ecole/.git : ni fichier du code en ligne, ni service, ni réglage.
 # Une fois la mise à jour faite : cd ~/ecole && ./controle-production.sh
 # Avec DETAIL=1 devant sh (ou devant ./controle-production.sh) : empreinte de chaque table de l'école en plus.
 
@@ -20,11 +30,13 @@ if [ "${CAHIORA_ESSAI_LOCAL:-}" = 1 ]; then
   ICI=$(pwd)
   sql() { PGOPTIONS='-c default_transaction_read_only=on' psql -h "${PGHOST:-/tmp}" -U postgres -d "${BASE:-erp}" -X -q -P pager=off -v ON_ERROR_STOP=1 "$@"; }
   dc() { return 1; }
+  rc() { redis-cli "$@"; }
 else
   cd "$HOME/ecole" 2>/dev/null || { echo "Dossier ~/ecole introuvable"; exit 1; }
   ICI="$HOME/ecole"
   sql() { docker compose exec -T -e PGOPTIONS='-c default_transaction_read_only=on' postgres psql -U postgres -d erp -X -q -P pager=off -v ON_ERROR_STOP=1 "$@"; }
   dc() { docker compose "$@"; }
+  rc() { docker compose exec -T redis redis-cli "$@"; }
 fi
 # val <requête> : une seule valeur, sans mise en forme (vide si la requête échoue).
 val() { sql -At -c "$1" </dev/null 2>/dev/null | tr -d '\r'; }
@@ -37,6 +49,7 @@ present() { if grep -q "^$1=." "$ICI/.env" 2>/dev/null; then echo présent; else
 
 RESUME=""
 bloquants=0
+maintenance=non
 point() { # point OK|ATTENTION|BLOQUANT <texte>
   RESUME="$RESUME
 $(printf '%-9s %s' "$1" "$2")"
@@ -56,7 +69,7 @@ echo "== 1. Code en ligne"
 code=$(git -C "$ICI" rev-parse --short=7 HEAD </dev/null 2>/dev/null)
 git -C "$ICI" log -1 --format='%h %ad %s' --date=iso </dev/null 2>/dev/null
 echo "branche : $(git -C "$ICI" rev-parse --abbrev-ref HEAD </dev/null 2>/dev/null)"
-modifs=$(git -C "$ICI" status --short --untracked-files=no </dev/null 2>/dev/null | head -n 10)
+modifs=$(git -C "$ICI" --no-optional-locks status --short --untracked-files=no </dev/null 2>/dev/null | head -n 10)
 if [ -n "$modifs" ]; then
   echo "fichiers suivis modifiés sur le serveur :"; printf '%s\n' "$modifs"
   point ATTENTION "fichiers du code modifiés à la main sur le serveur (voir partie 1)"
@@ -74,7 +87,7 @@ fi
 echo
 echo "== 2. Services"
 if [ "${CAHIORA_ESSAI_LOCAL:-}" = 1 ]; then
-  echo "(essai local : pas de Docker, pas de réseau)"
+  echo "(essai local : pas de Docker ; site d'essai : ${ESSAI_URL:-aucun})"
 else
   dc ps --format '{{.Service}} : {{.Status}}' </dev/null
   marche=$(dc ps --status running --services </dev/null 2>/dev/null | tr '\n' ' ')
@@ -85,13 +98,26 @@ else
   api=$(dc exec -T api node -e "fetch('http://localhost:4000/api/v1/health').then(r => console.log(r.status === 200 ? 'oui' : 'erreur ' + r.status)).catch(() => console.log('NON'))" </dev/null 2>&1 | tail -n 1 | tr -d '\r')
   echo "l'API répond : $api"
   if [ "$api" = oui ]; then point OK "l'API répond"; else point BLOQUANT "l'API ne répond pas ($api)"; fi
-  dom=$(env_val PLATFORM_DOMAIN)
-  dom=${dom:-cahiora.com}
-  for u in "https://$dom/plateforme/connexion" "https://saint-kisito.$dom/connexion"; do
-    c=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$u" </dev/null)
-    echo "$u : $c"
-    [ "$c" = 200 ] || point ATTENTION "$u répond $c au lieu de 200"
+fi
+# Réponse réelle du site (et fenêtre de maintenance ouverte par maintenance.sh : en-tête X-Cahiora-Maintenance).
+dom=$(env_val PLATFORM_DOMAIN)
+dom=${dom:-cahiora.com}
+sites="https://$dom/plateforme/connexion https://saint-kisito.$dom/connexion"
+curl_essai=""
+if [ "${CAHIORA_ESSAI_LOCAL:-}" = 1 ]; then sites=""; [ -z "${ESSAI_URL:-}" ] || { sites="$ESSAI_URL/plateforme/connexion $ESSAI_URL/connexion"; curl_essai="-k --noproxy localhost"; }; fi
+if [ -n "$sites" ]; then
+  for u in $sites; do
+    r=$(curl $curl_essai -s -o /dev/null -m 20 -D - -w 'code=%{http_code}' "$u" </dev/null | tr -d '\r')
+    c=$(printf '%s\n' "$r" | sed -n 's/^code=//p' | tail -n 1)
+    if printf '%s\n' "$r" | grep -qi '^x-cahiora-maintenance: *oui'; then
+      maintenance=oui; echo "$u : $c (fenêtre de maintenance)"
+    else
+      echo "$u : $c"
+      [ "$c" = 200 ] || point ATTENTION "$u répond $c au lieu de 200"
+    fi
   done
+  if [ "$maintenance" = oui ]; then point OK "fenêtre de maintenance ouverte : le site répond « maintenance », aucune écriture scolaire possible"
+  else echo "fenêtre de maintenance : fermée (le site est ouvert)"; fi
 fi
 
 echo
@@ -142,13 +168,15 @@ for m in $NOUVELLES; do
   if [ -n "$le" ]; then echo "$m : appliquée le $le"; nouvelles=$((nouvelles + 1)); else echo "$m : pas encore appliquée"; fi
 done
 if [ -n "$echec" ]; then
-  point BLOQUANT "migration en échec : $echec (le code ne démarre plus tant qu'elle n'est pas réparée)"
+  point BLOQUANT "migration interrompue : $echec en échec, $nouvelles des 5 nouvelles terminées. Gardez la maintenance, ne relancez rien, envoyez-moi ce résultat (procédure « migration interrompue »)"
 elif [ -n "$manquantes" ]; then
   point BLOQUANT "migration(s) de la version en ligne absente(s) : $manquantes"
 elif [ "$nouvelles" = 0 ] && [ "$appliquees" = 25 ]; then
   point OK "migrations : 25 appliquées, aucune en échec, aucune des 5 nouvelles encore appliquée"
 elif [ "$nouvelles" = 5 ] && [ "$appliquees" = 30 ]; then
   point OK "migrations : 30 appliquées, dont les 5 de la mise à jour, aucune en échec"
+elif [ "$nouvelles" -gt 0 ] && [ "$nouvelles" -lt 5 ]; then
+  point BLOQUANT "mise à jour partielle : $nouvelles des 5 nouvelles migrations appliquées ($appliquees en tout). Gardez la maintenance, envoyez-moi ce résultat (procédure « migration interrompue »)"
 else
   point BLOQUANT "migrations : $appliquees appliquées, dont $nouvelles des 5 nouvelles (attendu : 25 et 0 avant, 30 et 5 après)"
 fi
@@ -159,17 +187,25 @@ sql </dev/null -c "SELECT t.slug, t.name AS nom, t.status AS etat,
   coalesce(to_jsonb(t)->>'commercialStatus', 'pas encore (TEST à la migration)') AS statut_commercial,
   g.name AS groupe, to_char(t.\"createdAt\", 'YYYY-MM-DD') AS cree_le
   FROM tenants t LEFT JOIN school_groups g ON g.id = t.group_id ORDER BY t.\"createdAt\""
-sql </dev/null -c "SELECT count(*) AS comptes_super_admin, count(*) FILTER (WHERE active) AS actifs,
-  count(*) FILTER (WHERE active AND \"totpEnabled\") AS avec_double_authentification FROM platform_admins"
-sans2fa=$(val "SELECT count(*) FROM platform_admins WHERE active AND NOT \"totpEnabled\"")
-[ "${sans2fa:-0}" = 0 ] || point ATTENTION "$sans2fa compte(s) Super Admin actif(s) sans double authentification (elle est demandée pour la facturation)"
+echo "-- Comptes Super Admin (nom et domaine de l'adresse seulement ; aucun secret)"
+sql </dev/null -c "SELECT a.name AS nom, '…@' || split_part(a.email, '@', 2) AS adresse, a.active AS actif, a.\"totpEnabled\" AS double_authentification,
+  a.\"mustSetupTwoFactor\" AS nouvelle_2fa_exigee, (SELECT count(*) FROM platform_recovery_codes r WHERE r.\"adminId\" = a.id AND r.\"usedAt\" IS NULL) AS codes_secours_restants,
+  to_char(a.\"lastLoginAt\", 'YYYY-MM-DD') AS derniere_connexion FROM platform_admins a ORDER BY a.\"createdAt\""
+admins=$(val "SELECT count(*) FROM platform_admins")
+sans2fa=$(val "SELECT string_agg(name, ', ' ORDER BY \"createdAt\") FROM platform_admins WHERE active AND (NOT \"totpEnabled\" OR \"mustSetupTwoFactor\")")
+inactifs=$(val "SELECT string_agg(name, ', ' ORDER BY \"createdAt\") FROM platform_admins WHERE NOT active AND NOT \"totpEnabled\"")
+if [ "${admins:-0}" = 0 ]; then point BLOQUANT "aucun compte Super Admin trouvé"
+elif [ -n "$sans2fa" ]; then point BLOQUANT "compte(s) Super Admin actif(s) SANS double authentification active, ou à reconfigurer après une récupération : $sans2fa (à faire avant la mise à jour)"
+else point OK "double authentification active pour tous les comptes Super Admin actifs ($admins compte(s) en tout)"; fi
+[ -z "$inactifs" ] || point ATTENTION "compte(s) Super Admin désactivé(s) sans double authentification : $inactifs (ils ne peuvent pas se connecter ; à activer s'ils sont réactivés)"
 nb=$(val "SELECT count(*) FROM tenants")
+if [ "$nb" = 1 ]; then etabs="l'établissement est"; else etabs="les $nb établissements sont"; fi
 if [ "$apres" = 1 ]; then
   clients=$(val "SELECT count(*) FROM tenants WHERE \"commercialStatus\" <> 'TEST'")
-  if [ "$clients" = 0 ]; then point OK "les $nb établissements sont en statut TEST : ni facturés, ni limités"
+  if [ "$clients" = 0 ]; then point OK "$etabs en statut TEST : ni facturés, ni limités"
   else point BLOQUANT "$clients établissement(s) en client réel au lieu de TEST"; fi
 else
-  point OK "$nb établissements, tous passés en TEST par la migration (statut posé pour tous, sans exception)"
+  point OK "$nb établissement(s), tous passés en TEST par la migration (statut posé pour tous, sans exception)"
 fi
 
 echo
@@ -197,7 +233,7 @@ if [ "$abos" = 0 ]; then
 else
   detail=$(val "SELECT string_agg(t.slug || ' ' || s.status, ', ' ORDER BY s.\"createdAt\") FROM subscriptions s JOIN tenants t ON t.id = s.tenant_id")
   if [ "$apres" = 1 ]; then quand="avant le passage de ces établissements en client réel"; else quand="avant la mise à jour"; fi
-  point BLOQUANT "DS-3 : $abos abonnement(s) en production ($detail) : réinitialisation commerciale contrôlée à préparer et à valider $quand"
+  point BLOQUANT "DS-3 : $abos abonnement(s) en production ($detail) : ARRÊT de la procédure ; je vous soumets le plan DS-3 $quand, rien n'est réinitialisé sans votre accord"
 fi
 pilote=$(val "SELECT count(*) FROM subscriptions s JOIN tenants t ON t.id = s.tenant_id WHERE t.slug = 'saint-kisito' AND (s.status::text = 'PILOT' OR s.\"pilotStart\" IS NOT NULL)")
 if [ "$pilote" = 0 ]; then point OK "pilote de Saint Kisito non activé"; else point BLOQUANT "un pilote est enregistré pour Saint Kisito (DS-3, DS-4)"; fi
@@ -213,6 +249,11 @@ else
   if [ "$moyens" = 0 ]; then point OK "aucun moyen de paiement enregistré"
   else point BLOQUANT "$moyens version(s) de moyen de paiement enregistrée(s) : aucune n'est attendue"; fi
 fi
+echo "-- SMS des 30 derniers jours, par type (ni numéro ni texte) : Cahiora n'envoie aucun SMS commercial (aucun type de facturation)"
+sql </dev/null -c "SELECT kind AS type_sms, status AS etat, count(*) AS nombre FROM sms_messages WHERE \"createdAt\" > now() - interval '30 days' GROUP BY 1, 2 ORDER BY 1, 2"
+commerciaux=$(val "SELECT count(*) FROM sms_messages WHERE kind ILIKE ANY (ARRAY['%billing%', '%subscription%', '%abonnement%', '%factur%', '%commercial%'])")
+if [ "${commerciaux:-0}" = 0 ]; then point OK "aucun SMS commercial de Cahiora"
+else point BLOQUANT "$commerciaux SMS de type facturation ou abonnement trouvés : aucun n'est attendu"; fi
 
 echo
 echo "== 7. Tâches planifiées"
@@ -239,6 +280,30 @@ else
 fi
 if [ "$concernes" = 0 ]; then point OK "tâches planifiées de la facturation : rien à traiter (aucun $qui), aucune échéance commerciale active"
 else point BLOQUANT "tâches planifiées de la facturation : $concernes $qui (DS-3)"; fi
+# SMS déjà programmés par l'API (file « notifications » : SMS de repli au plus 10 minutes après la notification, nouvelles
+# tentatives) : ils partent même pendant la maintenance et s'inscrivent dans sms_messages. Lecture des nombres seulement.
+file=""
+f1=$(rc LLEN bull:notifications:wait </dev/null 2>/dev/null | tr -d '\r')
+f2=$(rc LLEN bull:notifications:active </dev/null 2>/dev/null | tr -d '\r')
+f3=$(rc ZCARD bull:notifications:delayed </dev/null 2>/dev/null | tr -d '\r')
+f4=$(rc ZCARD bull:notifications:prioritized </dev/null 2>/dev/null | tr -d '\r')
+f5=$(rc LLEN bull:notifications:paused </dev/null 2>/dev/null | tr -d '\r')
+case "$f1:$f2:$f3:$f4:$f5" in
+  *[!0-9:]* | :* | *::* | *:) ;;
+  *) file=$((f1 + f2 + f3 + f4 + f5)) ;;
+esac
+dernier=""
+if [ -n "$file" ] && [ "$f3" -gt 0 ]; then
+  # Score d'un envoi différé : son heure (millisecondes) fois 4096, plus un compteur.
+  score=$(rc ZRANGE bull:notifications:delayed -1 -1 WITHSCORES </dev/null 2>/dev/null | tr -d '\r' | sed -n 2p | cut -d. -f1)
+  case "$score" in '' | *[!0-9]*) ;; *) dernier=" (le dernier vers $(date -u -d "@$((score / 4096000))" '+%H:%M UTC' 2>/dev/null))" ;; esac
+fi
+if [ -n "$file" ]; then echo "-- file des SMS de l'application : $file envoi(s) en attente$dernier"; else echo "-- file des SMS de l'application : non lue"; fi
+if [ -z "$file" ]; then point ATTENTION "file des SMS non lue (Redis ne répond pas)"
+elif [ "$file" = 0 ]; then point OK "file des SMS vide : aucun envoi déjà programmé"
+elif [ "$maintenance" = oui ]; then
+  point BLOQUANT "$file SMS programmé(s) avant la fenêtre partiront encore$dernier : attendez, puis relancez le contrôle avant les sauvegardes"
+else point OK "file des SMS : $file envoi(s) en attente (normal, site ouvert ; la file doit être vide pendant la fenêtre, avant les sauvegardes)"; fi
 
 echo
 echo "== 8. Sauvegardes"
@@ -370,7 +435,7 @@ else
 fi
 
 echo
-echo "== RÉSUMÉ ($([ "$apres" = 1 ] && echo 'après' || echo 'avant') la mise à jour)"
+echo "== RÉSUMÉ ($([ "$apres" = 1 ] && echo 'après' || echo 'avant') la mise à jour ; fenêtre de maintenance : $([ "$maintenance" = oui ] && echo ouverte || echo fermée))"
 printf '%s\n' "$RESUME" | sed '/^$/d'
 echo "Points bloquants : $bloquants"
 echo "Rien n'a été modifié : contrôle en lecture seule. Copiez tout ce qui s'affiche dans votre réponse (au moins ce résumé)."
