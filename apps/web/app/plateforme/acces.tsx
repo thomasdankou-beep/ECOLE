@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { CalendarPlus, MessageSquareReply } from 'lucide-react';
-import { Badge, Button, Card, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Stat, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Missing, Stat, Textarea } from '@/components/ui';
 import { pf } from '@/lib/platform';
-import { CodeField, frDate, useSubmit } from './facturation-outils';
+import { CodeField, frDate, need, ready, useSubmit } from './facturation-outils';
 
 /**
  * Accès des clients (lot G5d-1), décisions de Dankou du 19 novembre 2026 (D-G5-30 A, D-G5-42 A, D-G5-43 A) :
@@ -207,6 +207,7 @@ function AnswerDialog({ r, c, done }: { r: Request; c: Client | null; done: () =
   const [f, setF] = useState({ answer: '', code: '' });
   const { busy, error, submit } = useSubmit(done, `Réponse envoyée à ${r.tenantName}`);
   const after = afterAnswerText(c?.afterAnswer ?? null);
+  const missing = [need.text(f.answer, 'la réponse'), need.code(f.code)];
   return (
     <DialogContent title={`Répondre à ${r.tenantName}`} description="La direction de l’établissement lit la réponse, signée « Cahiora », dans son abonnement et ses notifications. Elle ne se modifie plus.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/regularization-requests/${r.id}/answer`, f)); }}>
@@ -218,7 +219,8 @@ function AnswerDialog({ r, c, done }: { r: Request; c: Client | null; done: () =
         <p className="text-xs text-muted">La direction lit ce jour et cette heure dans votre réponse.</p>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Envoyer la réponse</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Envoyer la réponse</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -233,6 +235,7 @@ function ExtensionDialog({ c, done }: { c: Client; done: () => void }) {
   const max = c.extension.current && c.extension.current > c.extension.maxUntil ? c.extension.current : c.extension.maxUntil;
   const current = c.extension.current;
   const renewal = !!current && !!f.until && f.until > current;
+  const missing = [need.value(f.until, 'le dernier jour d’accès complet'), need.text(f.reason, renewal ? 'le motif du renouvellement' : 'le motif'), need.code(f.code)];
   const now =
     c.phase === 'LIMITED' ? `Accès limité depuis le ${c.limitedSince ? new Date(c.limitedSince).toLocaleDateString('fr-FR') : '—'} : la limitation est levée dès l’enregistrement.`
       : current ? `Prolongation actuelle jusqu’au ${frDate(current)} : une date plus tardive est un renouvellement exceptionnel ; une date plus proche avance la fin.`
@@ -257,7 +260,8 @@ function ExtensionDialog({ c, done }: { c: Client; done: () => void }) {
         </Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Prolonger l’accès</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Prolonger l’accès</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );

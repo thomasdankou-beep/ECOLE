@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { CalendarClock, CheckCircle2, FileText, Printer, Send, Wallet } from 'lucide-react';
+import { CalendarClock, CheckCircle2, FileText, FlaskConical, Printer, Send, Wallet } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
 import { Badge, Button, Empty, ErrorNote, Field, Input, Textarea, useToast } from '@/components/ui';
 import { accessChanged, accessCounter, LIMITED_KEEPS, LIMITED_WILL_KEEP, type AccessPhase } from '@/lib/access';
@@ -21,6 +21,8 @@ import { useApi } from '@/lib/use-api';
  * Ajustements du 20 novembre 2026 : un établissement de test le lit en tête de page (rien ne lui est facturé ni limité) ;
  * un document à payer sans échéance porte « Échéance à fixer » (G5c-1) ; une demande de remboursement reste possible
  * pendant l'accès limité, dès que Cahiora ouvre les remboursements (G5d2-7).
+ * Précisions du 24 novembre 2026 : un établissement de test lit une seule carte simple, sans les rubriques commerciales
+ * qui ne le concernent pas (tarif, calendrier, documents, paiements, historique).
  */
 
 type Status = 'TRIAL' | 'PILOT' | 'AWAITING_ACCEPTANCE' | 'AWAITING_PAYMENT' | 'ACTIVE' | 'LIMITED';
@@ -108,10 +110,9 @@ export function Abonnement({ openCounts }: { openCounts?: () => void }) {
   const q = useApi<Data>('/settings/subscription');
   return (
     <Loader {...q}>
-      {(d) => (
+      {(d) => d.commercialStatus === 'TEST' ? <EtablissementDeTest d={d} /> : (
         <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
           <div className="grid content-start gap-4">
-            {d.testNotice && <p className="rounded-lg bg-sunk p-3 text-sm font-bold" role="status" data-testid="etablissement-de-test">{d.testNotice}</p>}
             <Etat d={d} />
             {toRegularize(d.subscription) && <Regulariser d={d} reload={q.reload} />}
             {awaitsAcceptance(d.subscription) && <Acceptation d={d} reload={q.reload} />}
@@ -129,14 +130,35 @@ export function Abonnement({ openCounts }: { openCounts?: () => void }) {
   );
 }
 
+/**
+ * Établissement de test (24 novembre 2026) : une seule carte simple. Rien ne court, rien n'est facturé ni limité ; les
+ * rubriques commerciales (tarif, calendrier, documents, paiements, historique) ne le concernent pas et restent masquées.
+ */
+function EtablissementDeTest({ d }: { d: Data }) {
+  const yes = (text: string) => (
+    <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-5 flex-none text-good" aria-hidden /> <span>{text}</span></li>
+  );
+  return (
+    <Section title="Votre abonnement Cahiora" action={<Badge tone="accent" className="border border-dashed border-orange"><FlaskConical className="size-3.5" aria-hidden /> Établissement de test</Badge>}>
+      <div className="grid max-w-2xl gap-3 text-[15px]">
+        <p className="font-bold" role="status" data-testid="etablissement-de-test">{d.testNotice}</p>
+        <ul className="grid gap-2" aria-label="Établissement de test : ce que cela veut dire">
+          {yes('Accès complet à Cahiora, jamais limité.')}
+          {yes('Aucun essai, aucun abonnement, aucun document ni paiement de Cahiora.')}
+          {yes('Vos données scolaires ne sont pas touchées : élèves, notes, bulletins, paiements des familles.')}
+        </ul>
+        <p className="text-sm text-muted">Seul Cahiora peut faire passer votre établissement en client réel. Cette page montrera alors votre abonnement : période gratuite, conditions commerciales et documents.</p>
+      </div>
+    </Section>
+  );
+}
+
 function Etat({ d }: { d: Data }) {
   const s = d.subscription;
   if (!s) {
     return (
       <Section title="Votre abonnement Cahiora">
-        {d.commercialStatus === 'TEST'
-          ? <Empty title="Établissement de test">Aucun abonnement : rien n’est facturé et l’accès n’est jamais limité.</Empty>
-          : <Empty title="Aucun abonnement ouvert">Cahiora ouvre l’abonnement de votre établissement avec vous : essai gratuit ou statut d’école pilote partenaire.</Empty>}
+        <Empty title="Aucun abonnement ouvert">Cahiora ouvre l’abonnement de votre établissement avec vous : essai gratuit ou statut d’école pilote partenaire.</Empty>
       </Section>
     );
   }

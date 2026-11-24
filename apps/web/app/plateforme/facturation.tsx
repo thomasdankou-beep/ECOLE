@@ -1,12 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bell, CalendarDays, History, Play, Plus, Users } from 'lucide-react';
-import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
+import { BadgeCheck, Bell, CalendarDays, FlaskConical, History, Play, Plus, Users } from 'lucide-react';
+import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Missing, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
 import { Acces } from './acces';
 import { Documents } from './documents';
-import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { CodeField, frDate, money, need, ready, useSubmit } from './facturation-outils';
 import { AvoirsCredits, moneyRows, Paiements, Rapports } from './paiements';
 import { Prestations } from './prestations';
 
@@ -54,6 +54,8 @@ type Overview = {
   /** Par monnaie (lot G5d-2) ; null tant que le lot qui les apporte n'est pas là (amountsFrom). */
   amounts: Record<string, { currency: string; amount: number }[] | null>;
   amountsFrom: Record<string, string>;
+  /** 24 novembre 2026 : indicateurs réels, clients réels seulement. */
+  amountsScope: string;
 };
 type Alert = { id: string; tenantName: string | null; kind: string; message: string; dueDate: string | null; readAt: string | null; createdAt: string };
 type Param = { key: string; currency: string | null; label: string; unit: 'money' | 'hours' | 'days' | 'months' | 'percent'; usedFrom: string; provisional?: string; value: number | null; since: string | null; next: { value: number; effectiveFrom: string } | null };
@@ -94,8 +96,14 @@ const CLIENT_ATTESTATION =
 const COMMERCIAL_FILTER: { value: '' | Commercial; label: string }[] = [
   { value: '', label: 'Tous les statuts' }, { value: 'TEST', label: 'Établissements de test' }, { value: 'CLIENT', label: 'Clients réels' },
 ];
-function CommercialBadge({ e, className }: { e: Pick<Establishment, 'commercialStatus' | 'commercialStatusLabel'>; className?: string }) {
-  return <Badge tone={e.commercialStatus === 'TEST' ? 'accent' : 'brand'} className={className}>{e.commercialStatus === 'TEST' ? 'Test' : e.commercialStatusLabel}</Badge>;
+/**
+ * Statut commercial, bien distinct de l'état de l'abonnement (24 novembre 2026) : « Établissement de test » en contour
+ * pointillé orange avec une fiole, « Client réel » en plein avec une coche.
+ */
+function CommercialBadge({ e, className = '' }: { e: Pick<Establishment, 'commercialStatus' | 'commercialStatusLabel'>; className?: string }) {
+  return e.commercialStatus === 'TEST'
+    ? <Badge tone="accent" className={`border border-dashed border-orange ${className}`} title="Jamais facturé ni limité"><FlaskConical className="size-3.5" aria-hidden /> Établissement de test</Badge>
+    : <Badge className={`bg-brand text-brand-ink ${className}`}><BadgeCheck className="size-3.5" aria-hidden /> {e.commercialStatusLabel}</Badge>;
 }
 const STATUS_FILTER: { value: string; label: string }[] = [
   { value: '', label: 'Tous les états' }, { value: 'none', label: 'Sans abonnement' }, { value: 'TRIAL', label: 'Essai gratuit' }, { value: 'PILOT', label: 'École pilote' },
@@ -177,6 +185,7 @@ function Ensemble() {
       <Card className="grid gap-2">
         <h3 className="font-bold">Montants</h3>
         <p className="text-sm text-muted">Facturé et encaissé ne se confondent jamais : chaque montant est donné par monnaie, documents provisoires d’un côté, paiements validés par Cahiora de l’autre. Le détail est dans Rapports financiers.</p>
+        <p className="text-sm font-bold" data-testid="portee-indicateurs">{o.amountsScope}</p>
         <ul className="grid gap-1 text-sm sm:grid-cols-2" aria-label="Montants">
           {([['billed', 'Facturé'], ['credited', 'Avoirs'], ['collected', 'Encaissé'], ['refunded', 'Remboursé'], ['unpaid', 'Impayés'], ['groupPending', 'Documents de groupe en attente'], ['clientCredits', 'Crédits des clients'], ['servicesRevenue', 'Prestations'], ['commissionsDue', 'Commissions dues'], ['commissionsPaid', 'Commissions payées']] as const).map(([k, label]) => {
             const rows = o.amounts[k];
@@ -326,8 +335,11 @@ function Abonnements() {
  */
 function CommercialStatusDialog({ e, done }: { e: Establishment; done: () => void }) {
   const to: Commercial = e.commercialStatus === 'TEST' ? 'CLIENT' : 'TEST';
+  // Case de confirmation toujours décochée à l'ouverture ; bouton désactivé tant que le motif, la case ou le code manque
+  // (24 novembre 2026).
   const [f, setF] = useState({ reason: '', confirmed: false, code: '' });
   const { busy, error, submit } = useSubmit(done, to === 'CLIENT' ? `${e.name} est maintenant un client réel` : `${e.name} est de nouveau un établissement de test`);
+  const missing = [need.text(f.reason, 'le motif'), to === 'CLIENT' && !f.confirmed && 'la case de confirmation', need.code(f.code)];
   return (
     <DialogContent
       title={to === 'CLIENT' ? `Passer en client réel : ${e.name}` : `Repasser en établissement de test : ${e.name}`}
@@ -350,7 +362,8 @@ function CommercialStatusDialog({ e, done }: { e: Establishment; done: () => voi
         )}
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>{to === 'CLIENT' ? 'Passer en client réel' : 'Repasser en test'}</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>{to === 'CLIENT' ? 'Passer en client réel' : 'Repasser en test'}</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -359,6 +372,7 @@ function CommercialStatusDialog({ e, done }: { e: Establishment; done: () => voi
 function TrialDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [f, setF] = useState({ startDate: e.today, reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, `Essai gratuit ouvert pour ${e.name}`);
+  const missing = [need.value(f.startDate, 'le premier jour de l’essai'), need.code(f.code)];
   return (
     <DialogContent title={`Ouvrir l’essai gratuit : ${e.name}`} description="La durée est celle du paramètre en vigueur (14 jours) ; le jour d’ouverture compte comme le jour 1.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/establishments/${e.id}/trial`, { startDate: f.startDate, reason: f.reason || undefined, code: f.code })); }}>
@@ -366,7 +380,8 @@ function TrialDialog({ e, done }: { e: Establishment; done: () => void }) {
         <Field label="Motif (facultatif)"><Input value={f.reason} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Ouvrir l’essai</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Ouvrir l’essai</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -376,6 +391,7 @@ function PilotDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [f, setF] = useState({ startDate: '', months: '', reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, `${e.name} est école pilote partenaire`);
   const preview = pilotEndPreview(f.startDate, Number(f.months) || 3);
+  const missing = [need.value(f.startDate, 'la date d’activation effective du pilote'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`École pilote partenaire CAHIORA : ${e.name}`} description="Gratuité à partir de l’activation effective du pilote, que vous saisissez. Rien n’est facturé pour la période pilote, ni rétroactivement après elle.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/establishments/${e.id}/pilot`, { startDate: f.startDate, months: f.months ? Number(f.months) : undefined, reason: f.reason, code: f.code })); }}>
@@ -385,7 +401,8 @@ function PilotDialog({ e, done }: { e: Establishment; done: () => void }) {
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required placeholder="Par exemple : accord écrit avec la direction, et sa date" /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Activer le pilote</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Activer le pilote</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -394,6 +411,7 @@ function PilotDialog({ e, done }: { e: Establishment; done: () => void }) {
 function PilotEndDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [f, setF] = useState({ pilotEnd: e.subscription?.pilotEnd ?? '', reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, 'Fin du pilote enregistrée');
+  const missing = [need.value(f.pilotEnd, 'le dernier jour gratuit'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`Fin de la gratuité du pilote : ${e.name}`} description={`Fin actuelle : ${frDate(e.subscription?.pilotEnd)}. Jamais dans le passé ; les alertes suivent la nouvelle date.`}>
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/establishments/${e.id}/pilot-end`, f)); }}>
@@ -401,7 +419,8 @@ function PilotEndDialog({ e, done }: { e: Establishment; done: () => void }) {
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -473,7 +492,8 @@ function Etablissements() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span><b>{e.name}</b> <span className="text-muted">· {e.currency} · {e.timezone}</span> <CommercialBadge e={e} /> {e.commercialStatus === 'TEST' ? null : e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}</span>
                   <div className="flex flex-wrap gap-1">
-                    <Button size="sm" variant="outline" onClick={() => setCounts(e)} aria-label={`Comptages des élèves de ${e.name}`}><Users className="size-4" /> Comptages</Button>
+                    {/* Un établissement de test n'est jamais compté : le bouton ne sert qu'aux clients réels (ou à un ancien comptage). */}
+                    {(e.commercialStatus === 'CLIENT' || e.counts.length > 0) && <Button size="sm" variant="outline" onClick={() => setCounts(e)} aria-label={`Comptages des élèves de ${e.name}`}><Users className="size-4" /> Comptages</Button>}
                     <Button size="sm" variant="outline" onClick={() => setOpen(e)} aria-label={`Calendrier de facturation de ${e.name}`}><CalendarDays className="size-4" /> Calendrier</Button>
                   </div>
                 </div>
@@ -522,7 +542,7 @@ function CountsDialog({ e }: { e: Establishment }) {
                 <b>{c.kindLabel} du {frDate(c.referenceDate)}</b>
                 <Badge tone={c.stage === 'FROZEN' ? 'good' : 'warn'}>{c.stageLabel}</Badge>
               </div>
-              <span>Année {c.yearLabel} · <b>{pupilsText(c.pupils)}</b> comptés · cumul de l’année : {c.cumulative} · à vérifier : {c.toCheck} · exclus : {c.excluded}</span>
+              <span>Année {c.yearLabel} · <b>{pupilsText(c.pupils)}</b> comptés : <b>{c.pupils - c.toCheck}</b> confirmés facturables{c.toCheck ? <>, <b className="text-warn">{c.toCheck} « À vérifier »</b> comptés sous réserve</> : ''} · cumul de l’année : {c.cumulative} · exclus : {c.excluded}</span>
               {c.reviewOpen && <span className="text-warn">Vérification par la direction jusqu’au {frDate(c.reviewUntil)} inclus.</span>}
               {c.stage === 'PROVISIONAL' && c.frozen && <span className="text-muted">Remplacé par le comptage définitif de la même date.</span>}
               <span className="text-xs text-muted">Historique lu le {new Date(c.knownAt).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })} · empreinte de la liste {c.listHash.slice(0, 12)}…</span>
@@ -592,6 +612,9 @@ function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
   const notApplicable = proposal && !proposal.applies ? proposal.message : null;
   /** Propositions des nouvelles dates pas encore reçues : on attend avant d'enregistrer. */
   const waiting = f.formula !== 'MANUEL' && IS_DAY.test(f.startDate) && IS_DAY.test(f.endDate) && !current;
+  const missing = [need.value(f.yearLabel.trim(), 'l’année scolaire'), need.value(f.startDate, 'le début de l’année'), need.value(f.endDate, 'la fin de l’année'),
+    need.value(f.initialCountDate, 'le comptage initial'), need.value(f.firstRegularizationDate, 'la première régularisation'),
+    need.value(f.finalRegularizationDate, 'la régularisation finale'), need.text(f.reason, 'le motif'), need.code(f.code)];
 
   /** Reprend la dernière version de cette année telle quelle ; sinon les dates de l'année scolaire de l'école, recalculées. */
   const pickYear = (yearLabel: string) => {
@@ -666,7 +689,8 @@ function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
           <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required placeholder="Par exemple : calendrier communiqué par la direction" /></Field>
           <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
           <ErrorNote error={error} />
-          <Button type="submit" loading={busy} disabled={!!notApplicable || waiting}>Enregistrer cette version</Button>
+          <Button type="submit" loading={busy} disabled={!!notApplicable || waiting || !ready(missing)}>Enregistrer cette version</Button>
+          <Missing items={missing} />
           {versions.length > 0 && (
             <div className="grid gap-1 text-xs">
               <p className="font-bold">Versions enregistrées</p>
@@ -779,6 +803,7 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
   const proposal = p.proposals.find((x) => x.key === f.key);
   const { busy, error, submit } = useSubmit(done, 'Nouvelle valeur enregistrée');
   const toInt = () => (def.unit === 'percent' ? Math.round(Number(f.value.replace(',', '.')) * 100) : Number(f.value));
+  const missing = [need.value(f.value.trim(), 'la valeur'), need.value(f.effectiveFrom, 'la date d’effet'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title="Nouvelle valeur d’un paramètre" description="Elle s’applique à partir de sa date d’effet, jamais avant ; l’ancienne valeur reste dans l’historique.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', '/billing/parameters', { key: f.key, currency: def.unit === 'money' ? f.currency : null, value: toInt(), effectiveFrom: f.effectiveFrom, reason: f.reason, code: f.code })); }}>
@@ -794,7 +819,8 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -803,6 +829,8 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
 function TermsDialog({ today, done }: { today: string; done: () => void }) {
   const [f, setF] = useState({ title: '', body: '', effectiveFrom: today, definitive: false, code: '' });
   const { busy, error, submit } = useSubmit(done, 'Conditions commerciales publiées');
+  const missing = [need.text(f.title, 'le titre', 3), need.text(f.body, 'le texte des conditions', 20), need.value(f.effectiveFrom, 'la date d’effet'),
+    !f.definitive && 'la case de confirmation', need.code(f.code)];
   return (
     <DialogContent title="Publier une version des conditions commerciales" description="Le texte vient de vous : Cahiora ne le rédige pas à votre place. La direction l’accepte au nom de l’établissement, comme un contrat réel, à la fin de son essai ou de son pilote : ne publiez jamais un texte d’essai.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', '/billing/terms', f)); }}>
@@ -816,7 +844,8 @@ function TermsDialog({ today, done }: { today: string; done: () => void }) {
         </label>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Publier</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Publier</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );

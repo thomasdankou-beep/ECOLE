@@ -17,6 +17,18 @@ export function CodeField({ value, onChange }: { value: string; onChange: (v: st
   );
 }
 
+/**
+ * Ce qui manque encore à un formulaire de la console (24 novembre 2026 : le bouton de validation reste désactivé tant que
+ * les informations obligatoires ne sont pas renseignées). Chaque fonction rend le texte lu sous le bouton, ou false.
+ */
+export const need = {
+  code: (code: string) => code.length !== 6 && 'le code à 6 chiffres de votre application d’authentification',
+  text: (value: string, what: string, min = 5) => value.trim().length < min && `${what} (${min} caractères au moins)`,
+  value: (value: unknown, what: string) => !value && what,
+};
+/** Formulaire complet : rien ne manque. */
+export const ready = (missing: (string | false | null | undefined)[]) => !missing.some(Boolean);
+
 /** Formulaire d'une opération : envoi, erreur affichée, fermeture et rechargement en cas de succès. */
 export function useSubmit(done: () => void, success: string) {
   const toast = useToast();
