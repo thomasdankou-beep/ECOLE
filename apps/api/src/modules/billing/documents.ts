@@ -407,7 +407,14 @@ export class BillingDocumentsService {
       id: d.id, kind: d.kind, label: documentLabel(d.kind, d.total), reference: d.reference, group: d.group, currency: d.currency, issueDate: iso(d.issueDate),
       dueDate: iso(d.dueDate), total: d.total, yearLabel: d.yearLabel, data: d.data, createdByKind: d.createdByKind, createdByName: d.createdByName, createdAt: d.createdAt,
       related: d.related, relatedBy: d.relatedBy,
-      exclusionOrigins: d.exclusionOrigins.map((x) => ({ correctionId: x.correctionId, tenantId: x.tenantId, linkedAt: x.createdAt, creditNote: originCredits.get(x.correctionId) ?? null })),
+      exclusionOrigins: await Promise.all(d.exclusionOrigins.map(async (x) => {
+        // Inscription et date de la décision, pour suivre chaque exclusion sans nom d'élève (G5c-9).
+        const [o] = await this.platform.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${x.tenantId}::uuid, ${x.correctionId}::uuid)`;
+        return {
+          correctionId: x.correctionId, tenantId: x.tenantId, linkedAt: x.createdAt, matricule: o?.matricule ?? null, decidedAt: o?.decided_at ?? null,
+          creditNote: originCredits.get(x.correctionId) ?? null,
+        };
+      })),
       lines: d.lines.map((l) => ({
         id: l.id, position: l.position, tenant: l.tenant, label: l.label, amount: l.amount, countKind: l.countKind, referenceDate: iso(l.referenceDate), pupils: l.pupils,
         pupilsChange: l.pupilsChange, pricePerPupil: l.pricePerPupil, minimum: l.minimum, minimumApplied: l.minimumApplied, fullYear: l.fullYear, shareMonths: l.shareMonths,

@@ -308,6 +308,7 @@ export class BillingService {
         createdOn: localDay(t.timezone, t.createdAt), demo: !!(t.settings as Record<string, unknown> | null)?.demo, group: t.group,
         // Statut commercial : un établissement de test n'est jamais facturé ni limité ; il change seulement sans abonnement.
         commercialStatus: t.commercialStatus, commercialStatusLabel: COMMERCIAL_STATUS_LABELS[t.commercialStatus], commercialStatusAt: t.commercialStatusAt,
+        commercialStatusNote: t.commercialStatus === 'TEST' ? TEST_ESTABLISHMENT_NOTE : null,
         canChangeCommercialStatus: !t.subscription && t._count.billingDocumentLines === 0,
         subscription: t.subscription ? subscriptionView(t.subscription, today) : null, calendars: latestCalendars(t.billingCalendars),
         // Comptages des élèves (lot G5b) : des nombres seulement ; la liste nominative reste dans l'espace de l'école.

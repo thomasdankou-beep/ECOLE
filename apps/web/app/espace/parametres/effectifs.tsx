@@ -15,10 +15,13 @@ import { useAction, useApi } from '@/lib/use-api';
  * l'historique des inscriptions (D-G5-16 A) ; après un comptage figé, exclusion seulement, jusqu'à 30 jours après le
  * document de Cahiora qui compte l'élève (D-G5-14 A, lot G5c). La direction décide tant qu'aucun document émis n'est
  * touché, Cahiora ensuite (D-G5-13 B). Aucun montant ici.
+ * G5b-2 (Dankou, 20 novembre 2026) : un élève parti sans date de départ connue est « À vérifier » et reste compté, jamais
+ * exclu d'office. La direction fixe sa date ou confirme qu'elle est introuvable, à tout moment (liste « À vérifier » de
+ * cette page) ou pendant la vérification d'un comptage.
  */
 
 type Kind = 'TRIAL_END' | 'PILOT_END' | 'INITIAL' | 'FIRST_REGULARIZATION' | 'FINAL_REGULARIZATION';
-type Basis = 'ACTIVE' | 'DEPARTURE_AUDIT' | 'DEPARTURE_UNKNOWN' | 'DEPARTURE_DIRECTION' | 'EXCLUDED';
+type Basis = 'ACTIVE' | 'DEPARTURE_AUDIT' | 'DEPARTURE_UNKNOWN' | 'DEPARTURE_DIRECTION' | 'DEPARTURE_CONFIRMED' | 'EXCLUDED';
 type Count = {
   id: string; yearLabel: string; kind: Kind; kindLabel: string; referenceDate: string; stage: 'PROVISIONAL' | 'FROZEN'; stageLabel: string;
   pupils: number; cumulative: number; toCheck: number; excluded: number; listHash: string; at: string; knownAt: string; reviewUntil: string | null;
@@ -32,19 +35,33 @@ type Item = {
   exclusionUntil: string | null;
   /** Dernier document de Cahiora qui compte l'élève, et qui décide d'une exclusion (D-G5-13 B). */
   documentDate: string | null; decider: 'PLATFORM' | 'SCHOOL';
+  /** G5b-2 : « À vérifier » (départ sans date connue, compté) ; la direction peut confirmer la date introuvable. */
+  toCheck: boolean; canConfirm: boolean;
 };
 type Correction = {
-  id: string; kind: 'EXCLUSION' | 'DEPARTURE_DATE'; enrollmentId: string; matricule: string; name: string; countId: string; status: 'PENDING' | 'VALIDATED' | 'REFUSED';
+  id: string; kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED'; enrollmentId: string; matricule: string; name: string;
+  /** null : date fixée ou confirmée introuvable hors de tout comptage (liste « À vérifier »). */
+  countId: string | null; status: 'PENDING' | 'VALIDATED' | 'REFUSED';
   departureDate: string | null; justification: string; fileUrl: string | null; requestedByName: string; requestedAt: string;
   decidedByName: string | null; decidedAt: string | null; decisionNote: string | null;
   decidedByKind: 'school' | 'platform' | null; decider: 'PLATFORM' | 'SCHOOL' | null;
 };
 type Detail = { today: string; count: Count; items: Item[]; live: { pupils: number; added: Item[]; removed: number } | null; corrections: Correction[] };
+/** G5b-2 : élève « À vérifier » (ou date confirmée introuvable) d'une année en cours ou à venir, hors de tout comptage. */
+type CheckPupil = {
+  enrollmentId: string; matricule: string; name: string; className: string; siteName: string | null; enrollmentStatus: string | null; basis: Basis; basisLabel: string;
+  toCheck: boolean; since: string | null; auditDay: string | null; canDate: boolean; canConfirm: boolean;
+};
+type Checks = { today: string; note: string; years: { academicYearId: string; yearLabel: string; date: string; toCheck: number; pupils: CheckPupil[] }[] };
+/** Élève dont on fixe la date de départ, ou confirme qu'elle est introuvable. */
+type Departure = { enrollmentId: string; name: string; matricule: string; className: string; auditDay: string | null; since?: string | null };
+const CHECKS_URL = '/settings/billing-counts/checks';
 
 const frDate = (d: string | null | undefined) => (d ? new Date(`${d.slice(0, 10)}T00:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : '—');
 const pupils = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
 const waiting = (n: number) => `${n} demande${n > 1 ? 's' : ''} d’exclusion en attente de décision.`;
 const STATUS: Record<Correction['status'], [string, 'warn' | 'good' | 'bad']> = { PENDING: ['En attente de décision', 'warn'], VALIDATED: ['Validée', 'good'], REFUSED: ['Refusée', 'bad'] };
+const correctionTitle = (k: Correction) => (k.kind === 'EXCLUSION' ? 'Exclusion' : k.kind === 'DEPARTURE_DATE' ? `Date de départ : ${frDate(k.departureDate)}` : 'Date de départ introuvable, confirmée (élève compté)');
 type Filter = 'all' | 'check' | 'cancelled' | 'excluded';
 
 export function Effectifs() {
@@ -61,6 +78,7 @@ export function Effectifs() {
               <p className="text-sm text-muted">Après un comptage provisoire, vous vérifiez la liste jusqu’à la date indiquée ; le comptage est ensuite figé et sert au calcul de votre abonnement. Un comptage figé ne change plus. Aucun montant n’est calculé ici.</p>
             </div>
           </Section>
+          <AVerifier />
           {d.counts.length === 0 ? (
             <Empty title="Aucun comptage pour le moment">Le premier comptage aura lieu à la fin de votre période gratuite, ou à la date du comptage initial de votre calendrier de facturation.</Empty>
           ) : (
@@ -91,11 +109,57 @@ export function Effectifs() {
   );
 }
 
+/**
+ * G5b-2 : élèves « À vérifier » (départ enregistré sans date connue), à résoudre avant le comptage, période gratuite
+ * comprise : la direction fixe la date ou confirme qu'elle est introuvable. Sans réponse, l'élève reste compté.
+ */
+function AVerifier() {
+  const q = useApi<Checks>(CHECKS_URL);
+  const [dialog, setDialog] = useState<{ kind: 'date' | 'confirm'; pupil: CheckPupil } | null>(null);
+  const done = () => { setDialog(null); q.reload(); };
+  const total = q.data?.years.reduce((n, y) => n + y.toCheck, 0) ?? 0;
+  return (
+    <Section title="Élèves « À vérifier »" action={total > 0 ? <Badge tone="warn">{total}</Badge> : undefined}>
+      <Loader {...q}>
+        {(d) => (
+          <div className="grid gap-3">
+            <p className="text-sm text-muted">{d.note}</p>
+            {d.years.every((y) => y.pupils.length === 0) ? <p className="text-sm">Aucun élève à vérifier.</p> : d.years.filter((y) => y.pupils.length > 0).map((y) => (
+              <div key={y.academicYearId} className="grid gap-2">
+                <h3 className="font-bold">Année {y.yearLabel} <span className="text-sm font-normal text-muted">· {y.toCheck ? `${y.toCheck} à vérifier` : 'rien à vérifier'} au {frDate(y.date)}</span></h3>
+                <ul className="grid gap-2" aria-label={`Élèves à vérifier, année ${y.yearLabel}`}>
+                  {y.pupils.map((p) => (
+                    <li key={p.enrollmentId} className="grid gap-1 rounded-lg bg-sunk p-3 text-sm">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <span className="min-w-0"><b className="text-[15px]">{p.name}</b> <span className="text-muted">· {p.matricule}</span><span className="block text-muted">{p.className}{p.siteName ? ` · ${p.siteName}` : ''}</span></span>
+                        <Badge tone={p.toCheck ? 'warn' : 'info'}>{p.toCheck ? 'À vérifier' : 'Date introuvable confirmée'}</Badge>
+                      </div>
+                      <span>{p.basisLabel}{p.auditDay ? ` (journal : ${frDate(p.auditDay)})` : ''}</span>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {p.canDate && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'date', pupil: p })} aria-label={`Fixer la date de départ de ${p.name}`}>Fixer la date de départ</Button>}
+                        {p.canConfirm && <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: 'confirm', pupil: p })} aria-label={`Date de départ introuvable pour ${p.name}`}>Date introuvable</Button>}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            <Dialog open={!!dialog} onOpenChange={(o) => !o && setDialog(null)}>
+              {dialog?.kind === 'date' && <DepartureDialog url={CHECKS_URL} item={dialog.pupil} today={d.today} done={done} outsideCount />}
+              {dialog?.kind === 'confirm' && <ConfirmUnknownDialog url={CHECKS_URL} item={dialog.pupil} done={done} />}
+            </Dialog>
+          </div>
+        )}
+      </Loader>
+    </Section>
+  );
+}
+
 function Comptage({ id, back }: { id: string; back: () => void }) {
   const q = useApi<Detail>(`/settings/billing-counts/${id}`);
   const [filter, setFilter] = useState<Filter>('all');
   const [search, setSearch] = useState('');
-  const [dialog, setDialog] = useState<{ kind: 'exclude' | 'date'; item: Item } | { kind: 'decide'; correction: Correction } | null>(null);
+  const [dialog, setDialog] = useState<{ kind: 'exclude' | 'date' | 'confirm'; item: Item } | { kind: 'decide'; correction: Correction } | null>(null);
   const done = () => { setDialog(null); q.reload(); };
   return (
     <div className="grid gap-4">
@@ -139,7 +203,8 @@ function Comptage({ id, back }: { id: string; back: () => void }) {
       </Loader>
       <Dialog open={!!dialog} onOpenChange={(o) => !o && setDialog(null)}>
         {dialog && q.data && dialog.kind === 'exclude' && <ExclusionDialog count={q.data.count} item={dialog.item} done={done} />}
-        {dialog && q.data && dialog.kind === 'date' && <DepartureDialog count={q.data.count} item={dialog.item} today={q.data.today} done={done} />}
+        {dialog && q.data && dialog.kind === 'date' && <DepartureDialog url={`/settings/billing-counts/${q.data.count.id}/corrections`} item={dialog.item} today={q.data.today} done={done} />}
+        {dialog && q.data && dialog.kind === 'confirm' && <ConfirmUnknownDialog url={`/settings/billing-counts/${q.data.count.id}/corrections`} item={dialog.item} done={done} />}
         {dialog && dialog.kind === 'decide' && <DecisionDialog correction={dialog.correction} done={done} />}
       </Dialog>
     </div>
@@ -147,9 +212,12 @@ function Comptage({ id, back }: { id: string; back: () => void }) {
 }
 
 function Liste({ d, filter, setFilter, search, setSearch, act }: {
-  d: Detail; filter: Filter; setFilter: (f: Filter) => void; search: string; setSearch: (s: string) => void; act: (kind: 'exclude' | 'date', item: Item) => void;
+  d: Detail; filter: Filter; setFilter: (f: Filter) => void; search: string; setSearch: (s: string) => void; act: (kind: 'exclude' | 'date' | 'confirm', item: Item) => void;
 }) {
-  const checks = (i: Item) => i.counted && (i.basis === 'DEPARTURE_AUDIT' || i.basis === 'DEPARTURE_UNKNOWN');
+  const checks = (i: Item) => i.toCheck;
+  // G5b-2 : dernière réponse validée de la direction pour un départ sans date (la liste du comptage provisoire reste
+  // telle qu'enregistrée ; la réponse vaut pour la suite de la vérification et pour les comptages à venir).
+  const answer = (i: Item) => d.corrections.find((k) => k.enrollmentId === i.enrollmentId && k.status === 'VALIDATED' && (k.kind === 'DEPARTURE_DATE' || k.kind === 'DEPARTURE_CONFIRMED'))?.kind ?? null;
   const shown = useMemo(() => {
     const s = search.trim().toLowerCase();
     return d.items.filter((i) => (filter === 'all' || (filter === 'check' && checks(i)) || (filter === 'cancelled' && i.enrollmentStatus === 'CANCELLED') || (filter === 'excluded' && !i.counted))
@@ -174,10 +242,11 @@ function Liste({ d, filter, setFilter, search, setSearch, act }: {
               <li key={i.enrollmentId} className={`grid gap-1 rounded-lg p-3 text-sm ${i.counted ? 'bg-sunk' : 'border border-dashed border-line'}`}>
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <span className="min-w-0"><b className="text-[15px]">{i.name}</b> <span className="text-muted">· {i.matricule}</span><span className="block text-muted">{i.className}{i.siteName ? ` · ${i.siteName}` : ''}</span></span>
-                  <Badge tone={i.counted ? 'good' : 'info'}>{i.counted ? 'Compté' : 'Non compté'}</Badge>
+                  <span className="flex flex-wrap gap-1">{i.toCheck && (answer(i) === 'DEPARTURE_CONFIRMED' ? <Badge tone="info">Date introuvable confirmée</Badge> : !answer(i) && <Badge tone="warn">À vérifier</Badge>)}<Badge tone={i.counted ? 'good' : 'info'}>{i.counted ? 'Compté' : 'Non compté'}</Badge></span>
                 </div>
                 <span>{i.basisLabel}{i.departureDate ? ` (${frDate(i.departureDate)})` : ''}</span>
-                {i.basis === 'DEPARTURE_UNKNOWN' && <span className="text-warn">Aucune date de départ connue : l’élève reste compté tant qu’aucune date n’est fixée.</span>}
+                {i.basis === 'DEPARTURE_UNKNOWN' && !answer(i) && <span className="text-warn">Aucune date de départ connue : l’élève reste compté tant que vous ne fixez pas sa date ou ne confirmez pas qu’elle est introuvable. Il n’est jamais retiré sans votre décision.</span>}
+                {i.toCheck && answer(i) === 'DEPARTURE_CONFIRMED' && <span className="text-muted">Date de départ confirmée introuvable : l’élève reste compté. Vous pouvez encore dater son départ si vous retrouvez la date.</span>}
                 {i.enrollmentStatus === 'CANCELLED' && <span className="text-muted">Inscription annulée depuis{i.cancelReason ? ` : « ${i.cancelReason} »` : ''}.</span>}
                 {i.duplicate && <span className="text-muted">{i.duplicate === 'SAME' ? 'Doublon confirmé par la direction (même élève).' : 'Doublon possible, pas encore tranché (Élèves › Doublons possibles).'}</span>}
                 {i.exclusion && (
@@ -194,10 +263,11 @@ function Liste({ d, filter, setFilter, search, setSearch, act }: {
                   <span className="text-muted">Délai d’exclusion passé : 30 jours après le document de Cahiora du {frDate(i.documentDate)}.</span>
                 )}
                 {i.stillCounted === false && i.counted && <span className="font-bold text-warn">Ne sera plus compté si la vérification se termine maintenant.</span>}
-                {(i.canExclude || i.canDate) && (
+                {(i.canExclude || i.canDate || i.canConfirm) && (
                   <div className="flex flex-wrap gap-2 pt-1">
                     {i.canExclude && <Button size="sm" variant="outline" onClick={() => act('exclude', i)}>Demander l’exclusion</Button>}
                     {i.canDate && <Button size="sm" variant="outline" onClick={() => act('date', i)}>Dater le départ</Button>}
+                    {i.canConfirm && <Button size="sm" variant="ghost" onClick={() => act('confirm', i)}>Date introuvable</Button>}
                   </div>
                 )}
               </li>
@@ -219,7 +289,7 @@ function Corrections({ d, decide }: { d: Detail; decide: (c: Correction) => void
             return (
               <li key={k.id} className="grid gap-1 rounded-lg border border-line p-3 text-sm">
                 <div className="flex flex-wrap items-start justify-between gap-2">
-                  <span><b>{k.kind === 'EXCLUSION' ? 'Exclusion' : `Date de départ : ${frDate(k.departureDate)}`}</b> · {k.name} <span className="text-muted">({k.matricule})</span></span>
+                  <span><b>{correctionTitle(k)}</b> · {k.name} <span className="text-muted">({k.matricule}){k.countId ? '' : ' · hors comptage'}</span></span>
                   <Badge tone={tone}>{k.status === 'PENDING' && k.decider === 'PLATFORM' ? 'Décision de Cahiora attendue' : label}</Badge>
                 </div>
                 <span>« {k.justification} »</span>
@@ -284,7 +354,8 @@ function ExclusionDialog({ count, item, done }: { count: Count; item: Item; done
   );
 }
 
-function DepartureDialog({ count, item, today, done }: { count: Count; item: Item; today: string; done: () => void }) {
+/** Date d'un départ fixée par la direction : pendant la vérification d'un comptage (`url` du comptage) ou hors comptage (G5b-2). */
+function DepartureDialog({ url, item, today, done, outsideCount = false }: { url: string; item: Departure; today: string; done: () => void; outsideCount?: boolean }) {
   const toast = useToast();
   const { busy, run } = useAction();
   const [day, setDay] = useState('');
@@ -303,17 +374,48 @@ function DepartureDialog({ count, item, today, done }: { count: Count; item: Ite
         fd.append('departureDate', day);
         fd.append('justification', justification);
         if (file) fd.append('file', file);
-        if (await run(() => api.post(`/settings/billing-counts/${count.id}/corrections`, fd), toast, 'Date de départ enregistrée')) done();
+        if (await run(() => api.post(url, fd), toast, 'Date de départ enregistrée')) done();
       }}>
-        <Field label="Date du départ" hint={`Au plus tard le ${frDate(max)}. Le jour du départ n’est plus un jour de présence.`}>
-          <Input type="date" value={day} max={max} onChange={(e) => setDay(e.target.value)} required />
+        <Field label="Date du départ" hint={`${item.since ? `Entre le ${frDate(item.since)} et le ${frDate(max)}` : `Au plus tard le ${frDate(max)}`}. Le jour du départ n’est plus un jour de présence.`}>
+          <Input type="date" value={day} min={item.since ?? undefined} max={max} onChange={(e) => setDay(e.target.value)} required />
         </Field>
         <Field label="Justification" hint="5 caractères au moins : d’où vient cette date.">
           <Textarea value={justification} onChange={(e) => setJustification(e.target.value)} required minLength={5} maxLength={500} />
         </Field>
         <FileField file={file} setFile={setFile} />
         <Button type="submit" loading={busy}>Enregistrer la date</Button>
-        <p className="text-xs text-muted">La date vaut aussitôt pour la suite de la vérification ; elle est datée et inscrite au journal.</p>
+        <p className="text-xs text-muted">{outsideCount
+          ? 'La date vaut pour les comptages à venir ; un comptage déjà figé ne change pas. Elle est datée et inscrite au journal.'
+          : 'La date vaut aussitôt pour la suite de la vérification ; elle est datée et inscrite au journal.'}</p>
+      </form>
+    </DialogContent>
+  );
+}
+
+/** G5b-2 : la direction confirme que la date de départ est introuvable ; l'élève reste compté, sans être « À vérifier ». */
+function ConfirmUnknownDialog({ url, item, done }: { url: string; item: Departure; done: () => void }) {
+  const toast = useToast();
+  const { busy, run } = useAction();
+  const [justification, setJustification] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  return (
+    <DialogContent title={`Date de départ introuvable : ${item.name}`} description="Vous confirmez qu’aucune date de départ ne peut être retrouvée. L’élève reste compté, comme sans réponse, mais n’est plus « À vérifier ». Vous pourrez encore fixer sa date si vous la retrouvez.">
+      <form className="grid gap-3" onSubmit={async (e) => {
+        e.preventDefault();
+        const fd = new FormData();
+        fd.append('kind', 'DEPARTURE_CONFIRMED');
+        fd.append('enrollmentId', item.enrollmentId);
+        fd.append('justification', justification);
+        if (file) fd.append('file', file);
+        if (await run(() => api.post(url, fd), toast, 'Date introuvable confirmée : l’élève reste compté')) done();
+      }}>
+        <p className="rounded-lg bg-sunk p-2 text-sm">{item.matricule} · {item.className}</p>
+        <Field label="Justification" hint="5 caractères au moins : ce qui a été cherché (registre, dossier, parents).">
+          <Textarea value={justification} onChange={(e) => setJustification(e.target.value)} required minLength={5} maxLength={500} />
+        </Field>
+        <FileField file={file} setFile={setFile} />
+        <Button type="submit" loading={busy}>Confirmer : date introuvable</Button>
+        <p className="text-xs text-muted">La confirmation est datée et inscrite au journal.</p>
       </form>
     </DialogContent>
   );

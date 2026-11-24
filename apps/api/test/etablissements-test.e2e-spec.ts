@@ -18,7 +18,7 @@ import { configureApp } from '../src/bootstrap';
 import { forgetAccess } from '../src/common/auth';
 import { localDay } from '../src/common/country';
 import { LIMITED_REFUSAL } from '../src/modules/billing/access-rules';
-import { CLIENT_ATTESTATION, COMMERCIAL_STATUS_FROZEN } from '../src/modules/billing/billing';
+import { CLIENT_ATTESTATION, COMMERCIAL_STATUS_FROZEN, TEST_ESTABLISHMENT_NOTE } from '../src/modules/billing/billing';
 import { BillingJobsService } from '../src/modules/billing/billing-jobs';
 import { addDays } from '../src/modules/billing/billing-rules';
 import { SCHOOL_TEST_NOTICE } from '../src/modules/billing/subscription-school';
@@ -147,9 +147,9 @@ describe('Établissements de test (20 novembre 2026) · jamais facturés réelle
     expect(v).toMatchObject({ commercialStatus: 'TEST', testNotice: SCHOOL_TEST_NOTICE, subscription: null, access: null, regularization: null });
     // La console les compte à part et ne propose aucun changement de statut à un établissement qui a un abonnement.
     const list = (await pf.get('/billing/establishments').expect(200)).body as { id: string; commercialStatus: string; commercialStatusLabel: string; canChangeCommercialStatus: boolean }[];
-    expect(list.find((e) => e.id === S.N.id)).toMatchObject({ commercialStatus: 'TEST', commercialStatusLabel: 'Établissement de test', canChangeCommercialStatus: true });
+    expect(list.find((e) => e.id === S.N.id)).toMatchObject({ commercialStatus: 'TEST', commercialStatusLabel: 'Établissement de test', commercialStatusNote: TEST_ESTABLISHMENT_NOTE, canChangeCommercialStatus: true });
     expect(list.find((e) => e.id === S.LA.id)).toMatchObject({ commercialStatus: 'TEST', canChangeCommercialStatus: false });
-    expect(list.find((e) => e.id === S.C.id)).toMatchObject({ commercialStatus: 'CLIENT', commercialStatusLabel: 'Client réel', canChangeCommercialStatus: false });
+    expect(list.find((e) => e.id === S.C.id)).toMatchObject({ commercialStatus: 'CLIENT', commercialStatusLabel: 'Client réel', commercialStatusNote: null, canChangeCommercialStatus: false });
     const o = (await pf.get('/billing/overview').expect(200)).body;
     expect(o.counts.testEstablishments).toBeGreaterThanOrEqual(3);
     expect(o.counts.testEstablishments + o.counts.clientEstablishments).toBe(o.counts.establishments);

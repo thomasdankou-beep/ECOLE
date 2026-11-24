@@ -641,7 +641,11 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
       status: 'VALIDATED', origin: { id: docs[0].id, reference: docs[0].reference }, creditNote: { id: credit.id, reference: credit.reference, total: avoir }, target: { late: false },
     });
     const originDoc = (await pf.get(`/billing/documents/${docs[0].id}`)).body;
-    expect(originDoc.exclusionOrigins).toEqual([{ correctionId: k1, tenantId: K.id, linkedAt: expect.any(String), creditNote: { id: credit.id, reference: credit.reference, total: avoir } }]);
+    expect(originDoc.exclusionOrigins).toEqual([{
+      correctionId: k1, tenantId: K.id, linkedAt: expect.any(String), matricule: expect.any(String), decidedAt: expect.any(String),
+      creditNote: { id: credit.id, reference: credit.reference, total: avoir },
+    }]);
+    expect(originDoc.exclusionOrigins[0].matricule).toBe(`G5C-${stamp}-${kFirst[1].m}`);
     expect(credit.lines[0].label).toBe(`${K.name} · Avoir après exclusion d’une inscription erronée (${COUNT_KIND_LABELS.FINAL_REGULARIZATION.toLowerCase()} du ${frDay(FINAL)})`);
     // Déjà demandé pour l'année : les documents moins l'avoir ; jamais un remboursement automatique.
     expect(await billed(K)).toBe(share(50_000));

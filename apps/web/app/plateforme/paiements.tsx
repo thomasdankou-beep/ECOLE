@@ -18,6 +18,8 @@ import { CodeField, frDate, money, useSubmit } from './facturation-outils';
  * Chaque écriture demande un code actuel de l'application d'authentification. Tant que le verrou du serveur est fermé
  * (par défaut, donc en production), l'API refuse chaque écriture : les écrans le disent, l'historique reste lisible.
  * Aucun prestataire n'est appelé : Cahiora enregistre à la main ce qu'il a reçu.
+ * Ajustement G5d2-5 (20 novembre 2026) : la ressaisie d'un paiement annulé le désigne, une seule fois ; un justificatif
+ * déjà joint ou un paiement semblable exige le motif de cet autre versement (réservé à Cahiora).
  */
 
 type MoneyRow = { currency: string; amount: number };
@@ -35,8 +37,15 @@ type Payment = {
   id: string; receiptNumber: string; tenantId: string; tenantName: string; group: { id: string; name: string }; documentId: string; documentReference: string; currency: string;
   expectedAmount: number; amount: number; paidOn: string; meansName: string; transactionRef: string; creditAmount: number; note: string | null; recordedByName: string; recordedAt: string;
   status: 'VALIDATED' | 'CANCELLED'; statusLabel: string; cancelledAt: string | null; cancelledByName: string | null; cancelReason: string | null; allocations: { reference: string; amount: number }[];
+  /** G5d2-5 : reçu du paiement annulé que celui-ci ressaisit, reçu de la ressaisie d'un paiement annulé, motif d'un autre versement. */
+  replacesPaymentId: string | null; replacesReceipt: string | null; reenteredBy: string | null; similarReason: string | null;
 };
-type Overview = { unlocked: boolean; lockMessage: string | null; mention: string; today: string; currencies: string[]; means: { current: Means[]; versions: Means[] }; establishments: Establishment[]; payments: Payment[] };
+/** Paiement annulé pas encore ressaisi, à désigner lors de sa ressaisie (G5d2-5). */
+type Reentry = { id: string; receiptNumber: string; tenantId: string; tenantName: string; amount: number; currency: string; paidOn: string; transactionRef: string; cancelledAt: string };
+type Overview = {
+  unlocked: boolean; lockMessage: string | null; mention: string; today: string; currencies: string[]; means: { current: Means[]; versions: Means[] }; establishments: Establishment[]; payments: Payment[];
+  toReenter: Reentry[]; duplicateRule: string;
+};
 type PaymentDetail = Payment & {
   proofUrl: string; proofMime: string;
   movements: { reference: string; amount: number; reversal: boolean; createdAt: string }[];
@@ -200,13 +209,29 @@ export function Paiements() {
       </Card>
 
       <Card className="grid gap-3">
-        <h3 className="font-bold">Paiements enregistrés</h3>
+        <div>
+          <h3 className="font-bold">Paiements enregistrés</h3>
+          <p className="text-sm text-muted">{d.duplicateRule}</p>
+        </div>
+        {d.toReenter.length > 0 && (
+          <details className="text-sm">
+            <summary className="cursor-pointer font-bold">Saisies annulées pas encore ressaisies ({d.toReenter.length})</summary>
+            <ul className="mt-2 grid gap-1" aria-label="Saisies annulées pas encore ressaisies">
+              {d.toReenter.map((r) => (
+                <li key={r.id} className="rounded bg-sunk p-2">
+                  <b className="font-mono text-xs">{r.receiptNumber}</b> · {r.tenantName} · {money(r.amount, r.currency)} du {frDate(r.paidOn)}, référence <span className="font-mono text-xs">{r.transactionRef}</span>
+                  <span className="block text-xs text-muted">Annulée le {dateTime(r.cancelledAt)} : à désigner si ce paiement est ressaisi.</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {d.payments.length === 0 ? <p className="text-sm text-muted">Aucun paiement enregistré.</p> : <PaymentsTable payments={d.payments} open={(id) => setDialog({ kind: 'payment', id })} />}
       </Card>
 
       <Dialog open={!!dialog} onOpenChange={(o) => !o && setDialog(null)}>
         {dialog?.kind === 'means' && <MeansDialog base={dialog.base} currencies={d.currencies} today={d.today} done={done} />}
-        {dialog?.kind === 'record' && <RecordDialog e={dialog.e} done={done} />}
+        {dialog?.kind === 'record' && <RecordDialog e={dialog.e} toReenter={d.toReenter} done={done} />}
         {dialog?.kind === 'payment' && <PaymentDialog id={dialog.id} unlocked={d.unlocked} done={done} />}
       </Dialog>
     </div>
@@ -220,7 +245,11 @@ function PaymentsTable({ payments, open }: { payments: Payment[]; open?: (id: st
       <tbody>
         {payments.map((p) => (
           <tr key={p.id}>
-            <td className={`font-mono text-xs font-bold ${p.cancelledAt ? 'line-through' : ''}`}>{p.receiptNumber}</td>
+            <td>
+              <span className={`font-mono text-xs font-bold ${p.cancelledAt ? 'line-through' : ''}`}>{p.receiptNumber}</span>
+              {p.replacesReceipt && <span className="block text-xs text-muted">ressaisie de {p.replacesReceipt}</span>}
+              {p.reenteredBy && <span className="block text-xs text-muted">ressaisi par {p.reenteredBy}</span>}
+            </td>
             <td>{p.tenantName}</td>
             <td className="font-mono text-xs">{p.documentReference}</td>
             <td><b>{money(p.amount, p.currency)}</b>{p.creditAmount > 0 && <span className="block text-xs text-muted">dont {money(p.creditAmount, p.currency)} en crédit</span>}</td>
@@ -274,9 +303,13 @@ function MeansDialog({ base, currencies, today: day, done }: { base: Means | nul
   );
 }
 
-function RecordDialog({ e, done }: { e: Establishment; done: () => void }) {
+function RecordDialog({ e, toReenter, done }: { e: Establishment; toReenter: Reentry[]; done: () => void }) {
   const first = e.documents.find((x) => x.id === e.graceDocument?.id && (x.balance ?? 0) > 0) ?? e.documents.find((x) => (x.balance ?? 0) > 0) ?? e.documents[0];
-  const [f, setF] = useState({ documentId: first?.id ?? '', amount: '', paidOn: e.today, meansCode: e.means[0]?.code ?? '', transactionRef: '', note: '', code: '' });
+  const [f, setF] = useState({
+    documentId: first?.id ?? '', amount: '', paidOn: e.today, meansCode: e.means[0]?.code ?? '', transactionRef: '', replacesPaymentId: '', similarReason: '', note: '', code: '',
+  });
+  // Les saisies annulées de cet établissement d'abord : une ressaisie pour un autre établissement reste possible (erreur d'établissement).
+  const reentries = [...toReenter.filter((r) => r.tenantId === e.tenantId), ...toReenter.filter((r) => r.tenantId !== e.tenantId)];
   const [file, setFile] = useState<File | null>(null);
   const { busy, error, submit } = useSubmit(done, 'Paiement enregistré : reçu provisoire émis');
   const doc = e.documents.find((x) => x.id === f.documentId);
@@ -316,11 +349,24 @@ function RecordDialog({ e, done }: { e: Establishment; done: () => void }) {
             {e.means.map((m) => <option key={m.code} value={m.code}>{m.name}</option>)}
           </Select>
         </Field>
-        <Field label="Référence de la transaction" hint="Une même référence ne s’enregistre qu’une fois (3 à 100 caractères).">
+        <Field label="Référence de la transaction" hint="Une même référence ne s’enregistre qu’une fois (3 à 100 caractères) ; celle d’une saisie annulée revient seulement dans sa ressaisie.">
           <Input value={f.transactionRef} minLength={3} maxLength={100} onChange={(x) => setF({ ...f, transactionRef: x.target.value })} required />
         </Field>
+        {reentries.length > 0 && (
+          <Field label="Ressaisie d’un paiement annulé" hint="Seulement si ce paiement remplace une saisie annulée : désignez-la (une ressaisie ne se fait qu’une fois).">
+            <Select value={f.replacesPaymentId} onChange={(x) => setF({ ...f, replacesPaymentId: x.target.value })}>
+              <option value="">Non : nouveau paiement</option>
+              {reentries.map((r) => (
+                <option key={r.id} value={r.id}>{r.receiptNumber} · {r.tenantName} · {money(r.amount, r.currency)} du {frDate(r.paidOn)} · réf. {r.transactionRef}</option>
+              ))}
+            </Select>
+          </Field>
+        )}
         <Field label="Justificatif du paiement" hint="Photo ou PDF de la preuve reçue (obligatoire).">
           <Input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={(x) => setFile(x.target.files?.[0] ?? null)} required />
+        </Field>
+        <Field label="Motif d’un autre versement (si Cahiora le demande)" hint="Seulement quand un paiement semblable ou un même justificatif existe déjà : pourquoi ce versement est distinct (5 à 300 caractères). Jamais montré à l’établissement.">
+          <Input value={f.similarReason} maxLength={300} onChange={(x) => setF({ ...f, similarReason: x.target.value })} />
         </Field>
         <Field label="Commentaire interne (facultatif)" hint="Jamais montré à l’établissement.">
           <Input value={f.note} maxLength={500} onChange={(x) => setF({ ...f, note: x.target.value })} />
@@ -353,6 +399,9 @@ function PaymentDialog({ id, unlocked, done }: { id: string; unlocked: boolean; 
             <dt className="text-muted">Date, moyen</dt><dd>{frDate(p.paidOn)} · {p.meansName}</dd>
             <dt className="text-muted">Référence</dt><dd className="font-mono text-xs">{p.transactionRef}</dd>
             <dt className="text-muted">Enregistré</dt><dd>{dateTime(p.recordedAt)} par {p.recordedByName}</dd>
+            {p.replacesReceipt && <><dt className="text-muted">Ressaisie de</dt><dd className="font-mono text-xs">{p.replacesReceipt} (saisie annulée)</dd></>}
+            {p.reenteredBy && <><dt className="text-muted">Ressaisi par</dt><dd className="font-mono text-xs">{p.reenteredBy}</dd></>}
+            {p.similarReason && <><dt className="text-muted">Motif d’un autre versement</dt><dd>{p.similarReason}</dd></>}
             {p.note && <><dt className="text-muted">Commentaire interne</dt><dd>{p.note}</dd></>}
           </dl>
           <p><a href={p.proofUrl} target="_blank" rel="noreferrer" className="font-bold text-brand underline">Ouvrir le justificatif</a> <span className="text-xs text-muted">(lien valable quinze minutes)</span></p>
@@ -415,7 +464,7 @@ export function AvoirsCredits() {
 
       <Card className="grid gap-3">
         <h3 className="font-bold">Demandes de remboursement</h3>
-        <p className="text-sm text-muted">Un crédit se rembourse seulement sur demande de la direction, validée ici avec sa preuve. Un crédit déjà déduit d’un document ne se rembourse pas.</p>
+        <p className="text-sm text-muted">Un crédit se rembourse seulement sur demande de la direction, validée ici avec sa preuve. Un crédit déjà déduit d’un document ne se rembourse pas. La direction peut demander un remboursement même pendant un accès limité, dès que les remboursements sont ouverts (verrou du serveur).</p>
         {pending.length === 0 ? <p className="text-sm text-muted">Aucune demande en attente.</p> : (
           <ul className="grid gap-2" aria-label="Demandes de remboursement en attente">
             {pending.map((r) => (
