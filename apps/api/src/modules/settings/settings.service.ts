@@ -181,6 +181,8 @@ export class SettingsService {
           id: tenant.id, name: tenant.name, shortName: tenant.shortName, settings, identity,
           country: tenant.country, countryName: country(tenant.country).name, currency: tenant.currency, timezone: tenant.timezone,
           operators: schoolOperators(tenant), einvoice: country(tenant.country).einvoice,
+          // Établissement de test (ajustements G5) : l'espace de la direction masque les rubriques commerciales inutiles.
+          commercialStatus: tenant.commercialStatus,
         },
         currentYear: year, sites, years, levels, tracks, rooms, subjects,
       };

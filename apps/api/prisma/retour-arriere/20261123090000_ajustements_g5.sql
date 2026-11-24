@@ -1,6 +1,7 @@
 -- Retour arrière de la migration 20261123090000_ajustements_g5 (API arrêtée, avant de remettre le code précédent).
 -- Retire le statut commercial des établissements (« test » ou « client réel ») et ses contrôles, la confirmation d'une
--- date de départ introuvable et les corrections de départ faites hors de tout comptage (G5b-2), les liens des
+-- date de départ introuvable, les corrections de départ faites hors de tout comptage et la contestation d'un départ
+-- antérieur au comptage (G5b-2 ; les contestations déjà demandées restent, vues comme des exclusions), les liens des
 -- exclusions vers leur document d'origine (G5c-9), la ressaisie désignée d'un paiement annulé, l'empreinte des
 -- justificatifs et le motif d'un paiement semblable (G5d2-5). Remet les fonctions des lots G5a, G5b, G5c, G5d-1 et G5d-2
 -- telles qu'elles étaient. Ne touche à aucune autre donnée : comptages, documents, avoirs, paiements et abonnements
@@ -13,7 +14,7 @@
 -- migration peut être rejouée par une nouvelle mise à jour (tous les établissements redeviennent alors « test »).
 -- Contrôle de sécurité : s'il existe un établissement passé en client réel, un lien d'exclusion inscrit depuis la mise à
 -- jour (ceux qu'elle a inscrits pour les exclusions plus anciennes se déduisent des données gardées), une correction
--- faite hors comptage ou une confirmation de date introuvable, ou un paiement qui porte une ressaisie, une empreinte de
+-- faite hors comptage, une confirmation de date introuvable ou une contestation de départ, ou un paiement qui porte une ressaisie, une empreinte de
 -- justificatif ou un motif, le script les compte et S'ARRÊTE sans rien changer. Pour passer outre en connaissance de
 -- cause seulement (ces données seront perdues : gardez d'abord une sauvegarde hors du serveur) :
 -- PGOPTIONS="-c cahiora.forcer_retour=oui".
@@ -35,12 +36,13 @@ BEGIN
   -- Corrections cloisonnées par école (Row Level Security forcée, sauf pour un superutilisateur) : lues école par école.
   FOR t IN SELECT id FROM tenants LOOP
     PERFORM set_config('app.tenant_id', t.id::text, true);
-    n_corrections := n_corrections + (SELECT count(*) FROM count_corrections WHERE tenant_id = t.id AND ("countId" IS NULL OR kind::text = 'DEPARTURE_CONFIRMED'));
+    n_corrections := n_corrections + (SELECT count(*) FROM count_corrections WHERE tenant_id = t.id
+      AND ("countId" IS NULL OR kind::text = 'DEPARTURE_CONFIRMED' OR (kind::text = 'EXCLUSION' AND "departureDate" IS NOT NULL)));
   END LOOP;
   PERFORM set_config('app.tenant_id', '', true);
   SELECT count(*) INTO n_payments FROM billing_payments WHERE "replacesPaymentId" IS NOT NULL OR "proofSha256" IS NOT NULL OR "similarReason" IS NOT NULL;
   IF n_clients + n_links + n_corrections + n_payments > 0 AND coalesce(current_setting('cahiora.forcer_retour', true), '') <> 'oui' THEN
-    RAISE EXCEPTION 'Retour arrière arrêté, rien n''a été changé : % établissement(s) en client réel, % lien(s) d''exclusion, % correction(s) de départ hors comptage ou date introuvable, % paiement(s) avec ressaisie, empreinte ou motif',
+    RAISE EXCEPTION 'Retour arrière arrêté, rien n''a été changé : % établissement(s) en client réel, % lien(s) d''exclusion, % correction(s) de départ hors comptage, date introuvable ou contestation de départ, % paiement(s) avec ressaisie, empreinte ou motif',
       n_clients, n_links, n_corrections, n_payments;
   END IF;
 END $$;
@@ -374,6 +376,48 @@ BEGIN
     FROM jsonb_to_recordset(p_items) AS x("enrollmentId" uuid, "classId" uuid, "siteId" uuid, counted boolean, basis text, "departureDate" date);
   RETURN QUERY SELECT v_id, v_pupils, v_cumulative, v_check, v_excluded, v_hash, v_review;
 END $$;
+
+-- Liste des exclusions du Super Admin telle qu'au lot G5c (sans la date d'un départ contesté). Fonction recréée : même
+-- propriétaire que les tables, aucun droit sauf pour le rôle de la plateforme (grant_platform_documents_role).
+DROP FUNCTION IF EXISTS platform_count_exclusions();
+CREATE FUNCTION platform_count_exclusions() RETURNS TABLE (
+  tenant_id uuid, correction_id uuid, status text, count_id uuid, count_kind text, reference_date date, year_label text, matricule text,
+  class_name text, cancel_reason text, justification text, file_key text, file_mime text, requested_by_name text, requested_at timestamp,
+  decided_by_name text, decided_at timestamp, decision_note text, document_date date)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_tenant uuid;
+BEGIN
+  FOR v_tenant IN
+    SELECT DISTINCT l.tenant_id FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId" WHERE d.kind = 'SUBSCRIPTION' ORDER BY 1
+  LOOP
+    PERFORM set_config('app.tenant_id', v_tenant::text, true);
+    RETURN QUERY
+      SELECT x.tenant_id, x.id, x.status, x.count_id, x.count_kind, x.reference_date, x.year_label, x.matricule, x.class_name, x.cancel_reason,
+             x.justification, x.file_key, x.file_mime, x.requested_by_name, x.requested_at, x.decided_by_name, x.decided_at, x.decision_note, x.document_date
+      FROM (
+        SELECT k.tenant_id, k.id, k.status::text AS status, b.id AS count_id, b.kind::text AS count_kind, b."referenceDate" AS reference_date,
+               b."yearLabel" AS year_label, st.matricule, cl.name AS class_name, en."cancelReason" AS cancel_reason, k.justification,
+               k."fileKey" AS file_key, k."fileMime" AS file_mime, k."requestedByName" AS requested_by_name, k."requestedAt" AS requested_at,
+               k."decidedByName" AS decided_by_name, k."decidedAt" AS decided_at, k."decisionNote" AS decision_note, k."decidedByKind" AS decided_by_kind,
+               billing_enrollment_document(v_tenant, k."enrollmentId", b."yearLabel") AS document_date
+        FROM count_corrections k
+        JOIN billing_counts b ON b.id = k."countId"
+        JOIN enrollments en ON en.id = k."enrollmentId"
+        JOIN students st ON st.id = en."studentId"
+        LEFT JOIN classes cl ON cl.id = en."classId"
+        WHERE k.tenant_id = v_tenant AND k.kind = 'EXCLUSION'
+      ) x
+      WHERE x.decided_by_kind = 'platform' OR (x.status = 'PENDING' AND x.document_date IS NOT NULL)
+      ORDER BY x.requested_at DESC;
+  END LOOP;
+END $$;
+DO $$
+BEGIN
+  EXECUTE format('ALTER FUNCTION platform_count_exclusions() OWNER TO %I', (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = 'count_corrections'::regclass));
+END $$;
+REVOKE ALL ON FUNCTION platform_count_exclusions() FROM PUBLIC;
+SELECT grant_platform_documents_role();
 
 -- G5d2-5 : ressaisie, empreinte et motif des paiements ; enregistrement d'un paiement tel qu'au lot G5d-2.
 DROP TRIGGER IF EXISTS billing_payments_links_guard ON billing_payments;

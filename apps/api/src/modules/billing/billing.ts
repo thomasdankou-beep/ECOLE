@@ -18,7 +18,7 @@ import {
   ParameterKey, PARAMETERS, pilotEndDay, retroactiveChanges, STATUS_LABELS, subscriptionKindLabel, trialEndDay, versionOn, yearDatesError,
 } from './billing-rules';
 import { CountRecord, countView, sortCounts } from './counts-rules';
-import { financialTotals } from './payments-totals';
+import { financialTotals, REAL_INDICATORS_NOTE } from './payments-totals';
 
 /**
  * Facturation de Cahiora, lot G5a : paramètres tarifaires datés, conditions commerciales, calendriers des
@@ -570,6 +570,8 @@ export class BillingService {
         clientCredits: totals.credits, servicesRevenue: null, commissionsDue: null, commissionsPaid: null,
       },
       amountsFrom: { servicesRevenue: 'G5g', commissionsDue: 'G5h', commissionsPaid: 'G5h' },
+      // 24 novembre 2026 : indicateurs réels, clients réels seulement (les états d'abonnement aussi, plus haut).
+      amountsScope: REAL_INDICATORS_NOTE,
     };
   }
 

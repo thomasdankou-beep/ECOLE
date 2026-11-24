@@ -58,6 +58,8 @@ const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const MEANS_NAME = `Virement fictif GNF ${stamp}`;
 const INSTRUCTIONS = 'Coordonnées fictives pour les essais du lot G5d-2 : aucun compte réel.';
 const NOTE = 'Commentaire interne fictif (essai G5d-2)';
+/** DS-7 A (24 novembre 2026) : motif d'une ressaisie, propre à Cahiora. */
+const REENTRY = 'Montant corrigé après la saisie annulée (essai)';
 const CANCEL_REASON = 'Erreur de saisie fictive (essai G5d-2)';
 
 let app: INestApplication;
@@ -594,17 +596,25 @@ describe('Lot G5d-2 · une saisie erronée s’annule par une contre-écriture m
     expect([unknown.status, msg(unknown)]).toEqual([409, 'Paiement annulé à ressaisir introuvable']);
     const live = await record(S.P, D.P1, 85_000, `REF-P2-${stamp}`, { file: proof, replacesPaymentId: pay.P1.id });
     expect([live.status, msg(live)]).toEqual([409, `Seul un paiement dont la saisie est annulée se ressaisit (reçu ${pay.P1.receiptNumber})`]);
-    // Ressaisie désignée, avec le même justificatif (celui du paiement annulé) et le montant corrigé.
-    const r = await record(S.P, D.P1, 85_000, `REF-P2-${stamp}`, { file: proof, replacesPaymentId: pay.P2.id });
+    // DS-7 A (24 novembre 2026) : toute ressaisie est justifiée par son motif (5 à 300 caractères), authentifiée et tracée.
+    const bare = await record(S.P, D.P1, 85_000, `REF-P2-${stamp}`, { file: proof, replacesPaymentId: pay.P2.id });
+    expect([bare.status, msg(bare)]).toEqual([409, 'Ressaisie d’un paiement annulé : donnez le motif de la ressaisie (5 à 300 caractères)']);
+    const short = await record(S.P, D.P1, 85_000, `REF-P2-${stamp}`, { file: proof, replacesPaymentId: pay.P2.id, similarReason: 'non' });
+    expect([short.status, msg(short)]).toEqual([400, 'Motif : 5 à 300 caractères']);
+    // Ressaisie désignée, avec le même justificatif (celui du paiement annulé), le montant corrigé et son motif.
+    const r = await record(S.P, D.P1, 85_000, `REF-P2-${stamp}`, { file: proof, replacesPaymentId: pay.P2.id, similarReason: REENTRY });
     expect(r.status).toBe(201);
     expect(r.body).toMatchObject({
-      allocated: 85_000, credit: 0, access: { kind: 'RESTORED', status: 'ACTIVE' }, replacesPaymentId: pay.P2.id, replacesReceipt: pay.P2.receiptNumber, similarReason: null,
+      allocated: 85_000, credit: 0, access: { kind: 'RESTORED', status: 'ACTIVE' }, replacesPaymentId: pay.P2.id, replacesReceipt: pay.P2.receiptNumber, similarReason: REENTRY,
     });
     pay.P3 = r.body;
     expect(await balances(S.P)).toEqual({ [D.P1.reference]: 0, [D.P2.reference]: 0 });
     expect((await notes(S.P, 'billing.payment_recorded'))[2].body).toContain(`Il remplace la saisie annulée du reçu ${pay.P2.receiptNumber}.`);
-    expect((await platformJournal(S.P, 'billing.payment_recorded'))[2].data).toMatchObject({ receiptNumber: pay.P3.receiptNumber, replacesReceipt: pay.P2.receiptNumber });
+    expect((await platformJournal(S.P, 'billing.payment_recorded'))[2].data).toMatchObject({ receiptNumber: pay.P3.receiptNumber, replacesReceipt: pay.P2.receiptNumber, reentryReason: REENTRY });
     expect((await schoolJournal(S.P, 'billing.payment_recorded'))[2].data).toMatchObject({ receiptNumber: pay.P3.receiptNumber, replacesReceipt: pay.P2.receiptNumber });
+    // Le motif de la ressaisie reste à Cahiora : ni l'établissement ni son groupe ne le lisent.
+    expect(JSON.stringify([await view(S.P), await schoolJournal(S.P, 'billing.payment_recorded'), await groupJournal(S.P, 'billing.payment_recorded'), await notes(S.P, 'billing.payment_recorded')]))
+      .not.toContain(REENTRY);
     // Les deux sens du lien se lisent dans la console ; le paiement annulé n'est plus à ressaisir.
     expect((await pf.get(`/billing/payments/${pay.P2.id}`)).body).toMatchObject({ status: 'CANCELLED', reenteredBy: pay.P3.receiptNumber, replacesReceipt: null });
     expect((await pf.get(`/billing/payments/${pay.P3.id}`)).body).toMatchObject({ status: 'VALIDATED', reenteredBy: null, replacesReceipt: pay.P2.receiptNumber });
@@ -868,14 +878,17 @@ describe('Ajustement G5d2-5 (20 novembre 2026) · doubles saisies après l’ann
     expect(o.toReenter.find((x: { id: string }) => x.id === pay.W1.id)).toMatchObject({
       receiptNumber: pay.W1.receiptNumber, tenantId: S.W.id, tenantName: S.W.name, amount: 20_000, currency: CUR, paidOn: today, transactionRef: `REF-V1-${stamp}`,
     });
-    expect(o.duplicateRule).toBe('Une ressaisie désigne le paiement annulé qu’elle remplace, une seule fois. Un justificatif déjà joint à un autre paiement, ou un paiement semblable (même établissement, même montant, même moyen, à 3 jours près), exige le motif de cet autre versement.');
+    expect(o.duplicateRule).toBe('Une ressaisie désigne le paiement annulé qu’elle remplace, une seule fois, avec le motif de la ressaisie. Un justificatif déjà joint à un autre paiement, ou un paiement semblable (même établissement, même montant, même moyen, à 3 jours près), exige le motif de cet autre versement.');
     const proof = proofs.get(`REF-V1-${stamp}`)!;
     const before = await counts();
     const free = await record(S.V, D.V1, 20_000, `REF-V1-${stamp}`, { file: proof });
     expect([free.status, msg(free)]).toEqual([409, `Cette référence est celle du paiement annulé du reçu ${pay.W1.receiptNumber} : enregistrez la ressaisie de ce paiement en le désignant`]);
     expect(await counts()).toEqual(before);
-    // Ressaisie pour le bon établissement : même référence, même justificatif, paiement annulé désigné.
-    const ok = await record(S.V, D.V1, 20_000, `REF-V1-${stamp}`, { file: proof, replacesPaymentId: pay.W1.id });
+    // La base exige aussi le motif de la ressaisie (DS-7 A), quel que soit le chemin.
+    await expect(direct(S.V, D.V1, { ref: `REF-V1-${stamp}`, sha: sha256(proof), replaces: pay.W1.id })).rejects.toThrow(/donnez le motif de la ressaisie/);
+    expect(await counts()).toEqual(before);
+    // Ressaisie pour le bon établissement : même référence, même justificatif, paiement annulé désigné, avec son motif.
+    const ok = await record(S.V, D.V1, 20_000, `REF-V1-${stamp}`, { file: proof, replacesPaymentId: pay.W1.id, similarReason: 'Paiement saisi d’abord pour le mauvais établissement (essai)' });
     expect(ok.status).toBe(201);
     expect(ok.body).toMatchObject({ tenantId: S.V.id, replacesPaymentId: pay.W1.id, replacesReceipt: pay.W1.receiptNumber, allocations: [{ reference: D.V1.reference, amount: 20_000 }] });
     pay.V1 = ok.body;
@@ -900,7 +913,7 @@ describe('Ajustement G5d2-5 (20 novembre 2026) · doubles saisies après l’ann
     const same = await record(S.V, D.V1, 5_000, `REF-V2-${stamp}`, { file: proof });
     expect([same.status, msg(same)]).toEqual([409, `Ce justificatif est déjà joint au paiement du reçu ${pay.V1.receiptNumber} : un même versement ne s’enregistre qu’une fois ; s’il justifie aussi un autre versement, donnez-en le motif`]);
     const short = await record(S.V, D.V1, 5_000, `REF-V2-${stamp}`, { file: proof, similarReason: 'non' });
-    expect([short.status, msg(short)]).toEqual([400, 'Motif d’un autre versement : 5 à 300 caractères']);
+    expect([short.status, msg(short)]).toEqual([400, 'Motif : 5 à 300 caractères']);
     await expect(direct(S.V, D.V1, { ref: `REF-V2-DIRECT-${stamp}`, sha: sha256(proof) })).rejects.toThrow(/ce justificatif est déjà joint au paiement du reçu/);
     expect(await counts()).toEqual(before);
     const ok = await record(S.V, D.V1, 5_000, `REF-V2-${stamp}`, { file: proof, similarReason: `  ${REASON}  ` });
@@ -944,6 +957,42 @@ describe('Ajustement G5d2-5 (20 novembre 2026) · doubles saisies après l’ann
     expect(await admin.billingPayment.count({ where: { tenantId: T.id } })).toBe(0);
     // Il n'est pas proposé dans la console des paiements.
     expect((await pf.get('/billing/payments')).body.establishments.some((e: { tenantId: string }) => e.tenantId === T.id)).toBe(false);
+  });
+});
+
+describe('Précisions du 24 novembre 2026 · indicateurs réels, sans les établissements de test', () => {
+  it('un établissement de test n’entre dans aucun montant, aucune créance ni aucune liste des rapports, même avec des données d’avant', async () => {
+    const amount = (rows: { currency: string; amount: number }[]) => rows.find((r) => r.currency === CUR)?.amount ?? 0;
+    const Y = await newSchool('Y');
+    const d = await doc('Y1', Y.groupId, 'SUBSCRIPTION', day(-9), [[Y.id, 30_000, 'TRIAL_END']], { due: day(5) });
+    expect((await record(Y, d, 10_000, `REF-Y1-${stamp}`)).status).toBe(201);
+    const mine = (await pf.get(`/billing/reports?tenantId=${Y.id}`).expect(200)).body;
+    expect(mine.totals).toMatchObject({ billed: [{ currency: CUR, amount: 30_000 }], collected: [{ currency: CUR, amount: 10_000 }], unpaid: [{ currency: CUR, amount: 20_000 }] });
+    const before = (await pf.get('/billing/overview').expect(200)).body;
+    const all = (await pf.get('/billing/reports').expect(200)).body;
+    expect(all.tenants.some((t: { id: string }) => t.id === Y.id)).toBe(true);
+    // Établissement classé « test » avec ses données d'avant (simulé comme plus haut, le temps d'une transaction).
+    await admin.$transaction([
+      admin.$executeRawUnsafe('ALTER TABLE tenants DISABLE TRIGGER tenants_commercial_status_guard'),
+      admin.$executeRaw`UPDATE tenants SET "commercialStatus" = 'TEST' WHERE id = ${Y.id}::uuid`,
+      admin.$executeRawUnsafe('ALTER TABLE tenants ENABLE TRIGGER tenants_commercial_status_guard'),
+    ]);
+    const o = (await pf.get('/billing/overview').expect(200)).body;
+    expect(o.amountsScope).toBe('Clients réels seulement : les établissements de test n’entrent dans aucun montant, aucune créance ni aucune liste de ces indicateurs.');
+    expect([amount(o.amounts.billed), amount(o.amounts.collected), amount(o.amounts.unpaid)])
+      .toEqual([amount(before.amounts.billed) - 30_000, amount(before.amounts.collected) - 10_000, amount(before.amounts.unpaid) - 20_000]);
+    expect(o.counts).toMatchObject({ testEstablishments: before.counts.testEstablishments + 1, clientEstablishments: before.counts.clientEstablishments - 1 });
+    const r = (await pf.get('/billing/reports').expect(200)).body;
+    expect(r.scope).toBe(o.amountsScope);
+    expect([amount(r.totals.billed), amount(r.totals.collected), amount(r.totals.unpaid)])
+      .toEqual([amount(all.totals.billed) - 30_000, amount(all.totals.collected) - 10_000, amount(all.totals.unpaid) - 20_000]);
+    expect(r.tenants.some((t: { id: string }) => t.id === Y.id)).toBe(false);
+    expect(r.documents.some((x: { id: string }) => x.id === d.id)).toBe(false);
+    expect(r.payments.some((x: { tenantId: string }) => x.tenantId === Y.id)).toBe(false);
+    // Même demandé par son identifiant, il ne compte nulle part.
+    const y = (await pf.get(`/billing/reports?tenantId=${Y.id}`).expect(200)).body;
+    expect(y.totals).toEqual({ billed: [], credited: [], collected: [], refunded: [], unpaid: [], groupPending: [], credits: [] });
+    expect([y.documents, y.payments]).toEqual([[], []]);
   });
 });
 

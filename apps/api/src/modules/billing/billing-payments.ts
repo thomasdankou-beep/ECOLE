@@ -30,7 +30,7 @@ import {
   normalizedReference, PAYMENT_STATUS_LABELS, paymentError, PAYMENTS_LOCKED, paymentsUnlocked, RECEIPT_MENTION, REFUND_STATUS_LABELS, refundDecisionError,
   PaymentTrace, refundRequestError, REFUNDS_CLOSED, RefundStatus, SIMILAR_PAYMENT_DAYS, STATUS_FILTERS, StatusFilter, transferError,
 } from './payments-rules';
-import { financialTotals } from './payments-totals';
+import { financialTotals, REAL_INDICATORS_NOTE } from './payments-totals';
 
 /**
  * Paiements de l'abonnement Cahiora (lot G5d-2), plan validé par Dankou le 20 novembre 2026 (« Tout valider ») :
@@ -92,9 +92,12 @@ export class RecordPaymentDto {
   /** G5d2-5 : ressaisie d'un paiement dont la saisie est annulée (champ vide : aucune). */
   @Transform(({ value }) => (value === '' ? undefined : value))
   @IsOptional() @IsUUID('all', { message: 'Paiement annulé à ressaisir invalide' }) replacesPaymentId?: string;
-  /** G5d2-5 : motif d'un autre versement, quand un paiement semblable ou un même justificatif existe déjà. */
+  /**
+   * G5d2-5 : motif d'un autre versement, quand un paiement semblable ou un même justificatif existe déjà ; DS-7 A (24
+   * novembre 2026) : motif de la ressaisie, toujours exigé pour une ressaisie.
+   */
   @Transform(({ value }) => (typeof value === 'string' && value.trim() === '' ? undefined : value))
-  @IsOptional() @IsString() @Length(5, 300, { message: 'Motif d’un autre versement : 5 à 300 caractères' }) similarReason?: string;
+  @IsOptional() @IsString() @Length(5, 300, { message: 'Motif : 5 à 300 caractères' }) similarReason?: string;
   @IsString(CODE) @Length(6, 8, CODE) code: string;
 }
 
@@ -300,7 +303,7 @@ export class BillingPaymentsService {
       means: { current: means.current, versions: means.versions }, establishments, payments: payments.map((p) => paymentView(p, links)),
       // G5d2-5 : paiements annulés à désigner lors de leur ressaisie, et règle des doubles saisies.
       toReenter: await this.toReenter(),
-      duplicateRule: `Une ressaisie désigne le paiement annulé qu’elle remplace, une seule fois. Un justificatif déjà joint à un autre paiement, ou un paiement semblable (même établissement, même montant, même moyen, à ${SIMILAR_PAYMENT_DAYS} jours près), exige le motif de cet autre versement.`,
+      duplicateRule: `Une ressaisie désigne le paiement annulé qu’elle remplace, une seule fois, avec le motif de la ressaisie. Un justificatif déjà joint à un autre paiement, ou un paiement semblable (même établissement, même montant, même moyen, à ${SIMILAR_PAYMENT_DAYS} jours près), exige le motif de cet autre versement.`,
     };
   }
 
@@ -396,7 +399,7 @@ export class BillingPaymentsService {
           // Ressaisie d'un paiement saisi d'abord pour un autre établissement : au journal de la plateforme seulement,
           // comme le motif d'un autre versement et le commentaire interne (rien d'un établissement n'atteint un autre).
           const internal = {
-            note: p.note, ...(p.similarReason ? { similarReason: p.similarReason } : {}),
+            note: p.note, ...(p.similarReason ? { [replaced ? 'reentryReason' : 'similarReason']: p.similarReason } : {}),
             ...(replaced && replaced.tenantId !== t.id ? { replacesReceipt: replaced.receiptNumber, replacesTenant: replaced.tenant.name } : {}),
           };
           await paymentJournals(tx, actor, t, 'billing.payment_recorded', data, internal);
@@ -606,17 +609,20 @@ export class BillingPaymentsService {
    * Rapports financiers (§14) : facturé (documents provisoires) et encaissé (paiements validés) séparés, avoirs,
    * remboursements, impayés et crédits disponibles, par monnaie ; filtres de période, d'établissement, de groupe et
    * d'état (l'état filtre la liste des documents ; les totaux suivent la période, l'établissement et le groupe).
+   * Précisions du 24 novembre 2026 : clients réels seulement ; un établissement de test n'entre dans aucun total ni
+   * aucune liste de ces rapports, et ne se choisit pas dans leurs filtres.
    */
   async reports(q: ReportQueryDto) {
     if (q.from && q.to && q.from > q.to) throw new BadRequestException('Période : la date de début vient après la date de fin');
-    let tenantIds: string[] | null = null;
-    if (q.groupId) tenantIds = (await this.db.tenant.findMany({ where: { groupId: q.groupId }, select: { id: true } })).map((t) => t.id);
-    if (q.tenantId) tenantIds = tenantIds ? tenantIds.filter((id) => id === q.tenantId) : [q.tenantId];
+    const clients = await this.db.tenant.findMany({ where: { commercialStatus: 'CLIENT' }, orderBy: { name: 'asc' }, select: { id: true, name: true, groupId: true } });
+    let tenantIds: string[] = clients.map((t) => t.id);
+    if (q.groupId) tenantIds = clients.filter((t) => t.groupId === q.groupId).map((t) => t.id);
+    if (q.tenantId) tenantIds = tenantIds.filter((id) => id === q.tenantId);
     const totals = await financialTotals(this.db, { from: q.from, to: q.to, tenantIds });
     const docs = await this.db.billingDocument.findMany({
       where: {
         kind: 'SUBSCRIPTION', issueDate: { gte: q.from ? new Date(`${q.from}T00:00:00.000Z`) : undefined, lte: q.to ? new Date(`${q.to}T00:00:00.000Z`) : undefined },
-        ...(tenantIds ? { lines: { some: { tenantId: { in: tenantIds } } } } : {}),
+        lines: { some: { tenantId: { in: tenantIds } }, none: { tenant: { commercialStatus: 'TEST' } } },
       },
       orderBy: [{ issueDate: 'desc' }, { createdAt: 'desc' }], take: 500,
       include: { group: { select: { id: true, name: true } }, lines: { select: { tenantId: true, tenant: { select: { name: true, timezone: true } } } } },
@@ -644,7 +650,7 @@ export class BillingPaymentsService {
     const payments = await this.db.billingPayment.findMany({
       where: {
         paidOn: { gte: q.from ? new Date(`${q.from}T00:00:00.000Z`) : undefined, lte: q.to ? new Date(`${q.to}T00:00:00.000Z`) : undefined },
-        ...(tenantIds ? { tenantId: { in: tenantIds } } : {}),
+        tenantId: { in: tenantIds },
       },
       orderBy: [{ paidOn: 'desc' }, { recordedAt: 'desc' }], take: 500, include: PAYMENT_INCLUDE,
     });
@@ -652,8 +658,9 @@ export class BillingPaymentsService {
     return {
       filters: { from: q.from ?? null, to: q.to ?? null, tenantId: q.tenantId ?? null, groupId: q.groupId ?? null, status: q.status ?? null },
       totals, documents, payments: payments.map((p) => paymentView(p, links)), mention: RECEIPT_MENTION,
-      groups: await this.db.schoolGroup.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-      tenants: await this.db.tenant.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, groupId: true } }),
+      scope: REAL_INDICATORS_NOTE,
+      groups: await this.db.schoolGroup.findMany({ where: { tenants: { some: { commercialStatus: 'CLIENT' } } }, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
+      tenants: clients,
     };
   }
 }

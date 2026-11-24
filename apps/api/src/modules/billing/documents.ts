@@ -66,12 +66,17 @@ type OriginRow = {
   origin_id: string | null; origin_reference: string | null; origin_issue_date: Date | null; corrected_id: string | null; corrected_reference: string | null;
   corrected_issue_date: Date | null; matricule: string | null; count_kind: CountKind | null; reference_date: Date | null; year_label: string | null;
   requested_at: Date; decided_at: Date | null;
+  /** G5b-2 (24 novembre 2026) : date d'un départ contesté ; null pour l'exclusion d'une inscription annulée. */
+  departure_date: Date | null;
 };
 type ExclusionRow = {
   tenant_id: string; correction_id: string; status: 'PENDING' | 'VALIDATED' | 'REFUSED'; count_id: string; count_kind: CountKind; reference_date: Date; year_label: string;
   matricule: string; class_name: string | null; cancel_reason: string | null; justification: string; file_key: string | null; file_mime: string | null;
   requested_by_name: string; requested_at: Date; decided_by_name: string | null; decided_at: Date | null; decision_note: string | null; document_date: Date | null;
+  departure_date: Date | null; enrollment_status: string | null;
 };
+/** Nature d'une demande du ressort du Super Admin : exclusion d'une inscription annulée, ou contestation d'un départ (G5b-2). */
+const requestLabel = (departure: Date | null) => (departure ? 'Contestation de départ' : 'Demande d’exclusion');
 
 const CODE = { message: 'Code de votre application d’authentification : 6 chiffres' };
 
@@ -412,7 +417,7 @@ export class BillingDocumentsService {
         const [o] = await this.platform.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${x.tenantId}::uuid, ${x.correctionId}::uuid)`;
         return {
           correctionId: x.correctionId, tenantId: x.tenantId, linkedAt: x.createdAt, matricule: o?.matricule ?? null, decidedAt: o?.decided_at ?? null,
-          creditNote: originCredits.get(x.correctionId) ?? null,
+          departureDate: iso(o?.departure_date), creditNote: originCredits.get(x.correctionId) ?? null,
         };
       })),
       lines: d.lines.map((l) => ({
@@ -473,6 +478,8 @@ export class BillingDocumentsService {
         id: r.correction_id, tenant: { id: r.tenant_id, name: t?.name ?? '' }, currency: t?.currency ?? null, status: r.status, countKind: r.count_kind,
         countLabel: COUNT_KIND_LABELS[r.count_kind], referenceDate: iso(r.reference_date), yearLabel: r.year_label, matricule: r.matricule, className: r.class_name,
         cancelReason: r.cancel_reason, justification: r.justification, fileUrl: r.file_key ? this.files.signedUrl(r.file_key) : null,
+        // G5b-2 (24 novembre 2026) : contestation d'un élève parti avant le comptage, ou exclusion d'une inscription annulée.
+        contest: !!r.departure_date, departureDate: iso(r.departure_date), enrollmentStatus: r.enrollment_status, kindLabel: requestLabel(r.departure_date),
         requestedByName: r.requested_by_name, requestedAt: r.requested_at, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note,
         documentDate, requestDeadline: documentDate ? exclusionDeadline(documentDate) : null,
         origin: o?.origin_id ? { id: o.origin_id, reference: o.origin_reference, issueDate: iso(o.origin_issue_date) } : null,
@@ -506,7 +513,7 @@ export class BillingDocumentsService {
         await tx.platformAlert.create({
           data: {
             tenantId: r.tenant_id, kind: 'EXCLUSION_OVERDUE', dueDate: new Date(`${target}T00:00:00.000Z`),
-            message: `Demande d’exclusion en attente au-delà de l’objectif de ${EXCLUSION_TARGET_WORKING_DAYS} jours ouvrés : ${t?.name ?? 'établissement'}, inscription ${r.matricule}, `
+            message: `${requestLabel(r.departure_date)} en attente au-delà de l’objectif de ${EXCLUSION_TARGET_WORKING_DAYS} jours ouvrés : ${t?.name ?? 'établissement'}, inscription ${r.matricule}, `
               + `demandée le ${frDay(requested)}, à décider au plus tard le ${frDay(target)}. Aucune acceptation automatique : décidez dans Commercial et facturation › Factures et documents.`,
           },
         });
@@ -541,22 +548,32 @@ export class BillingDocumentsService {
           else credit = await this.issueCredit(tx, t, d.year_label, c.related, c.plan, id, admin, now);
         }
         const action = dto.decision === 'VALIDATED' ? 'billing.count_exclusion_validated' : 'billing.count_exclusion_refused';
+        // G5b-2 (24 novembre 2026) : une contestation de départ se dit comme telle à la direction et dans le journal.
+        const [o] = await tx.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${t.id}::uuid, ${id}::uuid)`;
+        const departure = iso(o?.departure_date);
+        const what = departure ? `la contestation du départ de l’inscription ${o?.matricule ?? ''} (départ le ${frDay(departure)})` : 'l’exclusion demandée';
         await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
         await tx.auditLog.createMany({
           data: [{
             tenantId: t.id, userId: null, userName: `Super Admin de la plateforme (${admin.name})`, action, entity: 'CountCorrection', entityId: id,
-            data: { decidedBy: 'platform', note: dto.note?.trim() || null, credit: credit && { reference: credit.reference, total: credit.total } } as Prisma.InputJsonValue,
+            data: {
+              decidedBy: 'platform', note: dto.note?.trim() || null, contest: !!departure, departureDate: departure,
+              credit: credit && { reference: credit.reference, total: credit.total },
+            } as Prisma.InputJsonValue,
           }],
         });
         // La direction est prévenue ; le montant de l'avoir seulement si elle voit les documents (école indépendante, D-G5-19).
         const sees = t.group._count.tenants === 1;
         const body = dto.decision === 'REFUSED'
-          ? `Le Super Admin de Cahiora a refusé l’exclusion demandée : ${dto.note!.trim()}`
+          ? `Le Super Admin de Cahiora a refusé ${what} : ${dto.note!.trim()}`
           : credit && sees
-            ? `Le Super Admin de Cahiora a validé l’exclusion demandée. Avoir provisoire ${credit.reference} de ${money(credit.total, t.currency)}, dans Paramètres › Abonnement Cahiora. ${PROVISIONAL_MENTION}`
+            ? `Le Super Admin de Cahiora a validé ${what}. Avoir provisoire ${credit.reference} de ${money(credit.total, t.currency)}, dans Paramètres › Abonnement Cahiora. ${PROVISIONAL_MENTION}`
               + (credit.imputed ? [creditNoteSentence(credit.imputed, t.currency), accessSentence(credit.imputed.access, t.currency)].filter(Boolean).map((x) => ` ${x}`).join('') : '')
-            : `Le Super Admin de Cahiora a validé l’exclusion demandée.${message ? ` ${message}.` : ''}`;
-        await notifyDirection(tx, t.id, action, dto.decision === 'VALIDATED' ? 'Exclusion validée par Cahiora' : 'Exclusion refusée par Cahiora', body);
+            : `Le Super Admin de Cahiora a validé ${what}.${message ? ` ${message}.` : ''}`;
+        const title = departure
+          ? (dto.decision === 'VALIDATED' ? 'Contestation de départ acceptée par Cahiora' : 'Contestation de départ refusée par Cahiora')
+          : (dto.decision === 'VALIDATED' ? 'Exclusion validée par Cahiora' : 'Exclusion refusée par Cahiora');
+        await notifyDirection(tx, t.id, action, title, body);
         return { status: dto.decision, credit, message };
       }, { timeout: 60000 });
     } catch (e) {
@@ -577,8 +594,10 @@ export class BillingDocumentsService {
     const link = await tx.billingExclusionLink.findUnique({ where: { correctionId }, select: { originDocumentId: true } });
     const [o] = await tx.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${t.id}::uuid, ${correctionId}::uuid)`;
     if (!link || !o?.origin_id || o.origin_id !== link.originDocumentId) throw new BadRequestException('Document d’origine de l’exclusion introuvable : aucun avoir n’est émis');
+    // G5b-2 (24 novembre 2026) : avoir après une contestation de départ acceptée, ou après l'exclusion d'une inscription annulée.
+    const departure = iso(o.departure_date);
     const line = {
-      tenantId: t.id, label: creditLineLabel(t.name, related.countKind, related.referenceDate), amount: plan.amount, pupils: y.pupils, pupilsChange: plan.pupilsChange,
+      tenantId: t.id, label: creditLineLabel(t.name, related.countKind, related.referenceDate, departure), amount: plan.amount, pupils: y.pupils, pupilsChange: plan.pupilsChange,
       pricePerPupil: y.pricePerPupil, minimum: y.minimum, minimumApplied: y.minimumApplied, fullYear: y.fullYear, shareMonths: y.share?.months ?? null,
       shareOf: y.share?.of ?? null, yearAmount: y.amount, alreadyBilled: plan.alreadyBilled, relatedLineId: related.id, correctionId,
     };
@@ -587,11 +606,13 @@ export class BillingDocumentsService {
       mention: PROVISIONAL_MENTION,
       client: { groupId: t.group.id, name: t.group.name },
       establishments: [{ tenantId: t.id, name: t.name }],
-      reason: 'Exclusion validée d’une inscription annulée pour erreur de saisie (D-G5-13 B)',
+      reason: departure
+        ? `Contestation acceptée : départ le ${frDay(departure)}, avant le comptage qui comptait l’élève (G5b-2, D-G5-13 B)`
+        : 'Exclusion validée d’une inscription annulée pour erreur de saisie (D-G5-13 B)',
       related: { documentId: related.documentId, reference: related.document.reference, countKind: related.countKind, countDate: related.referenceDate },
       exclusion: {
         correctionId, matricule: o.matricule, countKind: o.count_kind, countDate: iso(o.reference_date), requestedAt: o.requested_at, decidedAt: o.decided_at,
-        originDocumentId: o.origin_id, originReference: o.origin_reference, originIssueDate: iso(o.origin_issue_date),
+        originDocumentId: o.origin_id, originReference: o.origin_reference, originIssueDate: iso(o.origin_issue_date), departureDate: departure,
       },
       tariff: { currency: t.currency, pricePerPupil: y.pricePerPupil, minimum: y.minimum },
       rounded: y.rounded ? 'FLOOR' : null,

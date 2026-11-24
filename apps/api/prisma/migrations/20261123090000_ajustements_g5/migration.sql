@@ -8,6 +8,10 @@
 --   son accès n'est jamais limité : la base le refuse elle-même, quel que soit le chemin.
 -- - G5b-2 : un élève parti sans date connue reste « À vérifier » ; la direction fixe la date ou confirme qu'elle est
 --   introuvable, avant le comptage (période gratuite comprise) ou pendant sa vérification. Rien n'est exclu sans elle.
+--   Précision du 24 novembre 2026 : « Je ne souhaite pas qu'un élève ayant quitté l'établissement soit définitivement
+--   facturé sans possibilité de contestation et de régularisation. » Après un comptage figé, la direction conteste un
+--   élève parti AVANT le jour du premier comptage qui le compte (sortie enregistrée tard, ou départ sans date) : même
+--   démarche qu'une exclusion (justification, décision, avoir provisoire), dans le même délai.
 -- - G5c-9 : chaque avoir est relié par la base à l'exclusion qui le cause et au document d'origine (le premier document
 --   qui a demandé l'élève) ; le document corrigé reste celui auquel l'avoir est lié.
 -- - G5d2-5 : la ressaisie d'un paiement annulé est désignée et ne se fait qu'une fois (au besoin pour un autre
@@ -151,7 +155,12 @@ ALTER TABLE "count_corrections" ADD CONSTRAINT "count_corrections_confirmed_chec
 --   « À vérifier » au comptage suivant, y compris celui de la fin d'une période gratuite, figé aussitôt ;
 -- - après, sur un comptage figé (D-G5-14 A) : EXCLUSION seulement, jusqu'à 30 jours après le dernier document qui a
 --   demandé l'élève (sans limite tant qu'aucun document ne l'a demandé).
--- Jamais pour un départ réel : l'inscription doit être annulée. Journaux de la plateforme (avec le matricule, sans la
+-- Une EXCLUSION sans date de départ : inscription annulée pour erreur de saisie. Une EXCLUSION avec une date de départ
+-- (G5b-2, 24 novembre 2026) : contestation, sur un comptage figé, d'un élève parti (transféré ou retiré) le jour du
+-- premier comptage figé qui le compte ou avant ; la date est celle de la sortie enregistrée, ou celle que la direction
+-- justifie pour un départ enregistré avant l'historique. Un départ après ce jour ne se conteste pas : un départ réel
+-- n'efface jamais la présence de l'élève à une date de comptage passée (règle du 13 novembre 2026). Les deux attendent
+-- la même décision (D-G5-13 B) et peuvent donner un avoir. Journaux de la plateforme (avec le matricule, sans la
 -- justification) et du groupe (sans le matricule) ; l'API trace le journal de l'école.
 CREATE OR REPLACE FUNCTION request_count_correction(
   p_count uuid, p_kind text, p_enrollment uuid, p_departure date, p_justification text, p_file_key text, p_file_mime text, p_file_size integer,
@@ -169,6 +178,8 @@ DECLARE
   v_stage text;
   v_count_kind text;
   v_reference date;
+  v_first date;
+  v_exit text;
   b record;
   e record;
 BEGIN
@@ -220,15 +231,40 @@ BEGIN
   END IF;
   -- Verrou de l'inscription : deux demandes envoyées en même temps ne passent pas toutes les deux.
   PERFORM 1 FROM enrollments WHERE id = p_enrollment FOR UPDATE;
-  IF p_kind = 'EXCLUSION' THEN
+  IF p_kind = 'EXCLUSION' AND p_departure IS NULL THEN
     IF e.status <> 'CANCELLED' THEN
-      RAISE EXCEPTION 'CAHIORA: seule une inscription annulée pour erreur de saisie peut être exclue ; annulez-la d''abord, avec son motif (un départ réel ne s''exclut jamais)';
+      RAISE EXCEPTION 'CAHIORA: seule une inscription annulée pour erreur de saisie peut être exclue ; annulez-la d''abord, avec son motif (un départ réel ne s''exclut jamais ; un élève parti avant le jour du comptage se conteste avec sa date de départ)';
     END IF;
-    IF p_departure IS NOT NULL THEN
-      RAISE EXCEPTION 'CAHIORA: une exclusion ne porte pas de date de départ';
+  ELSIF p_kind = 'EXCLUSION' THEN
+    -- G5b-2 (24 novembre 2026) : contestation d'un élève parti avant le jour du premier comptage figé qui le compte.
+    IF v_stage IS DISTINCT FROM 'FROZEN' THEN
+      RAISE EXCEPTION 'CAHIORA: un départ se conteste sur un comptage figé ; pendant la vérification, enregistrez la sortie de l''élève avec sa date, ou datez son départ';
     END IF;
+    IF e.status NOT IN ('TRANSFERRED', 'WITHDRAWN') THEN
+      RAISE EXCEPTION 'CAHIORA: seul un élève parti (transféré ou retiré) se conteste ; enregistrez d''abord sa sortie avec sa date';
+    END IF;
+    IF p_departure > p_today THEN
+      RAISE EXCEPTION 'CAHIORA: la date de départ ne peut pas être dans le futur';
+    END IF;
+    SELECT min(f."referenceDate") INTO v_first FROM billing_count_items i JOIN billing_counts f ON f.id = i."countId"
+     WHERE i."enrollmentId" = p_enrollment AND i.counted AND f.tenant_id = v_tenant AND f."yearLabel" = v_year_label AND f.stage = 'FROZEN';
+    IF v_first IS NULL THEN
+      RAISE EXCEPTION 'CAHIORA: cette inscription n''est comptée dans aucun comptage figé';
+    END IF;
+    IF p_departure > v_first THEN
+      RAISE EXCEPTION 'CAHIORA: départ le %, après le comptage du % qui compte l''élève : sa présence à cette date reste due (un départ réel n''efface jamais une présence passée, règle du 13 novembre 2026)',
+        to_char(p_departure, 'DD/MM/YYYY'), to_char(v_first, 'DD/MM/YYYY');
+    END IF;
+    -- Sortie enregistrée dans l'historique des inscriptions : sa date, et aucune autre.
+    SELECT v.data->>'exitDate' INTO v_exit FROM enrollment_events v
+     WHERE v."enrollmentId" = p_enrollment AND v.kind IN ('WITHDRAWN', 'TRANSFERRED') ORDER BY v."createdAt" DESC, v.id DESC LIMIT 1;
+    IF v_exit IS NOT NULL AND left(v_exit, 10) <> p_departure::text THEN
+      RAISE EXCEPTION 'CAHIORA: la date de départ contestée doit être celle de la sortie enregistrée (le %)', to_char(left(v_exit, 10)::date, 'DD/MM/YYYY');
+    END IF;
+  END IF;
+  IF p_kind = 'EXCLUSION' THEN
     IF EXISTS (SELECT 1 FROM count_corrections k WHERE k."enrollmentId" = p_enrollment AND k.kind = 'EXCLUSION' AND k.status IN ('PENDING', 'VALIDATED')) THEN
-      RAISE EXCEPTION 'CAHIORA: une demande d''exclusion est déjà en cours ou validée pour cette inscription';
+      RAISE EXCEPTION 'CAHIORA: une demande d''exclusion ou de contestation est déjà en cours ou validée pour cette inscription';
     END IF;
     v_document := billing_enrollment_document(v_tenant, p_enrollment, v_year_label);
     IF v_stage = 'FROZEN' THEN
@@ -238,12 +274,12 @@ BEGIN
         RAISE EXCEPTION 'CAHIORA: cette inscription n''est pas comptée dans ce comptage figé';
       END IF;
       IF v_document IS NOT NULL AND p_today > v_document + 30 THEN
-        RAISE EXCEPTION 'CAHIORA: délai passé : une exclusion se demande au plus tard 30 jours après le document concerné, émis le % (D-G5-14 A)',
-          to_char(v_document, 'DD/MM/YYYY');
+        RAISE EXCEPTION 'CAHIORA: délai passé : une % se demande au plus tard 30 jours après le document concerné, émis le % (D-G5-14 A)',
+          CASE WHEN p_departure IS NULL THEN 'exclusion' ELSE 'contestation' END, to_char(v_document, 'DD/MM/YYYY');
       END IF;
     END IF;
     v_status := 'PENDING';
-    v_action := 'billing.count_exclusion_requested';
+    v_action := CASE WHEN p_departure IS NULL THEN 'billing.count_exclusion_requested' ELSE 'billing.count_departure_contested' END;
   ELSE
     IF e.status NOT IN ('TRANSFERRED', 'WITHDRAWN')
        AND NOT EXISTS (SELECT 1 FROM enrollment_events v WHERE v."enrollmentId" = p_enrollment AND v.kind = 'REINSTATED') THEN
@@ -282,12 +318,14 @@ BEGIN
     SELECT gen_random_uuid(), t.group_id, 'school', p_user, p_user_name, v_action,
            jsonb_build_object('tenantName', t.name, 'countKind', v_count_kind, 'referenceDate', v_reference, 'yearLabel', v_year_label), v_now
     FROM tenants t WHERE t.id = v_tenant;
-  -- Une exclusion qui touche un document émis attend le Super Admin (D-G5-13 B) : alerte de la plateforme.
+  -- Une exclusion ou une contestation qui touche un document émis attend le Super Admin (D-G5-13 B) : alerte.
   IF p_kind = 'EXCLUSION' AND v_document IS NOT NULL THEN
     INSERT INTO platform_alerts (id, tenant_id, kind, message, "dueDate", "createdAt")
       SELECT gen_random_uuid(), v_tenant, 'COUNT_EXCLUSION_TO_DECIDE',
-             'Demande d''exclusion à décider : ' || t.name || ', inscription ' || e.matricule || ' déjà demandée par le document du '
-               || to_char(v_document, 'DD/MM/YYYY') || ' (D-G5-13 B)', NULL, v_now
+             CASE WHEN p_departure IS NULL THEN 'Demande d''exclusion à décider : ' || t.name || ', inscription ' || e.matricule
+                  ELSE 'Contestation à décider : ' || t.name || ', inscription ' || e.matricule || ', départ le ' || to_char(p_departure, 'DD/MM/YYYY')
+                       || ', avant le comptage du ' || to_char(v_first, 'DD/MM/YYYY') || ',' END
+               || ' déjà demandée par le document du ' || to_char(v_document, 'DD/MM/YYYY') || ' (D-G5-13 B)', NULL, v_now
       FROM tenants t WHERE t.id = v_tenant;
   END IF;
   RETURN v_id;
@@ -472,10 +510,11 @@ END $$;
 
 -- Document d'origine d'une exclusion (premier document d'abonnement de l'année qui a demandé l'inscription) et document
 -- corrigé (dernier document d'abonnement de l'année de l'établissement), NULL s'il n'y en a pas ; avec le matricule
--- (jamais le nom), le comptage et les dates de la demande et de la décision, pour l'avoir et la console.
+-- (jamais le nom), le comptage, les dates de la demande et de la décision, et la date d'un départ contesté (G5b-2, vide
+-- pour une exclusion d'inscription annulée), pour l'avoir et la console.
 CREATE OR REPLACE FUNCTION billing_exclusion_origin(p_tenant uuid, p_correction uuid)
   RETURNS TABLE (origin_id uuid, origin_reference text, origin_issue_date date, corrected_id uuid, corrected_reference text, corrected_issue_date date,
-                 matricule text, count_kind text, reference_date date, year_label text, requested_at timestamp, decided_at timestamp)
+                 matricule text, count_kind text, reference_date date, year_label text, requested_at timestamp, decided_at timestamp, departure_date date)
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   k record;
@@ -505,7 +544,8 @@ BEGIN
     FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId"
    WHERE l.tenant_id = p_tenant AND d.kind = 'SUBSCRIPTION' AND d."yearLabel" = v_year
    ORDER BY l."referenceDate" DESC, d."createdAt" DESC LIMIT 1;
-  RETURN QUERY SELECT o.id, o.reference, o."issueDate", c.id, c.reference, c."issueDate", v_matricule, v_kind, v_reference, v_year, k."requestedAt", k."decidedAt";
+  RETURN QUERY SELECT o.id, o.reference, o."issueDate", c.id, c.reference, c."issueDate", v_matricule, v_kind, v_reference, v_year, k."requestedAt", k."decidedAt",
+                      k."departureDate";
 END $$;
 
 -- La décision du Super Admin inscrit le lien (une seule fois) ; une exclusion décidée par la direction avant tout
@@ -567,6 +607,46 @@ BEGIN
       SELECT k.id, k.tenant_id, o.origin_id, timezone('UTC', now())
       FROM k CROSS JOIN LATERAL billing_exclusion_origin(k.tenant_id, k.id) o
       WHERE o.origin_id IS NOT NULL;
+  END LOOP;
+  PERFORM set_config('app.tenant_id', '', true);
+END $$;
+
+-- G5b-2 (24 novembre 2026) : demandes d'exclusion et contestations de départ du ressort du Super Admin (remplace celle du
+-- lot G5c, qui ne rendait pas la date de départ) : mêmes lignes, plus la date d'un départ contesté (vide pour une
+-- exclusion) et l'état de l'inscription. Jamais le nom de l'élève ; rôle de la plateforme seulement.
+DROP FUNCTION platform_count_exclusions();
+CREATE FUNCTION platform_count_exclusions() RETURNS TABLE (
+  tenant_id uuid, correction_id uuid, status text, count_id uuid, count_kind text, reference_date date, year_label text, matricule text,
+  class_name text, cancel_reason text, justification text, file_key text, file_mime text, requested_by_name text, requested_at timestamp,
+  decided_by_name text, decided_at timestamp, decision_note text, document_date date, departure_date date, enrollment_status text)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_tenant uuid;
+BEGIN
+  FOR v_tenant IN
+    SELECT DISTINCT l.tenant_id FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId" WHERE d.kind = 'SUBSCRIPTION' ORDER BY 1
+  LOOP
+    PERFORM set_config('app.tenant_id', v_tenant::text, true);
+    RETURN QUERY
+      SELECT x.tenant_id, x.id, x.status, x.count_id, x.count_kind, x.reference_date, x.year_label, x.matricule, x.class_name, x.cancel_reason,
+             x.justification, x.file_key, x.file_mime, x.requested_by_name, x.requested_at, x.decided_by_name, x.decided_at, x.decision_note, x.document_date,
+             x.departure_date, x.enrollment_status
+      FROM (
+        SELECT k.tenant_id, k.id, k.status::text AS status, b.id AS count_id, b.kind::text AS count_kind, b."referenceDate" AS reference_date,
+               b."yearLabel" AS year_label, st.matricule, cl.name AS class_name, en."cancelReason" AS cancel_reason, k.justification,
+               k."fileKey" AS file_key, k."fileMime" AS file_mime, k."requestedByName" AS requested_by_name, k."requestedAt" AS requested_at,
+               k."decidedByName" AS decided_by_name, k."decidedAt" AS decided_at, k."decisionNote" AS decision_note, k."decidedByKind" AS decided_by_kind,
+               billing_enrollment_document(v_tenant, k."enrollmentId", b."yearLabel") AS document_date,
+               k."departureDate" AS departure_date, en.status::text AS enrollment_status
+        FROM count_corrections k
+        JOIN billing_counts b ON b.id = k."countId"
+        JOIN enrollments en ON en.id = k."enrollmentId"
+        JOIN students st ON st.id = en."studentId"
+        LEFT JOIN classes cl ON cl.id = en."classId"
+        WHERE k.tenant_id = v_tenant AND k.kind = 'EXCLUSION'
+      ) x
+      WHERE x.decided_by_kind = 'platform' OR (x.status = 'PENDING' AND x.document_date IS NOT NULL)
+      ORDER BY x.requested_at DESC;
   END LOOP;
   PERFORM set_config('app.tenant_id', '', true);
 END $$;
@@ -652,7 +732,8 @@ BEGIN
     RAISE EXCEPTION 'CAHIORA: commentaire : 500 caractères au plus';
   END IF;
   IF v_similar IS NOT NULL AND length(v_similar) NOT BETWEEN 5 AND 300 THEN
-    RAISE EXCEPTION 'CAHIORA: motif d''un autre versement semblable : 5 à 300 caractères';
+    RAISE EXCEPTION 'CAHIORA: %', CASE WHEN p_replaces IS NULL THEN 'motif d''un autre versement semblable : 5 à 300 caractères'
+      ELSE 'motif de la ressaisie : 5 à 300 caractères' END;
   END IF;
   SELECT tn.id, tn.name, tn.group_id, tn.currency INTO t FROM tenants tn WHERE tn.id = p_tenant;
   IF NOT FOUND THEN
@@ -705,6 +786,11 @@ BEGIN
     IF FOUND THEN
       RAISE EXCEPTION 'CAHIORA: ce paiement annulé a déjà été ressaisi (reçu %) : une ressaisie ne se fait qu''une fois', z."receiptNumber";
     END IF;
+    -- DS-7 A (Dankou, 24 novembre 2026) : toute ressaisie est justifiée par son motif, authentifiée (code de
+    -- l'application, contrôlé par l'API) et tracée (journaux).
+    IF v_similar IS NULL THEN
+      RAISE EXCEPTION 'CAHIORA: ressaisie d''un paiement annulé : donnez le motif de la ressaisie (5 à 300 caractères)';
+    END IF;
   END IF;
   SELECT bp."receiptNumber" INTO z FROM billing_payments bp
    WHERE bp."transactionKey" = v_key AND bp."cancelledAt" IS NOT NULL AND bp.id IS DISTINCT FROM p_replaces
@@ -744,7 +830,7 @@ BEGIN
                                 "recordedAt", ip, "replacesPaymentId", "proofSha256", "similarReason")
     VALUES (v_id, p_tenant, t.group_id, p_document, t.currency, coalesce(v_expected, 0), p_amount, p_paid_on, m.id, m.name, btrim(p_reference), v_key,
             p_proof_key, p_proof_mime, v_note, v_seq, v_number, p_amount - v_allocated, p_admin, btrim(p_admin_name), v_now, p_ip,
-            p_replaces, p_proof_sha256, CASE WHEN v_has_similar OR v_same_proof THEN v_similar END);
+            p_replaces, p_proof_sha256, CASE WHEN v_has_similar OR v_same_proof OR p_replaces IS NOT NULL THEN v_similar END);
   PERFORM billing_write_allocations(p_tenant, v_docs, v_amounts, 'PAYMENT', v_id, NULL, NULL, v_now);
   IF p_amount > v_allocated THEN
     INSERT INTO billing_credit_entries (id, tenant_id, currency, kind, amount, "paymentId", data, "createdByKind", "createdById", "createdByName", "createdAt")
@@ -773,12 +859,13 @@ END $$;
 
 -- ---------------------------------------------------------------- Droits
 
-REVOKE ALL ON FUNCTION tenant_is_test(uuid), billing_exclusion_origin(uuid, uuid),
+REVOKE ALL ON FUNCTION tenant_is_test(uuid), billing_exclusion_origin(uuid, uuid), platform_count_exclusions(),
   record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date, uuid, text, text) FROM PUBLIC;
 
 -- Rôle de la plateforme : lecture des liens des exclusions, statut commercial (colonne de tenants, déjà lisible et
--- modifiable par ce rôle), document d'origine, nouvel enregistrement des paiements. infra/postgres/role-plateforme.sh
--- appelle cette fonction avec les autres à chaque installation.
+-- modifiable par ce rôle), document d'origine, liste des exclusions et contestations (recréée : ses droits sont
+-- redonnés ici), nouvel enregistrement des paiements. infra/postgres/role-plateforme.sh appelle cette fonction avec les
+-- autres à chaque installation.
 CREATE OR REPLACE FUNCTION grant_platform_ajustements_role() RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_platform') THEN
@@ -786,7 +873,7 @@ BEGIN
     RETURN;
   END IF;
   GRANT SELECT ON billing_exclusion_links TO erp_platform;
-  GRANT EXECUTE ON FUNCTION tenant_is_test(uuid), billing_exclusion_origin(uuid, uuid),
+  GRANT EXECUTE ON FUNCTION tenant_is_test(uuid), billing_exclusion_origin(uuid, uuid), platform_count_exclusions(),
     record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date, uuid, text, text) TO erp_platform;
 END $$;
 

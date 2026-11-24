@@ -60,6 +60,7 @@ const G1 = {} as School; // trois établissements d'un même groupe
 const G2 = {} as School;
 const G3 = {} as School;
 const L = {} as School; // école indépendante : exclusion avant tout document, puis au minimum
+const P = {} as School; // école indépendante : contestation d'un élève « À vérifier » avant tout document (24 novembre 2026)
 const sa = { id: '', name: 'Super Admin documents (fictif)', email: `g5c-${stamp}@test.local`, cookie: '', secret: '' };
 
 const [ty, tm] = T.split('-').map(Number);
@@ -642,7 +643,7 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     });
     const originDoc = (await pf.get(`/billing/documents/${docs[0].id}`)).body;
     expect(originDoc.exclusionOrigins).toEqual([{
-      correctionId: k1, tenantId: K.id, linkedAt: expect.any(String), matricule: expect.any(String), decidedAt: expect.any(String),
+      correctionId: k1, tenantId: K.id, linkedAt: expect.any(String), matricule: expect.any(String), decidedAt: expect.any(String), departureDate: null,
       creditNote: { id: credit.id, reference: credit.reference, total: avoir },
     }]);
     expect(originDoc.exclusionOrigins[0].matricule).toBe(`G5C-${stamp}-${kFirst[1].m}`);
@@ -853,6 +854,129 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     expect((await as(G1.direction).get('/settings/subscription')).body.regularization).toMatchObject({
       requested: null, documents: 0, dueDate: null, dueDatePending: false, lines: [], groupPending: expect.stringContaining('D-G5-19'),
     });
+  });
+
+  it('précision du 24 novembre 2026 (G5b-2) : un élève parti avant le comptage qui le compte se conteste, comme une exclusion ; un départ après ne se conteste pas', async () => {
+    const trial = await frozen(K, 'TRIAL_END');
+    const url = `/settings/billing-counts/${trial.id}`;
+    const item = async (p: Pupil) => (await as(K.direction).get(url)).body.items.find((i: Item) => i.enrollmentId === p.enrollmentId);
+    const contest = (p: Pupil, departureDate?: string) => as(K.direction).post(`${url}/corrections`, {
+      kind: 'DEPARTURE_CONTEST', enrollmentId: p.enrollmentId, justification: 'Départ avant la fin de l’essai : registre et courrier des parents (fictifs)',
+      ...(departureDate ? { departureDate } : {}),
+    });
+    const left = kFirst[4];
+    // Élève encore inscrit : rien à contester.
+    expect(await item(kFirst[5])).toMatchObject({ enrollmentStatus: 'ACTIVE', contest: null, canContest: false });
+    expect(message(await contest(kFirst[5]))).toMatch(/Seul un élève parti \(transféré ou retiré\)/);
+    // Parti le T-5, après la fin de l'essai (T-7) : sa présence à cette date reste due (règle du 13 novembre 2026).
+    expect(await item(kFirst[0])).toMatchObject({ enrollmentStatus: 'WITHDRAWN', contest: { firstCounted: trialEnd, exitDay: d(-5), afterCount: true }, canContest: false });
+    expect(message(await contest(kFirst[0]))).toContain(`Départ le ${frDay(d(-5))}, après le comptage du ${frDay(trialEnd)} qui compte l’élève : sa présence à cette date reste due`);
+
+    // Sortie enregistrée tard (le T), datée du T-10 : avant la fin de l'essai, l'élève n'aurait pas dû être compté.
+    expect((await as(K.direction).post(`/students/${left.studentId}/withdraw`, { status: 'WITHDRAWN', reason: 'Départ fictif enregistré tard', exitDate: d(-10) })).status).toBe(201);
+    expect(await item(left)).toMatchObject({
+      counted: true, enrollmentStatus: 'WITHDRAWN', exclusion: null, contest: { firstCounted: trialEnd, exitDay: d(-10), since: null, afterCount: false },
+      canContest: true, canExclude: false, documentDate: issued, exclusionUntil: addDays(issued, 30), decider: 'PLATFORM',
+    });
+    // La date est celle de la sortie enregistrée, et aucune autre ; un comptage provisoire ne se conteste pas.
+    expect(message(await contest(left, d(-11)))).toContain(`La date de départ contestée est celle de la sortie enregistrée : le ${frDay(d(-10))}`);
+    const provisional = await admin.billingCount.findFirstOrThrow({ where: { tenantId: K.id, kind: 'FIRST_REGULARIZATION', stage: 'PROVISIONAL' } });
+    expect(message(await as(K.direction).post(`/settings/billing-counts/${provisional.id}/corrections`, { kind: 'DEPARTURE_CONTEST', enrollmentId: left.enrollmentId, justification: 'Départ fictif' })))
+      .toMatch(/Un départ se conteste sur un comptage figé/);
+    // La base refait les contrôles, quel que soit le chemin.
+    const ask = (p: Pupil, departure: string) => inTenant(K.id, (tx) => tx.$queryRaw<{ id: string }[]>`
+      SELECT request_count_correction(${trial.id}::uuid, 'EXCLUSION', ${p.enrollmentId}::uuid, ${departure}::date, 'Départ fictif', NULL, NULL,
+        NULL::integer, ${K.directionId}::uuid, 'Fictif DIRECTION k', NULL, ${T}::date) AS id`, appDb);
+    await expect(ask(left, d(-11))).rejects.toThrow(`la date de départ contestée doit être celle de la sortie enregistrée (le ${dmy(d(-10))})`);
+    await expect(ask(kFirst[0], d(-5))).rejects.toThrow(`départ le ${dmy(d(-5))}, après le comptage du ${dmy(trialEnd)} qui compte l'élève`);
+    await expect(ask(kFirst[5], d(-10))).rejects.toThrow(/seul un élève parti \(transféré ou retiré\) se conteste/);
+
+    const r = await contest(left);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ status: 'PENDING' });
+    const kc: string = r.body.id;
+    expect(await correction(K, kc)).toMatchObject({ kind: 'EXCLUSION', status: 'PENDING', countId: trial.id });
+    expect(dayOf((await correction(K, kc)).departureDate)).toBe(d(-10));
+    expect(message(await contest(left))).toMatch(/déjà en cours ou validée/);
+    // Un document émis est touché : le Super Admin décide (D-G5-13 B), alerté avec le matricule, jamais le nom.
+    expect(message(await as(K.direction).post(`/settings/billing-counts/corrections/${kc}/decision`, { decision: 'VALIDATED' }))).toMatch(/le Super Admin de Cahiora la décide/);
+    const alert = (await admin.platformAlert.findMany({ where: { tenantId: K.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' }, orderBy: { createdAt: 'desc' } }))[0];
+    expect(alert.message).toBe(`Contestation à décider : ${K.name}, inscription G5C-${stamp}-${left.m}, départ le ${dmy(d(-10))}, avant le comptage du ${dmy(trialEnd)}, `
+      + `déjà demandée par le document du ${dmy(issued)} (D-G5-13 B)`);
+    expect(await admin.platformAuditLog.count({ where: { tenantId: K.id, action: 'billing.count_departure_contested' } })).toBe(1);
+    expect(await inTenant(K.id, (tx) => tx.auditLog.count({ where: { action: 'billing.count_departure_contested', entityId: kc } }))).toBe(1);
+    const view = (await as(K.direction).get(url)).body;
+    expect(view.corrections.find((k: { id: string }) => k.id === kc)).toMatchObject({ kind: 'EXCLUSION', contest: true, departureDate: d(-10), decider: 'PLATFORM' });
+    expect(await item(left)).toMatchObject({ exclusion: { id: kc, status: 'PENDING', contest: true, departureDate: d(-10) }, canContest: false });
+
+    // Le Super Admin voit une contestation, avec la date du départ ; validée, elle donne un avoir provisoire.
+    const row = (await pf.get('/billing/exclusions')).body.exclusions.find((x: Exclusion) => x.id === kc);
+    expect(row).toMatchObject({ status: 'PENDING', contest: true, departureDate: d(-10), enrollmentStatus: 'WITHDRAWN', kindLabel: 'Contestation de départ', cancelReason: null });
+    const before = await billed(K);
+    const done = await svc().decideExclusion(superAdmin(), kc, { tenantId: K.id, decision: 'VALIDATED', code: await code() }, at(addDays(issued, 3)));
+    expect(done).toMatchObject({ status: 'VALIDATED', credit: { reference: expect.stringMatching(/^PROV-[0-9A-F]{10}$/) } });
+    const credit = (await docsOf(K.groupId)).find((x) => x.id === done.credit!.documentId)!;
+    expect(credit.total).toBe(before - (await billed(K)));
+    expect(credit.total).toBeGreaterThan(0);
+    expect(credit.lines[0]).toMatchObject({ correctionId: kc, pupilsChange: -1 });
+    expect(credit.lines[0].label).toBe(`${K.name} · Avoir après le départ d’un élève avant le comptage, le ${frDay(d(-10))} (${COUNT_KIND_LABELS.FINAL_REGULARIZATION.toLowerCase()} du ${frDay(FINAL)})`);
+    expect(credit.data).toMatchObject({
+      reason: `Contestation acceptée : départ le ${frDay(d(-10))}, avant le comptage qui comptait l’élève (G5b-2, D-G5-13 B)`,
+      exclusion: { correctionId: kc, departureDate: d(-10), countKind: 'TRIAL_END', countDate: trialEnd },
+    });
+    const notes = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_exclusion_validated' }, orderBy: { createdAt: 'desc' } }));
+    expect(notes[0].title).toBe('Contestation de départ acceptée par Cahiora');
+    expect(notes[0].body).toContain(`Le Super Admin de Cahiora a validé la contestation du départ de l’inscription G5C-${stamp}-${left.m} (départ le ${frDay(d(-10))})`);
+    expect(await item(left)).toMatchObject({ exclusion: { id: kc, status: 'VALIDATED', contest: true }, canContest: false });
+    // Le comptage figé ne change jamais.
+    expect(await admin.billingCount.findUniqueOrThrow({ where: { id: trial.id } })).toMatchObject({ pupils: 90, cumulative: 90 });
+  });
+
+  it('précision du 24 novembre 2026 (G5b-2) : un élève « À vérifier » compté à la fin de l’essai se conteste avec une date justifiée ; avant tout document, la direction décide', async () => {
+    // P : deux élèves, plus un départ enregistré avant l'historique des inscriptions (sans date) : compté, « À vérifier ».
+    await newSchool(P, 'p', null);
+    const klass = await newClass(P);
+    const pupils = await enrol(2, year.start, klass.id, P);
+    const legacy = await inTenant(P.id, async (tx) => {
+      const st = await tx.student.create({ data: { tenantId: P.id, matricule: `G5C-${stamp}-ancien`, firstName: 'Élève', lastName: 'FICTIFANCIEN', status: 'WITHDRAWN' } });
+      const e = await tx.enrollment.create({
+        data: { tenantId: P.id, studentId: st.id, classId: klass.id, academicYearId: P.yearId, enrolledAt: morning(year.start), type: 'NEW', status: 'WITHDRAWN' },
+      });
+      return { studentId: st.id, enrollmentId: e.id, m: 'ancien' };
+    });
+    expect((await pf.post(`/billing/establishments/${P.id}/trial`, { startDate: d(-20), code: await code() })).status).toBe(201);
+    await app.get(BillingJobsService).runDue(at(d(-6)));
+    await app.get(CountsService).runDue(at(d(-6)));
+    const trial = await frozen(P, 'TRIAL_END');
+    const end = dayOf(trial.referenceDate)!;
+    expect(trial).toMatchObject({ pupils: 3, cumulative: 3, toCheck: 1 });
+    const url = `/settings/billing-counts/${trial.id}`;
+    const item = async (x: Pupil) => (await as(P.direction).get(url)).body.items.find((i: Item) => i.enrollmentId === x.enrollmentId);
+    const contest = (x: Pupil, departureDate?: string) => as(P.direction).post(`${url}/corrections`, {
+      kind: 'DEPARTURE_CONTEST', enrollmentId: x.enrollmentId, justification: 'Radiation du registre avant la fin de l’essai (fictive)', ...(departureDate ? { departureDate } : {}),
+    });
+    expect(await item(pupils[0])).toMatchObject({ basis: 'ACTIVE', toCheck: false, contest: null, canContest: false });
+    // Aucun document : sans limite de date, la direction décide (D-G5-13 B).
+    expect(await item(legacy)).toMatchObject({
+      basis: 'DEPARTURE_UNKNOWN', toCheck: true, counted: true, contest: { firstCounted: end, exitDay: null, since: year.start, max: end, afterCount: false },
+      canContest: true, documentDate: null, exclusionUntil: null, decider: 'SCHOOL',
+    });
+    expect(message(await contest(legacy))).toMatch(/Date de départ obligatoire/);
+    expect(message(await contest(legacy, addDays(end, 1)))).toContain(`Départ le ${frDay(addDays(end, 1))}, après le comptage du ${frDay(end)}`);
+    expect(message(await contest(legacy, addDays(year.start, -1)))).toMatch(/précède l’arrivée de l’élève/);
+    const r = await contest(legacy, d(-12));
+    expect(r.status).toBe(201);
+    expect(dayOf((await correction(P, r.body.id)).departureDate)).toBe(d(-12));
+    expect(await admin.platformAlert.count({ where: { tenantId: P.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' } })).toBe(0);
+    expect((await as(P.direction).get(url)).body.corrections.find((k: { id: string }) => k.id === r.body.id)).toMatchObject({ contest: true, status: 'PENDING', decider: 'SCHOOL' });
+    expect((await as(P.direction).post(`/settings/billing-counts/corrections/${r.body.id}/decision`, { decision: 'VALIDATED' })).body).toEqual({ status: 'VALIDATED' });
+    expect(await correction(P, r.body.id)).toMatchObject({ status: 'VALIDATED', decidedByKind: 'school' });
+    // Retiré des élèves facturables ; le comptage figé reste tel quel.
+    expect(await platform().$queryRaw`SELECT * FROM billing_counts_billable(${P.id}::uuid)`).toEqual([{ count_id: trial.id, billable: 2 }]);
+    expect(await admin.billingCount.findUniqueOrThrow({ where: { id: trial.id } })).toMatchObject({ pupils: 3, toCheck: 1 });
+    expect(await item(legacy)).toMatchObject({ exclusion: { status: 'VALIDATED', contest: true, departureDate: d(-12) }, canContest: false });
+    const log = await inTenant(P.id, (tx) => tx.auditLog.findFirstOrThrow({ where: { action: 'billing.count_exclusion_validated', entityId: r.body.id } }));
+    expect(log.data).toMatchObject({ contest: true, departureDate: d(-12) });
   });
 });
 

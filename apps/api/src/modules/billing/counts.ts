@@ -37,6 +37,12 @@ import {
  * pendant sa vérification ; rappel 3 jours avant la fin de la gratuité et 2 jours avant la fin d'une vérification s'il
  * en reste ; au comptage figé, ceux qui restent sont comptés et le Super Admin reçoit une alerte. Seuls les
  * établissements clients réels ont des comptages (établissements de test : aucun).
+ * Précision du 24 novembre 2026 : aucun élève parti n'est facturé définitivement sans contestation possible. Sur un
+ * comptage figé, la direction conteste un élève parti (transféré ou retiré) le jour du premier comptage figé qui le
+ * compte ou avant : date de la sortie enregistrée, ou date justifiée pour un départ enregistré avant l'historique. La
+ * contestation suit la démarche d'une exclusion (justification, justificatif facultatif, décision de la direction tant
+ * qu'aucun document n'est touché, sinon du Super Admin, avoir provisoire, même délai de 30 jours après le document).
+ * Un départ après ce jour ne se conteste pas : la présence à une date de comptage reste due (règle du 13 novembre 2026).
  */
 
 type Sub = Subscription & { tenant: { id: string; name: string; timezone: string; groupId: string } };
@@ -54,6 +60,18 @@ const DEPARTURE_BASES: CountBasis[] = ['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN', '
 const toCheckText = (n: number) => `${n} élève${n > 1 ? 's' : ''} « À vérifier »`;
 /** Accord au singulier ou au pluriel (« 1 élève … reste compté », « 2 élèves … restent comptés »). */
 const pl = (n: number, one: string, many: string) => (n > 1 ? many : one);
+/** Libellé d'un élève exclu après une contestation de départ acceptée (G5b-2, 24 novembre 2026). */
+const CONTESTED_LABEL = 'Exclu : parti avant le comptage (contestation acceptée)';
+/** Un départ après le premier comptage qui compte l'élève ne se conteste pas (règle du 13 novembre 2026). */
+const afterCountText = (departure: string, first: string) =>
+  `Départ le ${frDay(departure)}, après le comptage du ${frDay(first)} qui compte l’élève : sa présence à cette date reste due (un départ réel n’efface jamais une présence passée)`;
+
+/**
+ * G5b-2 (24 novembre 2026) : ce qu'il faut pour contester un élève parti, compté dans un comptage figé de l'année.
+ * `exitDay` : date de la sortie enregistrée dans l'historique des inscriptions, seule date possible ; null pour un départ
+ * enregistré avant cet historique, sans date : la direction en donne une, entre `since` et `max`.
+ */
+type ContestFacts = { firstCounted: string; exitDay: string | null; since: string | null; max: string; afterCount: boolean };
 
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 function cahioraMessage(e: unknown) {
@@ -61,9 +79,13 @@ function cahioraMessage(e: unknown) {
   return m ? m[1].trim() : null;
 }
 
-/** Forme d'une demande : date obligatoire pour fixer un départ, interdite pour une exclusion ou une date introuvable. */
+/**
+ * Forme d'une demande : date obligatoire pour fixer un départ, interdite pour une exclusion ou une date introuvable ;
+ * pour une contestation, la date est celle de la sortie enregistrée (facultative) ou celle d'un départ sans date.
+ */
 function checkShape(dto: { kind: string; departureDate?: string }) {
   if (dto.kind === 'DEPARTURE_DATE' && !(dto.departureDate && isDay(dto.departureDate))) throw new BadRequestException('Date de départ : date invalide');
+  if (dto.kind === 'DEPARTURE_CONTEST' && dto.departureDate && !isDay(dto.departureDate)) throw new BadRequestException('Date de départ : date invalide');
   if (dto.kind === 'EXCLUSION' && dto.departureDate) throw new BadRequestException('Une exclusion ne porte pas de date de départ');
   if (dto.kind === 'DEPARTURE_CONFIRMED' && dto.departureDate) throw new BadRequestException('Une date confirmée introuvable ne porte pas de date de départ');
 }
@@ -87,8 +109,10 @@ function record(c: CountRow): CountRecord & { academicYearId: string } {
   };
 }
 
+/** Demande sur un comptage ; DEPARTURE_CONTEST (G5b-2, 24 novembre 2026) : contestation d'un élève parti avant le comptage. */
 export class CountCorrectionDto {
-  @IsIn(['EXCLUSION', 'DEPARTURE_DATE', 'DEPARTURE_CONFIRMED'], { message: 'Type de correction inconnu' }) kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED';
+  @IsIn(['EXCLUSION', 'DEPARTURE_DATE', 'DEPARTURE_CONFIRMED', 'DEPARTURE_CONTEST'], { message: 'Type de correction inconnu' })
+  kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED' | 'DEPARTURE_CONTEST';
   @IsUUID('all', { message: 'Inscription invalide' }) enrollmentId: string;
   @IsString() @Length(5, 500, { message: 'Justification : 5 à 500 caractères' }) justification: string;
   @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'Date de départ attendue au format AAAA-MM-JJ' }) departureDate?: string;
@@ -239,7 +263,7 @@ export class CountsService {
           await tx.platformAlert.create({
             data: {
               tenantId: s.tenantId, kind: 'COUNT_TO_CHECK', dueDate: day(d.date),
-              message: `${label} du ${frDay(d.date)} figé pour ${s.tenant.name} avec ${toCheckText(k)} (départ sans date connue), ${pl(k, 'compté', 'comptés')}. La direction peut encore fixer ${pl(k, 'sa', 'leur')} date pour les comptages suivants.`,
+              message: `${label} du ${frDay(d.date)} figé pour ${s.tenant.name} avec ${toCheckText(k)} (départ sans date connue), ${pl(k, 'compté', 'comptés')} sous réserve. La direction peut encore fixer ${pl(k, 'sa', 'leur')} date pour les comptages suivants, ou contester un élève parti avant le jour du comptage (G5b-2).`,
             },
           });
         }
@@ -247,7 +271,7 @@ export class CountsService {
           (d.kind === 'TRIAL_END' || d.kind === 'PILOT_END'
             ? `${n} inscrit${r.count_pupils > 1 ? 's' : ''} à la fin de votre ${d.kind === 'TRIAL_END' ? 'essai gratuit' : 'période pilote'}, le ${frDay(d.date)}. Ce comptage est figé et sert au calcul de votre abonnement Cahiora ; la liste est dans Paramètres › Effectifs facturables.`
             : `La vérification est terminée : ${label.toLowerCase()} de l’année ${year.label} figé à ${n} au ${frDay(d.date)}. Il ne change plus et sert au calcul de votre abonnement Cahiora ; la liste reste dans Paramètres › Effectifs facturables.`)
-          + (k > 0 ? ` ${toCheckText(k)} y ${pl(k, 'reste compté', 'restent comptés')} : vous pouvez encore fixer ${pl(k, 'sa', 'leur')} date de départ pour les comptages suivants.` : ''));
+          + (k > 0 ? ` ${toCheckText(k)} y ${pl(k, 'reste compté', 'restent comptés')} sous réserve : vous pouvez encore fixer ${pl(k, 'sa', 'leur')} date de départ pour les comptages suivants, et contester un élève parti avant le ${frDay(d.date)} jusqu’à 30 jours après le document de Cahiora qui le compte.` : ''));
       }
     });
   }
@@ -358,10 +382,16 @@ export class CountsService {
       // Documents émis (lot G5c) : une exclusion qui touche un document se demande jusqu'à 30 jours après le dernier
       // document qui a demandé l'élève (D-G5-14 A), et c'est le Super Admin qui la décide (D-G5-13 B).
       const documentOf = await this.billedBy(tx, all.filter((r) => r.yearLabel === c.yearLabel), [...ids, ...corrections.map((k) => k.enrollmentId)]);
+      // G5b-2 (24 novembre 2026) : élèves partis, comptés dans ce comptage figé, qui peuvent être contestés.
+      const contests = count.stage === 'FROZEN'
+        ? await this.contestFacts(tx, all.filter((r) => r.yearLabel === c.yearLabel),
+          items.filter((i) => i.counted).map((i) => ({ id: i.enrollmentId, status: enrollments.get(i.enrollmentId)?.status ?? null })), tz, today)
+        : new Map<string, ContestFacts>();
       const person = (enrollmentId: string, i: { classId: string; siteId: string | null; counted: boolean; basis: CountBasis; departureDate: string | null }) => {
         const e = enrollments.get(enrollmentId);
         const dup = duplicates.filter((x) => x.studentId === e?.student.id || x.otherId === e?.student.id);
         const exclusion = exclusionOf(enrollmentId);
+        const facts = contests.get(enrollmentId) ?? null;
         const documentDate = documentOf(enrollmentId);
         const until = documentDate ? exclusionDeadline(documentDate) : null;
         // Comptage figé : exclusion encore possible jusqu'à 30 jours après le document (sans limite avant lui).
@@ -369,11 +399,14 @@ export class CountsService {
         return {
           enrollmentId, studentId: e?.student.id ?? null, matricule: e?.student.matricule ?? '', name: e ? `${e.student.lastName} ${e.student.firstName}` : '',
           className: classes.get(i.classId) ?? 'Classe supprimée', siteName: i.siteId ? sites.get(i.siteId) ?? null : null,
-          counted: i.counted, basis: i.basis, basisLabel: BASIS_LABELS[i.basis], departureDate: i.departureDate,
-          enrollmentStatus: e?.status ?? null, cancelReason: e?.status === 'CANCELLED' ? e.cancelReason : null,
+          counted: i.counted, basis: i.basis, basisLabel: i.basis === 'EXCLUDED' && exclusion?.departureDate ? CONTESTED_LABEL : BASIS_LABELS[i.basis],
+          departureDate: i.departureDate, enrollmentStatus: e?.status ?? null, cancelReason: e?.status === 'CANCELLED' ? e.cancelReason : null,
           duplicate: dup.some((x) => x.status === 'SAME') ? 'SAME' : dup.length ? 'PENDING' : null,
-          exclusion: exclusion && { id: exclusion.id, status: exclusion.status },
+          exclusion: exclusion && { id: exclusion.id, status: exclusion.status, contest: !!exclusion.departureDate, departureDate: iso(exclusion.departureDate) },
           canExclude: (count.reviewOpen || afterFreeze) && e?.status === 'CANCELLED' && !exclusion,
+          // G5b-2 (24 novembre 2026) : élève parti le jour du premier comptage figé qui le compte ou avant, contestable.
+          contest: facts && { firstCounted: facts.firstCounted, exitDay: facts.exitDay, since: facts.since, max: facts.max, afterCount: facts.afterCount },
+          canContest: afterFreeze && !exclusion && !!facts && !facts.afterCount,
           exclusionUntil: count.reviewOpen ? count.reviewUntil : afterFreeze ? until : null,
           documentDate, decider: documentDate ? 'PLATFORM' as const : 'SCHOOL' as const,
           canDate: count.reviewOpen && DEPARTURE_BASES.includes(i.basis),
@@ -397,6 +430,7 @@ export class CountsService {
         corrections: corrections.map((k) => ({
           id: k.id, kind: k.kind, enrollmentId: k.enrollmentId, matricule: k.enrollment.student.matricule, name: `${k.enrollment.student.lastName} ${k.enrollment.student.firstName}`,
           countId: k.countId, status: k.status, departureDate: iso(k.departureDate), justification: k.justification, decidedByKind: k.decidedByKind,
+          contest: k.kind === 'EXCLUSION' && !!k.departureDate,
           decider: k.kind === 'EXCLUSION' && k.status === 'PENDING' ? (documentOf(k.enrollmentId) ? 'PLATFORM' as const : 'SCHOOL' as const) : null,
           fileUrl: k.fileKey ? this.files.signedUrl(k.fileKey) : null, requestedByName: k.requestedByName, requestedAt: k.requestedAt,
           decidedByName: k.decidedByName, decidedAt: k.decidedAt, decisionNote: k.decisionNote,
@@ -449,8 +483,9 @@ export class CountsService {
   }
 
   /**
-   * Demande de correction pendant la vérification, ou exclusion sur un comptage figé jusqu'à 30 jours après le document
-   * concerné (D-G5-14 A), avec un justificatif facultatif (photo ou PDF). La base contrôle chaque délai.
+   * Demande de correction pendant la vérification, ou exclusion et contestation de départ (G5b-2, 24 novembre 2026) sur
+   * un comptage figé jusqu'à 30 jours après le document concerné (D-G5-14 A), avec un justificatif facultatif (photo ou
+   * PDF). La base contrôle chaque délai.
    */
   async requestCorrection(actor: Actor, countId: string, dto: CountCorrectionDto, file?: { buffer: Buffer; mimetype: string; size: number }) {
     checkShape(dto);
@@ -458,13 +493,80 @@ export class CountsService {
     return this.files.commit(newKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
       const tz = await this.timezone(tx, actor.tenantId);
       const today = localDay(tz);
+      let departureDate = dto.departureDate;
       if (dto.kind !== 'EXCLUSION') {
-        const c = (await this.rows(tx)).find((r) => r.id === countId);
+        const all = await this.rows(tx);
+        const c = all.find((r) => r.id === countId);
         if (!c) throw new NotFoundException('Comptage introuvable');
-        await this.checkDeparture(tx, dto, c.referenceDate, tz);
+        if (dto.kind === 'DEPARTURE_CONTEST') departureDate = await this.contestDate(tx, dto, c, all, tz, today);
+        else await this.checkDeparture(tx, dto, c.referenceDate, tz);
       }
-      return this.saveCorrection(tx, actor, countId, dto, today, newKey, file);
+      return this.saveCorrection(tx, actor, countId, { ...dto, departureDate }, today, newKey, file);
     }));
+  }
+
+  /**
+   * G5b-2 (24 novembre 2026) : faits utiles à la contestation des élèves partis (transférés ou retirés) parmi
+   * `enrollments`, comptés dans un comptage figé de l'année (`yearCounts`) : jour du premier comptage figé qui les compte,
+   * date de leur sortie enregistrée, ou bornes d'une date à donner pour un départ enregistré avant l'historique.
+   */
+  private async contestFacts(tx: Tx, yearCounts: CountRecord[], enrollments: { id: string; status: string | null }[], tz: string, today: string) {
+    const out = new Map<string, ContestFacts>();
+    const departed = enrollments.filter((e) => e.status === 'TRANSFERRED' || e.status === 'WITHDRAWN').map((e) => e.id);
+    const frozen = new Map(yearCounts.filter((c) => c.stage === 'FROZEN').map((c) => [c.id, c.referenceDate]));
+    if (!departed.length || !frozen.size) return out;
+    const counted = await tx.billingCountItem.findMany({
+      where: { countId: { in: [...frozen.keys()] }, enrollmentId: { in: departed }, counted: true }, select: { enrollmentId: true, countId: true },
+    });
+    const first = new Map<string, string>();
+    for (const x of counted) {
+      const date = frozen.get(x.countId)!;
+      if (!first.has(x.enrollmentId) || date < first.get(x.enrollmentId)!) first.set(x.enrollmentId, date);
+    }
+    if (!first.size) return out;
+    const exits = await tx.enrollmentEvent.findMany({
+      where: { enrollmentId: { in: [...first.keys()] }, kind: { in: ['WITHDRAWN', 'TRANSFERRED'] } }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { enrollmentId: true, data: true },
+    });
+    for (const [id, firstCounted] of first) {
+      const exit = exits.find((x) => x.enrollmentId === id);
+      const recorded = exit ? String(((exit.data ?? {}) as Record<string, unknown>).exitDate ?? '').slice(0, 10) : '';
+      if (isDay(recorded)) {
+        out.set(id, { firstCounted, exitDay: recorded, since: null, max: firstCounted, afterCount: recorded > firstCounted });
+        continue;
+      }
+      // Départ enregistré avant l'historique : pas avant l'arrivée, pas après le premier comptage, ni après le journal.
+      const limits = await this.departureLimits(tx, id, firstCounted, tz);
+      if (!limits) continue;
+      const max = [firstCounted, today, limits.auditDay].filter((d): d is string => !!d).sort()[0];
+      out.set(id, { firstCounted, exitDay: null, since: limits.since, max, afterCount: limits.since > max });
+    }
+    return out;
+  }
+
+  /** G5b-2 (24 novembre 2026) : date d'un départ contesté, contrôlée ici avant la base, qui refait l'essentiel. */
+  private async contestDate(
+    tx: Tx, dto: { enrollmentId: string; departureDate?: string }, c: CountRecord & { academicYearId: string }, all: CountRecord[], tz: string, today: string,
+  ) {
+    if (c.stage !== 'FROZEN') {
+      throw new BadRequestException('Un départ se conteste sur un comptage figé ; pendant la vérification, enregistrez la sortie de l’élève avec sa date, ou datez son départ');
+    }
+    const e = await tx.enrollment.findUnique({ where: { id: dto.enrollmentId }, select: { id: true, status: true, academicYearId: true } });
+    if (!e || e.academicYearId !== c.academicYearId) throw new NotFoundException('Inscription introuvable pour l’année de ce comptage');
+    const f = (await this.contestFacts(tx, all.filter((r) => r.yearLabel === c.yearLabel), [e], tz, today)).get(e.id);
+    if (!f) throw new BadRequestException('Seul un élève parti (transféré ou retiré) et compté dans un comptage figé se conteste ; enregistrez d’abord sa sortie avec sa date');
+    if (f.exitDay) {
+      if (dto.departureDate && dto.departureDate !== f.exitDay) throw new BadRequestException(`La date de départ contestée est celle de la sortie enregistrée : le ${frDay(f.exitDay)}`);
+      if (f.afterCount) throw new BadRequestException(afterCountText(f.exitDay, f.firstCounted));
+      return f.exitDay;
+    }
+    const d = dto.departureDate;
+    if (!d) throw new BadRequestException('Date de départ obligatoire : ce départ a été enregistré avant l’historique des inscriptions, sans date');
+    if (f.since && d < f.since) throw new BadRequestException(`La date de départ précède l’arrivée de l’élève (le ${frDay(f.since)})`);
+    if (d > f.firstCounted) throw new BadRequestException(afterCountText(d, f.firstCounted));
+    if (d > today) throw new BadRequestException('La date de départ ne peut pas être dans le futur');
+    if (d > f.max) throw new BadRequestException(`La date de départ ne peut pas être après celle du journal (le ${frDay(f.max)}) : vous pouvez seulement l’avancer`);
+    return d;
   }
 
   /** Contrôle d'une date de départ fixée ou confirmée introuvable, pour la période qui couvre le jour R. */
@@ -480,17 +582,23 @@ export class CountsService {
 
   /** Enregistre la demande par la base (request_count_correction), qui contrôle chaque délai, puis le journal de l'école. */
   private async saveCorrection(
-    tx: Tx, actor: Actor, countId: string | null, dto: { kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED'; enrollmentId: string; justification: string; departureDate?: string },
+    tx: Tx, actor: Actor, countId: string | null,
+    dto: { kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED' | 'DEPARTURE_CONTEST'; enrollmentId: string; justification: string; departureDate?: string },
     today: string, newKey: string | null, file?: { mimetype: string; size: number },
   ) {
+    // Une contestation s'inscrit comme une exclusion qui porte la date du départ (même décision, même avoir, même délai).
+    const kind = dto.kind === 'DEPARTURE_CONTEST' ? 'EXCLUSION' : dto.kind;
     try {
       const [r] = await tx.$queryRaw<{ id: string }[]>`
-        SELECT request_count_correction(${countId}::uuid, ${dto.kind}, ${dto.enrollmentId}::uuid, ${dto.departureDate ?? null}::date, ${dto.justification.trim()},
+        SELECT request_count_correction(${countId}::uuid, ${kind}, ${dto.enrollmentId}::uuid, ${dto.departureDate ?? null}::date, ${dto.justification.trim()},
           ${newKey}, ${file?.mimetype ?? null}, ${file?.size ?? null}::int, ${actor.userId}::uuid, ${actor.name}, ${actor.ip ?? null}, ${today}::date) AS id`;
-      const action = dto.kind === 'EXCLUSION' ? 'billing.count_exclusion_requested' : dto.kind === 'DEPARTURE_DATE' ? 'billing.count_departure_dated' : 'billing.count_departure_confirmed';
+      const action = {
+        EXCLUSION: 'billing.count_exclusion_requested', DEPARTURE_CONTEST: 'billing.count_departure_contested',
+        DEPARTURE_DATE: 'billing.count_departure_dated', DEPARTURE_CONFIRMED: 'billing.count_departure_confirmed',
+      }[dto.kind];
       await this.audit.log(tx, actor, action, 'CountCorrection', r.id,
         { countId, outsideCount: countId === null, enrollmentId: dto.enrollmentId, departureDate: dto.departureDate ?? null, justificatif: !!newKey });
-      return { result: { id: r.id, status: dto.kind === 'EXCLUSION' ? 'PENDING' : 'VALIDATED' } };
+      return { result: { id: r.id, status: kind === 'EXCLUSION' ? 'PENDING' : 'VALIDATED' } };
     } catch (e) {
       const message = cahioraMessage(e);
       if (message) throw new BadRequestException(message);
@@ -557,14 +665,18 @@ export class CountsService {
     }));
   }
 
-  /** Décision sur une demande d'exclusion (D-G5-13 B : la direction, tant qu'aucun document émis n'est touché ; sinon le Super Admin). */
+  /**
+   * Décision sur une demande d'exclusion ou une contestation de départ (D-G5-13 B : la direction, tant qu'aucun document
+   * émis n'est touché ; sinon le Super Admin).
+   */
   decide(actor: Actor, id: string, dto: CountDecisionDto) {
     return this.db.forTenant(actor.tenantId, async (tx) => {
       try {
         const [r] = await tx.$queryRaw<{ status: string }[]>`
           SELECT decide_count_correction(${id}::uuid, ${dto.decision}, ${dto.note?.trim() || null}, ${actor.userId}::uuid, ${actor.name}, ${actor.ip ?? null}) AS status`;
+        const k = await tx.countCorrection.findUnique({ where: { id }, select: { departureDate: true } });
         await this.audit.log(tx, actor, dto.decision === 'VALIDATED' ? 'billing.count_exclusion_validated' : 'billing.count_exclusion_refused', 'CountCorrection', id,
-          { note: dto.note?.trim() || null });
+          { note: dto.note?.trim() || null, contest: !!k?.departureDate, departureDate: iso(k?.departureDate) });
         return { status: r.status };
       } catch (e) {
         const message = cahioraMessage(e);

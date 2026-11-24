@@ -261,7 +261,8 @@ export interface NewPayment {
  * contrôles de la base (record_billing_payment, qui reste seule à faire foi) :
  * 1. une référence portée par un paiement validé ne revient jamais ;
  * 2. la ressaisie désigne un paiement dont la saisie est annulée, et une seule fois (au besoin pour un autre
- *    établissement, choisi par erreur la première fois) ;
+ *    établissement, choisi par erreur la première fois), avec son motif (DS-7 A, 24 novembre 2026 : toute ressaisie est
+ *    justifiée, authentifiée et tracée) ;
  * 3. la référence d'un paiement annulé et pas encore ressaisi ne revient que dans sa ressaisie, désignée ;
  * 4. un justificatif déjà joint à un autre paiement (même fichier) exige un motif, sauf pour la ressaisie qu'il
  *    justifiait ;
@@ -280,12 +281,15 @@ export function duplicateError(p: NewPayment, others: PaymentTrace[]): { message
     if (!r) return { message: 'Paiement annulé à ressaisir introuvable', needsReason: false };
     if (!r.cancelled) return { message: `Seul un paiement dont la saisie est annulée se ressaisit (reçu ${r.receiptNumber})`, needsReason: false };
     if (r.reenteredBy) return { message: `Ce paiement annulé a déjà été ressaisi (reçu ${r.reenteredBy}) : une ressaisie ne se fait qu’une fois`, needsReason: false };
+    if (!reason) return { message: 'Ressaisie d’un paiement annulé : donnez le motif de la ressaisie (5 à 300 caractères)', needsReason: true };
   }
   const waiting = others.find((o) => o.transactionKey === key && o.cancelled && o.id !== replaces && !o.reenteredBy);
   if (waiting) {
     return { message: `Cette référence est celle du paiement annulé du reçu ${waiting.receiptNumber} : enregistrez la ressaisie de ce paiement en le désignant`, needsReason: false };
   }
-  if (reason && (reason.length < 5 || reason.length > 300)) return { message: 'Motif d’un autre versement : 5 à 300 caractères', needsReason: true };
+  if (reason && (reason.length < 5 || reason.length > 300)) {
+    return { message: replaces ? 'Motif de la ressaisie : 5 à 300 caractères' : 'Motif d’un autre versement : 5 à 300 caractères', needsReason: true };
+  }
   const sameProof = others.find((o) => o.proofSha256 === p.proofSha256 && o.id !== replaces);
   if (sameProof && !reason) {
     return {

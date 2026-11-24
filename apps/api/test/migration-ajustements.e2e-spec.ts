@@ -273,16 +273,30 @@ describe('Ajustements G5 · migration sur une base qui a déjà les lots G0 à G
       return r.id as string;
     });
     expect(confirmed).toEqual(expect.any(String));
-    expect(refusal()).toMatch(/Retour arrière arrêté, rien n'a été changé : 1 établissement\(s\) en client réel, 0 lien\(s\) d'exclusion, 1 correction\(s\) de départ hors comptage ou date introuvable, 0 paiement\(s\) avec ressaisie, empreinte ou motif/);
+    // Précision du 24 novembre 2026 : une contestation de départ (exclusion qui porte une date de départ) chez Psi.
+    const [psi] = SCHOOLS;
+    const contest = await inSchool(psi.id, async (tx) => {
+      const [k] = await tx.$queryRaw`SELECT "enrollmentId" AS enrollment, "countId" AS count FROM count_corrections WHERE id = ${fx.exclusion}::uuid`;
+      const [r] = await tx.$queryRaw`INSERT INTO count_corrections (id, tenant_id, kind, "enrollmentId", "countId", "departureDate", justification, status, "requestedByName")
+        VALUES (gen_random_uuid(), ${psi.id}::uuid, 'EXCLUSION', ${k.enrollment}::uuid, ${k.count}::uuid, DATE '2026-10-10', 'Contestation fictive', 'PENDING', 'Direction FICTIVE')
+        RETURNING id`;
+      return r.id as string;
+    });
+    expect(refusal()).toMatch(/Retour arrière arrêté, rien n'a été changé : 1 établissement\(s\) en client réel, 0 lien\(s\) d'exclusion, 2 correction\(s\) de départ hors comptage, date introuvable ou contestation de départ, 0 paiement\(s\) avec ressaisie, empreinte ou motif/);
     expect(await exists()).toBe('billing_exclusion_links');
     expect((await statuses() as { status: string }[]).map((s) => s.status)).toEqual(['CLIENT', 'TEST']);
     expect(await inSchool(omega.id, (tx) => tx.$queryRaw`SELECT kind::text AS kind, "countId" AS count FROM count_corrections`)).toEqual([{ kind: 'DEPARTURE_CONFIRMED', count: null }]);
-    // Forcé en connaissance de cause : le lot part (la confirmation aussi), le reste de la base ne bouge pas ; le schéma est celui de G5d-2.
+    // Forcé en connaissance de cause : le lot part (la confirmation aussi), le reste de la base ne bouge pas ; le schéma est
+    // celui de G5d-2. La contestation reste, vue comme une exclusion par le code d'avant (jamais effacée : un avoir peut la citer).
     rollback(true);
     expect(await exists()).toBeNull();
     expect(await fingerprint()).toEqual(schemaBefore);
     expect(await inSchool(omega.id, (tx) => tx.$queryRaw`SELECT count(*)::int AS n FROM count_corrections`)).toEqual([{ n: 0 }]);
-    unchanged(before, await snapshot(), { platform_audit_logs: 3, group_audit_logs: 1, 'ecole-omega:students': 1, 'ecole-omega:enrollments': 1 });
+    expect(await inSchool(psi.id, (tx) => tx.$queryRaw`SELECT kind::text AS kind, status::text AS status FROM count_corrections WHERE id = ${contest}::uuid`))
+      .toEqual([{ kind: 'EXCLUSION', status: 'PENDING' }]);
+    unchanged(before, await snapshot(), {
+      platform_audit_logs: 3, group_audit_logs: 1, 'ecole-omega:students': 1, 'ecole-omega:enrollments': 1, 'ecole-psi:count_corrections': 1,
+    });
     deploy();
     expect(await statuses()).toEqual([{ slug: 'ecole-omega', status: 'TEST', at: null }, { slug: 'ecole-psi', status: 'TEST', at: null }]);
     expect(await links()).toEqual([{ correction: fx.exclusion, tenant: SCHOOLS[0].id, origin: DOC }]);
