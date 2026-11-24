@@ -5,9 +5,10 @@ import { COMPTES } from './comptes';
 import { connexion } from './connexion';
 
 /**
- * Lot G5b, dans un vrai navigateur, au bureau et au téléphone : « Effectifs facturables » de la direction (liste d'un
- * comptage provisoire, exclusion d'une inscription annulée par erreur de saisie avec un justificatif, décision, date
- * d'un départ enregistré avant l'historique) et les nombres du même comptage chez le Super Admin, sans aucun nom.
+ * Lot G5b, dans un vrai navigateur, au bureau et au téléphone : « Effectifs facturables » de la direction (élèves « À
+ * vérifier » hors de tout comptage et date confirmée introuvable, liste d'un comptage provisoire, exclusion d'une
+ * inscription annulée par erreur de saisie avec un justificatif, décision, date d'un départ enregistré avant
+ * l'historique) et les nombres du même comptage chez le Super Admin, sans aucun nom.
  * Base de test seulement ; élèves, calendrier et comptage fictifs. Le comptage est enregistré par la fonction de la base
  * (record_billing_count), avec une liste préparée ici : le calcul de la liste est vérifié par les essais de l'API.
  */
@@ -41,7 +42,7 @@ let reviewUntil = '';
 let pupils = 0;
 /** Premier comptage de l'école de démonstration sur cette base : la liste préparée ici est alors celle que Cahiora calcule. */
 let neuve = false;
-const eleves = { exclu: { nom: '', matricule: '' }, parti: { nom: '', matricule: '' } };
+const eleves = { exclu: { nom: '', matricule: '' }, parti: { nom: '', matricule: '' }, verif: { nom: '', matricule: '' } };
 
 test.beforeAll(async ({}, info) => {
   const suffix = info.project.name === 'telephone' ? '2' : '1';
@@ -75,29 +76,31 @@ test.beforeAll(async ({}, info) => {
     while (R > lastFree && R > start && await tx.billingCount.findFirst({ where: { tenantId: tenant.id, yearLabel: year.label, kind: 'FIRST_REGULARIZATION', referenceDate: new Date(`${R}T00:00:00Z`) } })) R = addDays(R, -1);
     if (R <= lastFree || R <= addDays(start, 2)) throw new Error('Aucun jour libre pour le comptage fictif');
     const klass = await tx.class.findFirstOrThrow({ where: { academicYearId: year.id }, orderBy: { name: 'asc' } });
-    // Deux élèves fictifs, propres à ce passage : l'un inscrit puis annulé par erreur de saisie, l'autre parti avant
-    // l'historique des inscriptions (inscription arrêtée sans aucune ligne d'historique).
-    const pupil = async (key: 'exclu' | 'parti', lastName: string) => {
-      const matricule = `E2E-G5B-${suffix}-${stamp}-${key === 'exclu' ? 1 : 2}`;
-      const s = await tx.student.create({ data: { tenantId: tenant.id, matricule, firstName: 'Élève', lastName, status: key === 'parti' ? 'WITHDRAWN' : 'ACTIVE' } });
+    // Trois élèves fictifs, propres à ce passage : l'un inscrit puis annulé par erreur de saisie, les deux autres partis
+    // avant l'historique des inscriptions (inscription arrêtée sans aucune ligne d'historique), donc « À vérifier ».
+    const pupil = async (key: 'exclu' | 'parti' | 'verif', lastName: string) => {
+      const matricule = `E2E-G5B-${suffix}-${stamp}-${{ exclu: 1, parti: 2, verif: 3 }[key]}`;
+      const status = key === 'exclu' ? 'ACTIVE' : 'WITHDRAWN';
+      const s = await tx.student.create({ data: { tenantId: tenant.id, matricule, firstName: 'Élève', lastName, status } });
       eleves[key] = { nom: `${s.lastName} ${s.firstName}`, matricule };
       const e = await tx.enrollment.create({
-        data: { tenantId: tenant.id, studentId: s.id, classId: klass.id, academicYearId: year.id, enrolledAt: year.startDate, type: 'NEW', status: key === 'parti' ? 'WITHDRAWN' : 'ACTIVE' },
+        data: { tenantId: tenant.id, studentId: s.id, classId: klass.id, academicYearId: year.id, enrolledAt: year.startDate, type: 'NEW', status },
       });
       if (key === 'exclu') await tx.enrollmentEvent.create({ data: { tenantId: tenant.id, enrollmentId: e.id, kind: 'ENROLLED', data: { classId: klass.id, className: klass.name, type: 'NEW' }, createdAt: year.startDate } });
       return e;
     };
     const exclu = await pupil('exclu', `COMPTAGE EXCLUSION ${suffix}`);
     const parti = await pupil('parti', `COMPTAGE DEPART ${suffix}`);
+    const verif = await pupil('verif', `COMPTAGE INTROUVABLE ${suffix}`);
     // Liste du comptage : les inscriptions actives de l'année inscrites au plus tard ce jour-là, celle annulée ensuite par
-    // erreur (comptée ce jour-là), et le départ sans date (compté et signalé).
+    // erreur (comptée ce jour-là), et les deux départs sans date (comptés et signalés).
     const active = await tx.enrollment.findMany({
-      where: { academicYearId: year.id, status: 'ACTIVE', enrolledAt: { lte: endOfDay(R, tz) }, id: { notIn: [exclu.id, parti.id] } },
+      where: { academicYearId: year.id, status: 'ACTIVE', enrolledAt: { lte: endOfDay(R, tz) }, id: { notIn: [exclu.id, parti.id, verif.id] } },
       select: { id: true, classId: true, class: { select: { siteId: true } } },
     });
     const items = active.map((e) => ({ enrollmentId: e.id, classId: e.classId, siteId: e.class.siteId, counted: true, basis: 'ACTIVE', departureDate: null }));
     items.push({ enrollmentId: exclu.id, classId: exclu.classId, siteId: klass.siteId, counted: true, basis: 'ACTIVE', departureDate: null });
-    items.push({ enrollmentId: parti.id, classId: parti.classId, siteId: klass.siteId, counted: true, basis: 'DEPARTURE_UNKNOWN', departureDate: null });
+    for (const e of [parti, verif]) items.push({ enrollmentId: e.id, classId: e.classId, siteId: klass.siteId, counted: true, basis: 'DEPARTURE_UNKNOWN', departureDate: null });
     await tx.enrollment.update({ where: { id: exclu.id }, data: { status: 'CANCELLED', cancelledAt: new Date(), cancelReason: 'Inscription saisie en double (fictive E2E)' } });
     await tx.enrollmentEvent.create({ data: { tenantId: tenant.id, enrollmentId: exclu.id, kind: 'CANCELLED', data: { reason: 'Inscription saisie en double (fictive E2E)', previousStatus: 'ACTIVE' } } });
     const last = await tx.billingCalendar.findFirst({ where: { tenantId: tenant.id, yearLabel: year.label }, orderBy: { version: 'desc' } });
@@ -142,6 +145,31 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   await tientEnLargeur(page);
   await shot(page, 'g5b-1-comptages');
 
+  // G5b-2 : les élèves partis sans date connue sont « À vérifier » sur la page même, hors de tout comptage : comptés tant
+  // que la direction ne fixe pas leur date ou ne confirme pas qu'elle est introuvable, jamais retirés d'office.
+  const dlg = page.getByRole('dialog');
+  await expect(page.getByText('Aucun élève n’est retiré sans votre décision.', { exact: false })).toBeVisible();
+  const aVerifier = (e: { matricule: string }) => page.getByRole('list', { name: /^Élèves à vérifier, année / }).locator(':scope > li', { hasText: e.matricule });
+  for (const e of [eleves.parti, eleves.verif]) {
+    await expect(aVerifier(e).getByText('À vérifier', { exact: true })).toBeVisible();
+    await expect(aVerifier(e).getByRole('button', { name: `Fixer la date de départ de ${e.nom}` })).toBeVisible();
+    await expect(aVerifier(e).getByRole('button', { name: `Date de départ introuvable pour ${e.nom}` })).toBeVisible();
+  }
+  // Date introuvable, confirmée avec une justification : l'élève reste compté, sans être « À vérifier » ; sa date peut
+  // encore être fixée.
+  await aVerifier(eleves.verif).getByRole('button', { name: `Date de départ introuvable pour ${eleves.verif.nom}` }).click();
+  await expect(page.getByRole('dialog', { name: `Date de départ introuvable : ${eleves.verif.nom}` })).toBeVisible();
+  await expect(dlg.getByText('L’élève reste compté, comme sans réponse', { exact: false })).toBeVisible();
+  await dlg.getByLabel('Justification').fill('Registre des sorties et dossier consultés : aucune date (test de navigateur)');
+  await shot(page, 'g5b-1b-date-introuvable');
+  await dlg.getByRole('button', { name: 'Confirmer : date introuvable' }).click();
+  await expect(dlg).toBeHidden();
+  await expect(aVerifier(eleves.verif).getByText('Date introuvable confirmée', { exact: true })).toBeVisible();
+  await expect(aVerifier(eleves.verif).getByRole('button', { name: `Date de départ introuvable pour ${eleves.verif.nom}` })).toHaveCount(0);
+  await expect(aVerifier(eleves.verif).getByRole('button', { name: `Fixer la date de départ de ${eleves.verif.nom}` })).toBeVisible();
+  await expect(aVerifier(eleves.parti).getByText('À vérifier', { exact: true })).toBeVisible();
+  await tientEnLargeur(page);
+
   await page.getByRole('button', { name: `Voir la liste : Première régularisation du ${frDate(R)}, provisoire`, exact: true }).click();
   await expect(page.getByRole('heading', { name: `Première régularisation du ${frDate(R)}`, exact: true })).toBeVisible();
   await expect(page.getByText('Comptés', { exact: true }).locator('..')).toContainText(String(pupils));
@@ -166,7 +194,6 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   const exclu = page.locator('li', { hasText: eleves.exclu.matricule });
   await expect(exclu.getByText('Inscription annulée depuis : « Inscription saisie en double (fictive E2E) ».')).toBeVisible();
   await exclu.getByRole('button', { name: 'Demander l’exclusion' }).click();
-  const dlg = page.getByRole('dialog');
   await expect(dlg.getByText('Un départ réel ne s’exclut jamais', { exact: false })).toBeVisible();
   await dlg.getByLabel('Justification').fill('Élève saisi deux fois : voir le registre (test de navigateur)');
   await dlg.locator('input[type=file]').setInputFiles({ name: 'registre.png', mimeType: 'image/png', buffer: PNG });
@@ -189,10 +216,20 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   await expect(exclu.getByText('Ne sera plus compté si la vérification se termine maintenant.')).toBeVisible();
   await expect(resume).toContainText(`maintenant : ${eleveTexte(avant.n - 1)}.`);
 
-  // Départ enregistré avant l'historique, sans date : compté et signalé ; la direction fixe la date.
+  // Départs enregistrés avant l'historique, sans date : comptés et signalés. Celui dont la date est confirmée introuvable
+  // (page des effectifs) reste compté, sans être « À vérifier » ; pour l'autre, la direction fixe la date.
   await page.getByRole('group', { name: 'Afficher' }).getByRole('button', { name: /^À vérifier/ }).click();
+  const verif = page.locator('li', { hasText: eleves.verif.matricule });
+  await expect(verif.getByText('Date de départ confirmée introuvable : l’élève reste compté.', { exact: false })).toBeVisible();
+  await expect(verif.getByText('Compté', { exact: true })).toBeVisible();
+  await expect(verif.getByRole('button', { name: 'Date introuvable' })).toHaveCount(0);
+  const confirmee = page.locator('li', { hasText: `(${eleves.verif.matricule})` });
+  await expect(confirmee.getByText('Date de départ introuvable, confirmée (élève compté)')).toBeVisible();
+  await expect(confirmee.getByText('hors comptage', { exact: false })).toBeVisible();
+  await expect(confirmee.getByText('Validée', { exact: true })).toBeVisible();
   const parti = page.locator('li', { hasText: eleves.parti.matricule });
-  await expect(parti.getByText('Aucune date de départ connue : l’élève reste compté tant qu’aucune date n’est fixée.')).toBeVisible();
+  await expect(parti.getByText('Aucune date de départ connue : l’élève reste compté tant que vous ne fixez pas sa date ou ne confirmez pas qu’elle est introuvable. Il n’est jamais retiré sans votre décision.')).toBeVisible();
+  await expect(parti.getByRole('button', { name: 'Date introuvable' })).toBeVisible();
   await parti.getByRole('button', { name: 'Dater le départ' }).click();
   await dlg.getByLabel('Date du départ').fill(addDays(R, -2));
   await dlg.getByLabel('Justification').fill('Date relevée dans le registre des sorties (test de navigateur)');

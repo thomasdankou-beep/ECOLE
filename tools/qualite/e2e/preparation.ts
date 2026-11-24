@@ -25,6 +25,12 @@ export default async function preparation() {
       await tx.userRole.deleteMany({ where: { userId: user.id } });
       await tx.userRole.create({ data: { tenantId: tenant.id, userId: user.id, role: 'SECRETARIAT' } });
     });
+    // L'école de démonstration joue un client réel dans cette base de test seulement : les essais de la facturation et
+    // des comptages lui ouvrent un abonnement fictif, que la base refuse à un établissement de test. Toute école créée
+    // ou migrée reste un établissement de test tant que le Super Admin ne la passe pas en client réel.
+    if (tenant.commercialStatus !== 'CLIENT') {
+      await db.$executeRaw`UPDATE tenants SET "commercialStatus" = 'CLIENT' WHERE id = ${tenant.id}::uuid AND "commercialStatus" = 'TEST'`;
+    }
     const sa = { name: 'Super Admin E2E', passwordHash: await hash(SUPER_ADMIN.motDePasse), active: true, mustChangePassword: false, failedLogins: 0, lockedUntil: null, totpEnabled: false, totpSecret: null };
     await db.platformAdmin.upsert({ where: { email: SUPER_ADMIN.email }, update: sa, create: { email: SUPER_ADMIN.email, ...sa } });
   } finally {
