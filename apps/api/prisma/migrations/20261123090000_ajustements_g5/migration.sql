@@ -14,6 +14,10 @@
 --   démarche qu'une exclusion (justification, décision, avoir provisoire), dans le même délai.
 -- - G5c-9 : chaque avoir est relié par la base à l'exclusion qui le cause et au document d'origine (le premier document
 --   qui a demandé l'élève) ; le document corrigé reste celui auquel l'avoir est lié.
+-- - Lectures validées le 24 novembre 2026 (soir) : lecture 1, passé le délai de 30 jours, seul le Super Admin peut le
+--   rouvrir pour une inscription, par une dérogation exceptionnelle, motivée et tracée ; lecture 3, un élève revenu après
+--   une exclusion ou une contestation acceptée redevient facturable au premier comptage qui suit son retour, et n'est
+--   jamais demandé deux fois la même année scolaire.
 -- - G5d2-5 : la ressaisie d'un paiement annulé est désignée et ne se fait qu'une fois (au besoin pour un autre
 --   établissement, s'il avait été choisi par erreur) ; un justificatif déjà joint à un autre paiement, ou un paiement
 --   semblable (même établissement, montant et moyen, à 3 jours près), exige un motif.
@@ -147,6 +151,142 @@ ALTER TABLE "count_corrections" ALTER COLUMN "countId" DROP NOT NULL;
 ALTER TABLE "count_corrections" ADD CONSTRAINT "count_corrections_count_check" CHECK ("countId" IS NOT NULL OR "kind" <> 'EXCLUSION');
 ALTER TABLE "count_corrections" ADD CONSTRAINT "count_corrections_confirmed_check" CHECK ("kind"::text <> 'DEPARTURE_CONFIRMED' OR "departureDate" IS NULL);
 
+-- Lecture 3 (Dankou, 24 novembre 2026, soir) : « un élève revenu après une contestation acceptée doit pouvoir redevenir
+-- facturable au prochain comptage s'il remplit les conditions requises et que sa précédente facturation a été
+-- intégralement annulée. Garantir qu'un même élève ne soit jamais facturé deux fois pour la même année scolaire. Tenir
+-- compte des montants déjà facturés et des avoirs accordés. »
+-- - Ce qui avait été demandé pour l'élève est annulé à la décision : l'avoir provisoire suit la décision du Super Admin
+--   dans la même opération (au minimum annuel, rien n'avait été demandé en plus) ; une décision de la direction ne
+--   touche aucun document émis. Revenu (inscription rétablie après la demande), il est compté de nouveau au premier
+--   comptage qui suit son retour s'il est inscrit ce jour-là ; la même règle vaut pour une inscription exclue (annulée
+--   par erreur de saisie) puis rétablie.
+-- - Jamais deux fois : chaque inscription compte une seule fois dans l'année (une seule inscription par élève et par
+--   année), et chaque document demande l'année due moins ce qui a déjà été demandé, avoirs déduits.
+-- Ligne comptée d'un comptage figé (jour p_reference, fin du jour p_at) « annulée » pour la facturation : une exclusion
+-- validée (inscription annulée par erreur de saisie) ou une contestation acceptée (à partir du jour du départ contesté)
+-- la retire, tant que l'élève n'est pas revenu au plus tard à p_at. Décisions prises au plus tard à p_until, sauf
+-- p_except (date du document vue au moment d'une décision) ; p_assume : demande encore en attente comptée comme validée
+-- (aperçu de l'avoir). Fonction des seules fonctions de la base (école courante déjà fixée), sans droit propre.
+CREATE OR REPLACE FUNCTION billing_item_voided(p_enrollment uuid, p_reference date, p_at timestamp, p_until timestamp, p_except uuid, p_assume uuid)
+  RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.count_corrections k
+     WHERE k."enrollmentId" = p_enrollment AND k.kind = 'EXCLUSION'
+       AND ((k.status = 'VALIDATED' AND k."decidedAt" <= p_until AND k.id IS DISTINCT FROM p_except) OR (k.status = 'PENDING' AND k.id = p_assume))
+       AND (k."departureDate" IS NULL OR k."departureDate" <= p_reference)
+       AND NOT EXISTS (SELECT 1 FROM public.enrollment_events r
+                        WHERE r."enrollmentId" = p_enrollment AND r.kind = 'REINSTATED' AND r."createdAt" > k."requestedAt" AND r."createdAt" <= p_at))
+$$;
+
+-- Lecture 1 (Dankou, 24 novembre 2026, soir) : « contestation possible jusqu'à 30 jours après le dernier document ayant
+-- facturé l'élève. Prévoir une dérogation exceptionnelle, motivée et tracée par le Super Admin. » Passé ce délai, seul le
+-- Super Admin rouvre, pour une inscription, la demande d'une exclusion ou d'une contestation (même délai, D-G5-14 A) :
+-- motif de 5 à 300 caractères (journal de la plateforme seulement, jamais montré à l'école ni au groupe), son code
+-- (vérifié par l'API), une seule demande, dans les 30 jours qui suivent. Zone de la plateforme, en ajout seul ; l'école
+-- lit les siennes sans le motif (current_tenant_count_derogations).
+CREATE TABLE "count_request_derogations" (
+    "id" UUID NOT NULL,
+    "tenant_id" UUID NOT NULL,
+    "enrollmentId" UUID NOT NULL,
+    "matricule" TEXT NOT NULL,
+    "yearLabel" TEXT NOT NULL,
+    "documentDate" DATE NOT NULL,
+    "until" DATE NOT NULL,
+    "reason" TEXT NOT NULL,
+    "grantedById" UUID,
+    "grantedByName" TEXT NOT NULL,
+    "grantedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "count_request_derogations_pkey" PRIMARY KEY ("id"),
+    CONSTRAINT "count_request_derogations_check" CHECK (length(btrim("reason")) BETWEEN 5 AND 300 AND "until" > "documentDate" + 30)
+);
+CREATE INDEX "count_request_derogations_tenant_id_enrollmentId_idx" ON "count_request_derogations"("tenant_id", "enrollmentId");
+ALTER TABLE "count_request_derogations" ADD CONSTRAINT "count_request_derogations_tenant_id_fkey" FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "count_request_derogations" ADD CONSTRAINT "count_request_derogations_enrollmentId_fkey" FOREIGN KEY ("enrollmentId") REFERENCES "enrollments"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+CREATE TRIGGER count_request_derogations_append_only BEFORE UPDATE OR DELETE ON count_request_derogations FOR EACH ROW EXECUTE FUNCTION forbid_change();
+CREATE TRIGGER count_request_derogations_no_truncate BEFORE TRUNCATE ON count_request_derogations FOR EACH STATEMENT EXECUTE FUNCTION forbid_change();
+ALTER TABLE count_request_derogations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE count_request_derogations FORCE ROW LEVEL SECURITY;
+CREATE POLICY count_request_derogations_owner_all ON count_request_derogations TO erp_owner USING (true) WITH CHECK (true);
+CREATE POLICY count_request_derogations_platform_all ON count_request_derogations TO PUBLIC USING (current_user = 'erp_platform') WITH CHECK (current_user = 'erp_platform');
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_app') THEN
+    REVOKE ALL ON count_request_derogations FROM erp_app;
+  END IF;
+END $$;
+
+-- La demande faite sous une dérogation la cite, une seule fois ; comme le reste de la demande, ce lien ne change plus.
+ALTER TABLE "count_corrections" ADD COLUMN "derogationId" UUID;
+CREATE UNIQUE INDEX "count_corrections_derogationId_key" ON "count_corrections"("derogationId");
+ALTER TABLE "count_corrections" ADD CONSTRAINT "count_corrections_derogationId_fkey" FOREIGN KEY ("derogationId") REFERENCES "count_request_derogations"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+CREATE OR REPLACE FUNCTION count_corrections_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status <> 'PENDING' THEN
+    RAISE EXCEPTION 'La décision sur une demande de correction ne change plus';
+  END IF;
+  IF NEW.status = 'PENDING' OR NEW."decidedAt" IS NULL OR NEW."decidedByName" IS NULL OR NEW."decidedByKind" IS NULL THEN
+    RAISE EXCEPTION 'Une demande de correction ne change que par sa décision, datée et signée';
+  END IF;
+  IF (NEW.id, NEW.tenant_id, NEW.kind, NEW."enrollmentId", NEW."countId", NEW."departureDate", NEW.justification, NEW."fileKey", NEW."fileMime",
+      NEW."fileSize", NEW."requestedById", NEW."requestedByName", NEW."requestedAt", NEW."derogationId")
+     IS DISTINCT FROM (OLD.id, OLD.tenant_id, OLD.kind, OLD."enrollmentId", OLD."countId", OLD."departureDate", OLD.justification, OLD."fileKey", OLD."fileMime",
+      OLD."fileSize", OLD."requestedById", OLD."requestedByName", OLD."requestedAt", OLD."derogationId") THEN
+    RAISE EXCEPTION 'Une demande de correction ne se modifie pas : seule sa décision s''inscrit';
+  END IF;
+  RETURN NEW;
+END $$;
+
+-- Date du dernier document d'abonnement qui a demandé cette inscription, ou NULL (remplace celle du lot G5c) : comptée,
+-- sans que sa ligne soit annulée (lecture 3), dans un comptage figé de l'année au plus tard à la date du comptage de ce
+-- document. p_until et p_except : décisions prises jusqu'à cet instant, sauf celle-ci (pour la date vue à la décision).
+CREATE OR REPLACE FUNCTION billing_enrollment_document_asof(p_tenant uuid, p_enrollment uuid, p_year text, p_until timestamp, p_except uuid) RETURNS date
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_first date;
+BEGIN
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  SELECT min(b."referenceDate") INTO v_first
+    FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
+   WHERE i."enrollmentId" = p_enrollment AND i.counted AND b.tenant_id = p_tenant AND b."yearLabel" = p_year AND b.stage = 'FROZEN'
+     AND NOT billing_item_voided(p_enrollment, b."referenceDate", b.at, p_until, p_except, NULL);
+  IF v_first IS NULL THEN
+    RETURN NULL;
+  END IF;
+  RETURN (SELECT max(d."issueDate") FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId"
+           WHERE l.tenant_id = p_tenant AND d.kind = 'SUBSCRIPTION' AND d."yearLabel" = p_year AND l."referenceDate" >= v_first);
+END $$;
+
+CREATE OR REPLACE FUNCTION billing_enrollment_document(p_tenant uuid, p_enrollment uuid, p_year text) RETURNS date
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  RETURN billing_enrollment_document_asof(p_tenant, p_enrollment, p_year, 'infinity'::timestamp, NULL);
+END $$;
+
+-- Élèves facturables de chaque comptage figé d'un établissement, à cet instant (remplace celle du lot G5c) :
+-- inscriptions comptées dans les comptages figés de l'année jusqu'à sa date, chacune une fois, sans les lignes annulées
+-- par une exclusion ou une contestation validée (lecture 3 : l'élève revenu compte de nouveau à partir du premier
+-- comptage qui suit son retour). Un comptage figé ne change jamais. p_assume : demande en attente comptée comme validée,
+-- pour l'aperçu de l'avoir qu'elle donnerait.
+CREATE OR REPLACE FUNCTION billing_counts_billable_if(p_tenant uuid, p_assume uuid) RETURNS TABLE (count_id uuid, billable integer)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  RETURN QUERY
+    SELECT c.id, (SELECT count(DISTINCT i."enrollmentId")::integer
+                    FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
+                   WHERE b.tenant_id = c.tenant_id AND b."yearLabel" = c."yearLabel" AND b.stage = 'FROZEN' AND b."referenceDate" <= c."referenceDate"
+                     AND i.counted AND NOT billing_item_voided(i."enrollmentId", b."referenceDate", b.at, 'infinity'::timestamp, NULL, p_assume))
+    FROM billing_counts c
+    WHERE c.tenant_id = p_tenant AND c.stage = 'FROZEN';
+END $$;
+
+CREATE OR REPLACE FUNCTION billing_counts_billable(p_tenant uuid) RETURNS TABLE (count_id uuid, billable integer)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  RETURN QUERY SELECT x.count_id, x.billable FROM billing_counts_billable_if(p_tenant, NULL) x;
+END $$;
+
 -- Demande de correction par la direction de tout l'établissement courant (remplace celle du lot G5c) :
 -- - pendant la vérification d'un comptage provisoire : EXCLUSION d'une inscription annulée pour erreur de saisie, qui
 --   attend une décision ; DEPARTURE_DATE d'un départ enregistré avant l'historique des inscriptions (D-G5-16 A), ou
@@ -154,7 +294,10 @@ ALTER TABLE "count_corrections" ADD CONSTRAINT "count_corrections_confirmed_chec
 -- - hors de tout comptage (p_count NULL, G5b-2) : DEPARTURE_DATE ou DEPARTURE_CONFIRMED, pour qu'aucun élève ne reste
 --   « À vérifier » au comptage suivant, y compris celui de la fin d'une période gratuite, figé aussitôt ;
 -- - après, sur un comptage figé (D-G5-14 A) : EXCLUSION seulement, jusqu'à 30 jours après le dernier document qui a
---   demandé l'élève (sans limite tant qu'aucun document ne l'a demandé).
+--   demandé l'élève (sans limite tant qu'aucun document ne l'a demandé) ; passé ce délai, sous une dérogation du Super
+--   Admin encore valable et pas encore utilisée (lecture 1, 24 novembre 2026, soir).
+-- Une demande à la fois par inscription ; une exclusion ou une contestation validée n'en reçoit pas d'autre, sauf si
+-- l'élève est revenu depuis (lecture 3) : seules comptent alors les lignes qui ne sont pas annulées.
 -- Une EXCLUSION sans date de départ : inscription annulée pour erreur de saisie. Une EXCLUSION avec une date de départ
 -- (G5b-2, 24 novembre 2026) : contestation, sur un comptage figé, d'un élève parti (transféré ou retiré) le jour du
 -- premier comptage figé qui le compte ou avant ; la date est celle de la sortie enregistrée, ou celle que la direction
@@ -180,6 +323,8 @@ DECLARE
   v_reference date;
   v_first date;
   v_exit text;
+  v_derogation uuid;
+  v_derogation_day date;
   b record;
   e record;
 BEGIN
@@ -231,6 +376,14 @@ BEGIN
   END IF;
   -- Verrou de l'inscription : deux demandes envoyées en même temps ne passent pas toutes les deux.
   PERFORM 1 FROM enrollments WHERE id = p_enrollment FOR UPDATE;
+  -- Une demande en attente, ou validée sans que l'élève soit revenu depuis (lecture 3) : rien d'autre à demander.
+  IF p_kind = 'EXCLUSION' AND EXISTS (
+    SELECT 1 FROM count_corrections k WHERE k."enrollmentId" = p_enrollment AND k.kind = 'EXCLUSION'
+       AND (k.status = 'PENDING' OR (k.status = 'VALIDATED' AND NOT EXISTS (
+            SELECT 1 FROM enrollment_events r WHERE r."enrollmentId" = p_enrollment AND r.kind = 'REINSTATED' AND r."createdAt" > k."requestedAt")))
+  ) THEN
+    RAISE EXCEPTION 'CAHIORA: une demande d''exclusion ou de contestation est déjà en cours ou validée pour cette inscription';
+  END IF;
   IF p_kind = 'EXCLUSION' AND p_departure IS NULL THEN
     IF e.status <> 'CANCELLED' THEN
       RAISE EXCEPTION 'CAHIORA: seule une inscription annulée pour erreur de saisie peut être exclue ; annulez-la d''abord, avec son motif (un départ réel ne s''exclut jamais ; un élève parti avant le jour du comptage se conteste avec sa date de départ)';
@@ -247,7 +400,8 @@ BEGIN
       RAISE EXCEPTION 'CAHIORA: la date de départ ne peut pas être dans le futur';
     END IF;
     SELECT min(f."referenceDate") INTO v_first FROM billing_count_items i JOIN billing_counts f ON f.id = i."countId"
-     WHERE i."enrollmentId" = p_enrollment AND i.counted AND f.tenant_id = v_tenant AND f."yearLabel" = v_year_label AND f.stage = 'FROZEN';
+     WHERE i."enrollmentId" = p_enrollment AND i.counted AND f.tenant_id = v_tenant AND f."yearLabel" = v_year_label AND f.stage = 'FROZEN'
+       AND NOT billing_item_voided(p_enrollment, f."referenceDate", f.at, 'infinity'::timestamp, NULL, NULL);
     IF v_first IS NULL THEN
       RAISE EXCEPTION 'CAHIORA: cette inscription n''est comptée dans aucun comptage figé';
     END IF;
@@ -263,19 +417,24 @@ BEGIN
     END IF;
   END IF;
   IF p_kind = 'EXCLUSION' THEN
-    IF EXISTS (SELECT 1 FROM count_corrections k WHERE k."enrollmentId" = p_enrollment AND k.kind = 'EXCLUSION' AND k.status IN ('PENDING', 'VALIDATED')) THEN
-      RAISE EXCEPTION 'CAHIORA: une demande d''exclusion ou de contestation est déjà en cours ou validée pour cette inscription';
-    END IF;
     v_document := billing_enrollment_document(v_tenant, p_enrollment, v_year_label);
     IF v_stage = 'FROZEN' THEN
       IF NOT EXISTS (SELECT 1 FROM billing_count_items i JOIN billing_counts f ON f.id = i."countId"
                      WHERE i."enrollmentId" = p_enrollment AND i.counted AND f.tenant_id = v_tenant AND f."yearLabel" = v_year_label
-                       AND f.stage = 'FROZEN' AND f."referenceDate" <= v_reference) THEN
+                       AND f.stage = 'FROZEN' AND f."referenceDate" <= v_reference
+                       AND NOT billing_item_voided(p_enrollment, f."referenceDate", f.at, 'infinity'::timestamp, NULL, NULL)) THEN
         RAISE EXCEPTION 'CAHIORA: cette inscription n''est pas comptée dans ce comptage figé';
       END IF;
       IF v_document IS NOT NULL AND p_today > v_document + 30 THEN
-        RAISE EXCEPTION 'CAHIORA: délai passé : une % se demande au plus tard 30 jours après le document concerné, émis le % (D-G5-14 A)',
-          CASE WHEN p_departure IS NULL THEN 'exclusion' ELSE 'contestation' END, to_char(v_document, 'DD/MM/YYYY');
+        -- Lecture 1 : dérogation exceptionnelle du Super Admin pour cette inscription, encore valable, jamais utilisée.
+        SELECT d.id, d."grantedAt"::date INTO v_derogation, v_derogation_day FROM count_request_derogations d
+         WHERE d.tenant_id = v_tenant AND d."enrollmentId" = p_enrollment AND d."yearLabel" = v_year_label AND d.until >= p_today
+           AND NOT EXISTS (SELECT 1 FROM count_corrections x WHERE x."derogationId" = d.id)
+         ORDER BY d."grantedAt" DESC LIMIT 1;
+        IF v_derogation IS NULL THEN
+          RAISE EXCEPTION 'CAHIORA: délai passé : une % se demande au plus tard 30 jours après le document concerné, émis le % (D-G5-14 A) ; seul le Super Admin de Cahiora peut rouvrir ce délai, par une dérogation exceptionnelle',
+            CASE WHEN p_departure IS NULL THEN 'exclusion' ELSE 'contestation' END, to_char(v_document, 'DD/MM/YYYY');
+        END IF;
       END IF;
     END IF;
     v_status := 'PENDING';
@@ -305,15 +464,16 @@ BEGIN
     v_status := 'VALIDATED';
   END IF;
   INSERT INTO count_corrections (id, tenant_id, kind, "enrollmentId", "countId", "departureDate", justification, "fileKey", "fileMime", "fileSize", status,
-                                 "requestedById", "requestedByName", "requestedAt", "decidedByKind", "decidedById", "decidedByName", "decidedAt")
+                                 "requestedById", "requestedByName", "requestedAt", "decidedByKind", "decidedById", "decidedByName", "decidedAt", "derogationId")
     VALUES (v_id, v_tenant, p_kind::"CountCorrectionKind", p_enrollment, p_count, p_departure, btrim(p_justification), p_file_key, p_file_mime, p_file_size, v_status,
             p_user, p_user_name, v_now,
             CASE WHEN v_status = 'VALIDATED' THEN 'school' END, CASE WHEN v_status = 'VALIDATED' THEN p_user END,
-            CASE WHEN v_status = 'VALIDATED' THEN p_user_name END, CASE WHEN v_status = 'VALIDATED' THEN v_now END);
+            CASE WHEN v_status = 'VALIDATED' THEN p_user_name END, CASE WHEN v_status = 'VALIDATED' THEN v_now END, v_derogation);
   INSERT INTO platform_audit_logs (id, action, "tenantId", data, ip, "createdAt")
     VALUES (gen_random_uuid(), v_action, v_tenant,
             jsonb_build_object('countKind', v_count_kind, 'referenceDate', v_reference, 'yearLabel', v_year_label, 'matricule', e.matricule,
-                               'departureDate', p_departure, 'by', p_user_name, 'documentDate', v_document, 'outsideCount', p_count IS NULL), p_ip, v_now);
+                               'departureDate', p_departure, 'by', p_user_name, 'documentDate', v_document, 'outsideCount', p_count IS NULL,
+                               'derogationId', v_derogation), p_ip, v_now);
   INSERT INTO group_audit_logs (id, group_id, "actorKind", "actorId", "actorName", action, data, "createdAt")
     SELECT gen_random_uuid(), t.group_id, 'school', p_user, p_user_name, v_action,
            jsonb_build_object('tenantName', t.name, 'countKind', v_count_kind, 'referenceDate', v_reference, 'yearLabel', v_year_label), v_now
@@ -325,7 +485,9 @@ BEGIN
              CASE WHEN p_departure IS NULL THEN 'Demande d''exclusion à décider : ' || t.name || ', inscription ' || e.matricule
                   ELSE 'Contestation à décider : ' || t.name || ', inscription ' || e.matricule || ', départ le ' || to_char(p_departure, 'DD/MM/YYYY')
                        || ', avant le comptage du ' || to_char(v_first, 'DD/MM/YYYY') || ',' END
-               || ' déjà demandée par le document du ' || to_char(v_document, 'DD/MM/YYYY') || ' (D-G5-13 B)', NULL, v_now
+               || ' déjà demandée par le document du ' || to_char(v_document, 'DD/MM/YYYY') || ' (D-G5-13 B)'
+               || CASE WHEN v_derogation IS NULL THEN ''
+                       ELSE ', hors délai, sous la dérogation exceptionnelle du ' || to_char(v_derogation_day, 'DD/MM/YYYY') END, NULL, v_now
       FROM tenants t WHERE t.id = v_tenant;
   END IF;
   RETURN v_id;
@@ -458,14 +620,21 @@ BEGIN
   SELECT encode(sha256(convert_to(coalesce(string_agg(x."enrollmentId"::text || ':' || x.basis || ':' || coalesce(x."departureDate"::text, ''), ',' ORDER BY x."enrollmentId"::text), ''), 'UTF8')), 'hex')
     INTO v_hash
     FROM jsonb_to_recordset(p_items) AS x("enrollmentId" uuid, basis text, "departureDate" date);
+  -- Lecture 3 (24 novembre 2026, soir) : une inscription retirée par une exclusion ou une contestation validée au plus
+  -- tard à l'instant de l'historique lu n'est comptée de nouveau qu'une fois l'élève revenu, au plus tard à la fin du jour R.
+  IF EXISTS (SELECT 1 FROM jsonb_to_recordset(p_items) AS x("enrollmentId" uuid, counted boolean)
+             WHERE x.counted AND billing_item_voided(x."enrollmentId", p_date, timezone('UTC', p_at), timezone('UTC', p_known_at), NULL, NULL)) THEN
+    RAISE EXCEPTION 'CAHIORA: liste du comptage invalide : une inscription retirée par une exclusion ou une contestation validée n''est comptée de nouveau qu''après le retour de l''élève';
+  END IF;
+  -- Cumul de l'année : chaque inscription une seule fois, sans les lignes annulées par une exclusion ou une contestation
+  -- validée au plus tard à l'instant de l'historique lu (lecture 3 : l'élève revenu compte de nouveau, une fois).
   SELECT count(DISTINCT u.eid) INTO v_cumulative FROM (
       SELECT i."enrollmentId" AS eid FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
        WHERE b.tenant_id = p_tenant AND b."yearLabel" = v_label AND b.stage = 'FROZEN' AND b."referenceDate" <= p_date AND i.counted
+         AND NOT billing_item_voided(i."enrollmentId", b."referenceDate", b.at, timezone('UTC', p_known_at), NULL, NULL)
       UNION
       SELECT x."enrollmentId" FROM jsonb_to_recordset(p_items) AS x("enrollmentId" uuid, counted boolean) WHERE x.counted
-    ) u
-   WHERE NOT EXISTS (SELECT 1 FROM count_corrections k WHERE k."enrollmentId" = u.eid AND k.kind = 'EXCLUSION' AND k.status = 'VALIDATED'
-                     AND k."decidedAt" <= timezone('UTC', p_known_at));
+    ) u;
 
   INSERT INTO billing_counts (id, tenant_id, "yearLabel", "academicYearId", kind, "referenceDate", stage, "calendarVersion", pupils, cumulative,
                               "toCheck", excluded, "listHash", at, "knownAt", "reviewUntil", "timeZone", "createdAt")
@@ -533,9 +702,11 @@ BEGIN
   END IF;
   SELECT b."yearLabel", b.kind::text, b."referenceDate" INTO v_year, v_kind, v_reference FROM billing_counts b WHERE b.id = k."countId";
   SELECT st.matricule INTO v_matricule FROM enrollments en JOIN students st ON st.id = en."studentId" WHERE en.id = k."enrollmentId";
+  -- Lecture 3 : lignes non annulées par les décisions prises avant celle-ci (l'élève revenu a son propre document d'origine).
   SELECT min(b."referenceDate") INTO v_first
     FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
-   WHERE i."enrollmentId" = k."enrollmentId" AND i.counted AND b.tenant_id = p_tenant AND b."yearLabel" = v_year AND b.stage = 'FROZEN';
+   WHERE i."enrollmentId" = k."enrollmentId" AND i.counted AND b.tenant_id = p_tenant AND b."yearLabel" = v_year AND b.stage = 'FROZEN'
+     AND NOT billing_item_voided(k."enrollmentId", b."referenceDate", b.at, coalesce(k."decidedAt", 'infinity'::timestamp), k.id, NULL);
   SELECT d.id, d.reference, d."issueDate" INTO o
     FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId"
    WHERE l.tenant_id = p_tenant AND d.kind = 'SUBSCRIPTION' AND d."yearLabel" = v_year AND v_first IS NOT NULL AND l."referenceDate" >= v_first
@@ -613,12 +784,15 @@ END $$;
 
 -- G5b-2 (24 novembre 2026) : demandes d'exclusion et contestations de départ du ressort du Super Admin (remplace celle du
 -- lot G5c, qui ne rendait pas la date de départ) : mêmes lignes, plus la date d'un départ contesté (vide pour une
--- exclusion) et l'état de l'inscription. Jamais le nom de l'élève ; rôle de la plateforme seulement.
+-- exclusion), l'état de l'inscription et, lectures du 24 novembre au soir, la dérogation sous laquelle une demande hors
+-- délai a été faite ; la date du document est celle que voyait la décision. Jamais le nom de l'élève ; rôle de la
+-- plateforme seulement.
 DROP FUNCTION platform_count_exclusions();
 CREATE FUNCTION platform_count_exclusions() RETURNS TABLE (
   tenant_id uuid, correction_id uuid, status text, count_id uuid, count_kind text, reference_date date, year_label text, matricule text,
   class_name text, cancel_reason text, justification text, file_key text, file_mime text, requested_by_name text, requested_at timestamp,
-  decided_by_name text, decided_at timestamp, decision_note text, document_date date, departure_date date, enrollment_status text)
+  decided_by_name text, decided_at timestamp, decision_note text, document_date date, departure_date date, enrollment_status text,
+  derogation_id uuid, derogation_granted_at timestamp)
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v_tenant uuid;
@@ -630,19 +804,21 @@ BEGIN
     RETURN QUERY
       SELECT x.tenant_id, x.id, x.status, x.count_id, x.count_kind, x.reference_date, x.year_label, x.matricule, x.class_name, x.cancel_reason,
              x.justification, x.file_key, x.file_mime, x.requested_by_name, x.requested_at, x.decided_by_name, x.decided_at, x.decision_note, x.document_date,
-             x.departure_date, x.enrollment_status
+             x.departure_date, x.enrollment_status, x.derogation_id, x.derogation_granted_at
       FROM (
         SELECT k.tenant_id, k.id, k.status::text AS status, b.id AS count_id, b.kind::text AS count_kind, b."referenceDate" AS reference_date,
                b."yearLabel" AS year_label, st.matricule, cl.name AS class_name, en."cancelReason" AS cancel_reason, k.justification,
                k."fileKey" AS file_key, k."fileMime" AS file_mime, k."requestedByName" AS requested_by_name, k."requestedAt" AS requested_at,
                k."decidedByName" AS decided_by_name, k."decidedAt" AS decided_at, k."decisionNote" AS decision_note, k."decidedByKind" AS decided_by_kind,
-               billing_enrollment_document(v_tenant, k."enrollmentId", b."yearLabel") AS document_date,
-               k."departureDate" AS departure_date, en.status::text AS enrollment_status
+               billing_enrollment_document_asof(v_tenant, k."enrollmentId", b."yearLabel", coalesce(k."decidedAt", 'infinity'::timestamp), k.id) AS document_date,
+               k."departureDate" AS departure_date, en.status::text AS enrollment_status, k."derogationId" AS derogation_id,
+               dg."grantedAt" AS derogation_granted_at
         FROM count_corrections k
         JOIN billing_counts b ON b.id = k."countId"
         JOIN enrollments en ON en.id = k."enrollmentId"
         JOIN students st ON st.id = en."studentId"
         LEFT JOIN classes cl ON cl.id = en."classId"
+        LEFT JOIN count_request_derogations dg ON dg.id = k."derogationId"
         WHERE k.tenant_id = v_tenant AND k.kind = 'EXCLUSION'
       ) x
       WHERE x.decided_by_kind = 'platform' OR (x.status = 'PENDING' AND x.document_date IS NOT NULL)
@@ -651,6 +827,89 @@ BEGIN
   PERFORM set_config('app.tenant_id', '', true);
 END $$;
 
+
+-- Lecture 1 (24 novembre 2026, soir) : le Super Admin rouvre exceptionnellement, pour une inscription d'un établissement
+-- (matricule et année scolaire), la demande d'une exclusion ou d'une contestation, une fois le délai de 30 jours passé
+-- (D-G5-14 A) : inscription annulée ou élève parti, demandée par un document émis, aucune demande en attente, aucune
+-- autre dérogation encore valable. Une seule demande, au plus tard 30 jours après l'accord. Motif dans le journal de la
+-- plateforme seulement ; le groupe voit l'accord sans matricule ni motif ; l'API prévient la direction et trace le
+-- journal de l'école (sans le motif). Rôle de la plateforme seulement.
+CREATE OR REPLACE FUNCTION grant_count_request_derogation(
+  p_tenant uuid, p_year text, p_matricule text, p_reason text, p_admin uuid, p_admin_name text, p_ip text, p_today date)
+  RETURNS TABLE (derogation_id uuid, enrollment_id uuid, matricule text, document_date date, until date)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_now timestamp := timezone('UTC', now());
+  v_id uuid := gen_random_uuid();
+  v_group uuid;
+  v_name text;
+  v_year text := btrim(coalesce(p_year, ''));
+  v_matricule text := btrim(coalesce(p_matricule, ''));
+  v_enrollment uuid;
+  v_status text;
+  v_document date;
+  v_until date;
+BEGIN
+  IF p_tenant IS NULL OR v_year = '' OR v_matricule = '' OR coalesce(btrim(p_admin_name), '') = '' OR p_today IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: dérogation incomplète : établissement, année scolaire et matricule';
+  END IF;
+  IF length(btrim(coalesce(p_reason, ''))) NOT BETWEEN 5 AND 300 THEN
+    RAISE EXCEPTION 'CAHIORA: une dérogation exige un motif (5 à 300 caractères)';
+  END IF;
+  SELECT t.group_id, t.name INTO v_group, v_name FROM tenants t WHERE t.id = p_tenant;
+  IF v_group IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: établissement introuvable';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtext('cahiora-billing-document'), hashtext(v_group::text));
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  SELECT en.id, en.status::text INTO v_enrollment, v_status
+    FROM enrollments en JOIN students st ON st.id = en."studentId" JOIN academic_years y ON y.id = en."academicYearId"
+   WHERE en.tenant_id = p_tenant AND st.matricule = v_matricule AND y.label = v_year;
+  IF v_enrollment IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: aucune inscription de cet établissement pour ce matricule et cette année scolaire';
+  END IF;
+  PERFORM 1 FROM enrollments WHERE id = v_enrollment FOR UPDATE;
+  IF v_status NOT IN ('CANCELLED', 'TRANSFERRED', 'WITHDRAWN') THEN
+    RAISE EXCEPTION 'CAHIORA: inscription active : rien à exclure ni à contester (annulation pour erreur de saisie ou sortie enregistrée d''abord)';
+  END IF;
+  v_document := billing_enrollment_document(p_tenant, v_enrollment, v_year);
+  IF v_document IS NULL THEN
+    RAISE EXCEPTION 'CAHIORA: aucun document de Cahiora ne demande cet élève : aucun délai à rouvrir, la direction décide';
+  END IF;
+  IF p_today <= v_document + 30 THEN
+    RAISE EXCEPTION 'CAHIORA: le délai n''est pas passé (jusqu''au % inclus) : aucune dérogation n''est nécessaire', to_char(v_document + 30, 'DD/MM/YYYY');
+  END IF;
+  IF EXISTS (SELECT 1 FROM count_corrections k WHERE k."enrollmentId" = v_enrollment AND k.kind = 'EXCLUSION' AND k.status = 'PENDING') THEN
+    RAISE EXCEPTION 'CAHIORA: une demande est déjà en attente pour cette inscription';
+  END IF;
+  IF EXISTS (SELECT 1 FROM count_request_derogations d WHERE d."enrollmentId" = v_enrollment AND d."yearLabel" = v_year AND d.until >= p_today
+             AND NOT EXISTS (SELECT 1 FROM count_corrections x WHERE x."derogationId" = d.id)) THEN
+    RAISE EXCEPTION 'CAHIORA: une dérogation encore valable, pas encore utilisée, existe déjà pour cette inscription';
+  END IF;
+  v_until := p_today + 30;
+  INSERT INTO count_request_derogations (id, tenant_id, "enrollmentId", matricule, "yearLabel", "documentDate", until, reason, "grantedById", "grantedByName", "grantedAt")
+    VALUES (v_id, p_tenant, v_enrollment, v_matricule, v_year, v_document, v_until, btrim(p_reason), p_admin, btrim(p_admin_name), v_now);
+  INSERT INTO platform_audit_logs (id, "adminId", action, "tenantId", data, ip, "createdAt")
+    VALUES (gen_random_uuid(), p_admin, 'billing.count_request_derogation_granted', p_tenant,
+            jsonb_build_object('derogationId', v_id, 'matricule', v_matricule, 'yearLabel', v_year, 'documentDate', v_document, 'until', v_until,
+                               'reason', btrim(p_reason), 'by', btrim(p_admin_name)), p_ip, v_now);
+  INSERT INTO group_audit_logs (id, group_id, "actorKind", "actorId", "actorName", action, data, "createdAt")
+    VALUES (gen_random_uuid(), v_group, 'platform', p_admin, 'Super Admin Cahiora (' || btrim(p_admin_name) || ')', 'billing.count_request_derogation_granted',
+            jsonb_build_object('tenantName', v_name, 'yearLabel', v_year, 'until', v_until), v_now);
+  RETURN QUERY SELECT v_id, v_enrollment, v_matricule, v_document, v_until;
+END $$;
+
+-- Dérogations de l'école courante, sans le motif : inscription, document dont le délai était passé, jusqu'à quand, et si
+-- la demande a déjà été faite.
+CREATE OR REPLACE FUNCTION current_tenant_count_derogations() RETURNS TABLE (
+  derogation_id uuid, enrollment_id uuid, year_label text, document_date date, until date, granted_at timestamp, used boolean)
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT d.id, d."enrollmentId", d."yearLabel", d."documentDate", d.until, d."grantedAt",
+         EXISTS (SELECT 1 FROM count_corrections x WHERE x."derogationId" = d.id)
+  FROM count_request_derogations d
+  WHERE d.tenant_id = app_current_tenant()
+  ORDER BY d."grantedAt" DESC
+$$;
 
 -- ---------------------------------------------------------------- 4. G5d2-5 : doubles saisies après une annulation
 
@@ -674,7 +933,7 @@ END $$;
 CREATE TRIGGER billing_payments_links_guard BEFORE UPDATE ON billing_payments FOR EACH ROW EXECUTE FUNCTION billing_payments_links_guard();
 
 -- Contrôle « même école » (SEC-001) des nouvelles clés étrangères : le lien d'une exclusion cite une demande du même
--- établissement.
+-- établissement ; une dérogation cite une inscription, et une demande sa dérogation, du même établissement.
 SELECT install_same_tenant_checks();
 
 -- Enregistre un paiement reçu (remplace celle du lot G5d-2, qui disparaît : l'API appelle celle-ci). Mêmes contrôles,
@@ -860,7 +1119,16 @@ END $$;
 -- ---------------------------------------------------------------- Droits
 
 REVOKE ALL ON FUNCTION tenant_is_test(uuid), billing_exclusion_origin(uuid, uuid), platform_count_exclusions(),
-  record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date, uuid, text, text) FROM PUBLIC;
+  record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date, uuid, text, text),
+  billing_item_voided(uuid, date, timestamp, timestamp, uuid, uuid), billing_enrollment_document_asof(uuid, uuid, text, timestamp, uuid),
+  billing_counts_billable_if(uuid, uuid), grant_count_request_derogation(uuid, text, text, text, uuid, text, text, date),
+  current_tenant_count_derogations() FROM PUBLIC;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'erp_app') THEN
+    GRANT EXECUTE ON FUNCTION current_tenant_count_derogations() TO erp_app;
+  END IF;
+END $$;
 
 -- Rôle de la plateforme : lecture des liens des exclusions, statut commercial (colonne de tenants, déjà lisible et
 -- modifiable par ce rôle), document d'origine, liste des exclusions et contestations (recréée : ses droits sont
@@ -872,9 +1140,10 @@ BEGIN
     RAISE NOTICE 'Rôle erp_platform absent : droits non attribués (poste de développement)';
     RETURN;
   END IF;
-  GRANT SELECT ON billing_exclusion_links TO erp_platform;
+  GRANT SELECT ON billing_exclusion_links, count_request_derogations TO erp_platform;
   GRANT EXECUTE ON FUNCTION tenant_is_test(uuid), billing_exclusion_origin(uuid, uuid), platform_count_exclusions(),
-    record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date, uuid, text, text) TO erp_platform;
+    record_billing_payment(uuid, uuid, integer, date, text, text, text, text, text, uuid, text, text, date, uuid, text, text),
+    billing_counts_billable_if(uuid, uuid), grant_count_request_derogation(uuid, text, text, text, uuid, text, text, date) TO erp_platform;
 END $$;
 
 SELECT grant_platform_ajustements_role();

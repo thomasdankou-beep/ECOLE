@@ -74,6 +74,8 @@ type ExclusionRow = {
   matricule: string; class_name: string | null; cancel_reason: string | null; justification: string; file_key: string | null; file_mime: string | null;
   requested_by_name: string; requested_at: Date; decided_by_name: string | null; decided_at: Date | null; decision_note: string | null; document_date: Date | null;
   departure_date: Date | null; enrollment_status: string | null;
+  /** Lecture 1 (24 novembre 2026, soir) : demande faite hors délai, sous une dérogation du Super Admin. */
+  derogation_id: string | null; derogation_granted_at: Date | null;
 };
 /** Nature d'une demande du ressort du Super Admin : exclusion d'une inscription annulée, ou contestation d'un départ (G5b-2). */
 const requestLabel = (departure: Date | null) => (departure ? 'Contestation de départ' : 'Demande d’exclusion');
@@ -88,6 +90,19 @@ export class ExclusionDecisionDto {
   @IsUUID('all', { message: 'Établissement invalide' }) tenantId: string;
   @IsIn(['VALIDATED', 'REFUSED'], { message: 'Décision inconnue' }) decision: 'VALIDATED' | 'REFUSED';
   @IsOptional() @IsString() @MaxLength(500, { message: 'Motif : 500 caractères au plus' }) note?: string;
+  @IsString(CODE) @Length(6, 8, CODE) code: string;
+}
+
+/**
+ * Lecture 1 (Dankou, 24 novembre 2026, soir) : dérogation exceptionnelle du Super Admin au délai de 30 jours d'une
+ * demande d'exclusion ou de contestation, pour une inscription (matricule) d'un établissement, motivée, confirmée par
+ * son code, tracée (motif au journal de la plateforme seulement).
+ */
+export class DerogationDto {
+  @IsUUID('all', { message: 'Établissement invalide' }) tenantId: string;
+  @IsString({ message: 'Année scolaire obligatoire' }) @Length(4, 20, { message: 'Année scolaire : 4 à 20 caractères' }) yearLabel: string;
+  @IsString({ message: 'Matricule obligatoire' }) @Length(1, 60, { message: 'Matricule : 60 caractères au plus' }) matricule: string;
+  @IsString({ message: 'Motif obligatoire' }) @Length(5, 300, { message: 'Motif : 5 à 300 caractères' }) reason: string;
   @IsString(CODE) @Length(6, 8, CODE) code: string;
 }
 type SchoolRow = {
@@ -433,10 +448,11 @@ export class BillingDocumentsService {
 
   /**
    * Avoir d'un établissement pour une année : ligne de son dernier document d'abonnement, élèves facturables de son
-   * comptage (exclusions validées retirées ; `pending` : la demande encore en attente est retirée aussi, pour l'aperçu),
-   * déjà demandé. La base refait ce calcul à l'émission.
+   * comptage (lignes annulées par les exclusions validées retirées ; `pending` : demande encore en attente comptée comme
+   * validée, pour l'aperçu : lecture 3, un élève revenu et compté de nouveau depuis reste facturable), déjà demandé. La
+   * base refait ce calcul à l'émission.
    */
-  private async creditFor(tx: Prisma.TransactionClient, tenantId: string, yearLabel: string, pending: boolean) {
+  private async creditFor(tx: Prisma.TransactionClient, tenantId: string, yearLabel: string, pending: string | null) {
     const order: Prisma.BillingDocumentLineOrderByWithRelationInput[] = [{ referenceDate: 'desc' }, { document: { createdAt: 'desc' } }];
     const related = await tx.billingDocumentLine.findFirst({
       where: { tenantId, document: { kind: 'SUBSCRIPTION', yearLabel } }, orderBy: order,
@@ -447,11 +463,12 @@ export class BillingDocumentsService {
     });
     if (!related?.countId || !related.countKind || !related.referenceDate || related.pricePerPupil === null || related.minimum === null) return null;
     const last = await tx.billingDocumentLine.findFirst({ where: { tenantId, document: { kind: { in: ['SUBSCRIPTION', 'CREDIT_NOTE'] }, yearLabel } }, orderBy: order, select: { pupils: true } });
-    const [b] = await tx.$queryRaw<{ billable: number }[]>`SELECT billable FROM billing_counts_billable(${tenantId}::uuid) WHERE count_id = ${related.countId}::uuid`;
+    const [b] = await tx.$queryRaw<{ billable: number }[]>`
+      SELECT billable FROM billing_counts_billable_if(${tenantId}::uuid, ${pending}::uuid) WHERE count_id = ${related.countId}::uuid`;
     const [a] = await tx.$queryRaw<{ billed: number }[]>`SELECT billing_already_billed(${tenantId}::uuid, ${yearLabel}) AS billed`;
     const plan = creditLine({
       related: { pricePerPupil: related.pricePerPupil, minimum: related.minimum, shareMonths: related.shareMonths, shareOf: related.shareOf },
-      pupils: Math.max(0, b.billable - (pending ? 1 : 0)), previousPupils: last?.pupils ?? 0, alreadyBilled: a.billed,
+      pupils: b.billable, previousPupils: last?.pupils ?? 0, alreadyBilled: a.billed,
     }, this.decisions);
     return { related: { ...related, countKind: related.countKind, referenceDate: iso(related.referenceDate)! }, plan };
   }
@@ -470,7 +487,7 @@ export class BillingDocumentsService {
     for (const r of rows) {
       const t = tenants.get(r.tenant_id);
       const documentDate = iso(r.document_date);
-      const credit = r.status === 'PENDING' ? await this.creditFor(this.platform, r.tenant_id, r.year_label, true) : null;
+      const credit = r.status === 'PENDING' ? await this.creditFor(this.platform, r.tenant_id, r.year_label, r.correction_id) : null;
       // G5c-9 : document d'origine (premier document qui a demandé l'élève) ; G5c-7 : objectif de 7 jours ouvrés.
       const [o] = await this.platform.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${r.tenant_id}::uuid, ${r.correction_id}::uuid)`;
       const target = exclusionTarget(localDay(PLATFORM_TZ, r.requested_at), iso(o?.origin_issue_date));
@@ -482,6 +499,8 @@ export class BillingDocumentsService {
         contest: !!r.departure_date, departureDate: iso(r.departure_date), enrollmentStatus: r.enrollment_status, kindLabel: requestLabel(r.departure_date),
         requestedByName: r.requested_by_name, requestedAt: r.requested_at, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note,
         documentDate, requestDeadline: documentDate ? exclusionDeadline(documentDate) : null,
+        // Lecture 1 (24 novembre 2026, soir) : demande faite après le délai, sous une dérogation exceptionnelle.
+        derogation: r.derogation_id ? { id: r.derogation_id, grantedAt: r.derogation_granted_at } : null,
         origin: o?.origin_id ? { id: o.origin_id, reference: o.origin_reference, issueDate: iso(o.origin_issue_date) } : null,
         creditNote: credits.get(r.correction_id) ?? null,
         target: { workingDays: EXCLUSION_TARGET_WORKING_DAYS, until: target, late: exclusionLate(r.status, target, today) },
@@ -541,7 +560,7 @@ export class BillingDocumentsService {
         let credit: Awaited<ReturnType<BillingDocumentsService['issueCredit']>> | null = null;
         let message: string | null = null;
         if (dto.decision === 'VALIDATED') {
-          const c = await this.creditFor(tx, t.id, d.year_label, false);
+          const c = await this.creditFor(tx, t.id, d.year_label, null);
           if (!c) throw new BadRequestException('Aucun document d’abonnement à corriger pour cette année');
           if (c.plan.state === 'CLOSED') throw new BadRequestException(c.plan.closed.message);
           if (c.plan.state === 'NONE') message = c.plan.message;
@@ -575,6 +594,75 @@ export class BillingDocumentsService {
           : (dto.decision === 'VALIDATED' ? 'Exclusion validée par Cahiora' : 'Exclusion refusée par Cahiora');
         await notifyDirection(tx, t.id, action, title, body);
         return { status: dto.decision, credit, message };
+      }, { timeout: 60000 });
+    } catch (e) {
+      const m = cahioraMessage(e);
+      if (m) throw new BadRequestException(m);
+      throw e;
+    }
+  }
+
+  // ---------------------------------------------------------------- Dérogations au délai de 30 jours (lecture 1)
+
+  /**
+   * Lecture 1 (Dankou, 24 novembre 2026, soir) : dérogations accordées par le Super Admin, de la plus récente à la plus
+   * ancienne : établissement, matricule (jamais le nom), document dont le délai était passé, jusqu'à quand, motif, et la
+   * demande faite sous chacune, le cas échéant.
+   */
+  async platformDerogations(now = new Date()) {
+    const rows = await this.platform.countRequestDerogation.findMany({
+      orderBy: { grantedAt: 'desc' }, take: 200,
+      select: {
+        id: true, matricule: true, yearLabel: true, documentDate: true, until: true, reason: true, grantedByName: true, grantedAt: true,
+        tenant: { select: { id: true, name: true, timezone: true } },
+      },
+    });
+    const used = new Map((await this.platform.$queryRaw<ExclusionRow[]>`SELECT * FROM platform_count_exclusions()`)
+      .filter((r) => r.derogation_id).map((r) => [r.derogation_id!, r]));
+    return {
+      note: `Passé le délai de 30 jours après le dernier document de Cahiora qui demande un élève (D-G5-14 A), seul le Super Admin le rouvre, pour une inscription, par une dérogation exceptionnelle : motif obligatoire (journal de la plateforme seulement, jamais montré à l’école ni au groupe), une seule demande, dans les 30 jours. La demande suit ensuite le chemin habituel : vous la décidez.`,
+      derogations: rows.map((d) => {
+        const r = used.get(d.id);
+        const until = iso(d.until)!;
+        return {
+          id: d.id, tenant: { id: d.tenant.id, name: d.tenant.name }, matricule: d.matricule, yearLabel: d.yearLabel, documentDate: iso(d.documentDate), until,
+          reason: d.reason, grantedByName: d.grantedByName, grantedAt: d.grantedAt,
+          state: r ? 'USED' as const : until < localDay(d.tenant.timezone, now) ? 'EXPIRED' as const : 'OPEN' as const,
+          request: r ? { id: r.correction_id, status: r.status, contest: !!r.departure_date, requestedAt: r.requested_at } : null,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Lecture 1 : le Super Admin rouvre exceptionnellement, pour une inscription, la demande d'une exclusion ou d'une
+   * contestation une fois le délai de 30 jours passé (la base contrôle tout : inscription annulée ou élève parti,
+   * document émis, délai passé, rien en attente). Motif au journal de la plateforme seulement ; la direction est
+   * prévenue et son journal le dit, sans le motif ; le groupe le voit sans matricule ni motif.
+   */
+  async grantDerogation(admin: PlatformActor, dto: DerogationDto, now = new Date()) {
+    await this.billing.confirm(admin, dto.code);
+    try {
+      return await this.platform.$transaction(async (tx) => {
+        const t = await tx.tenant.findUnique({ where: { id: dto.tenantId }, select: { id: true, timezone: true } });
+        if (!t) throw new NotFoundException('Établissement introuvable');
+        const [d] = await tx.$queryRaw<{ derogation_id: string; enrollment_id: string; matricule: string; document_date: Date; until: Date }[]>`
+          SELECT * FROM grant_count_request_derogation(${t.id}::uuid, ${dto.yearLabel.trim()}, ${dto.matricule.trim()}, ${dto.reason.trim()}, ${admin.id}::uuid,
+            ${admin.name}, ${admin.ip ?? null}, ${localDay(t.timezone, now)}::date)`;
+        const until = iso(d.until)!;
+        const documentDate = iso(d.document_date)!;
+        await tx.$executeRaw`SELECT set_config('app.tenant_id', ${t.id}, true)`;
+        await tx.auditLog.createMany({
+          data: [{
+            tenantId: t.id, userId: null, userName: `Super Admin de la plateforme (${admin.name})`, action: 'billing.count_request_derogation_granted',
+            entity: 'CountRequestDerogation', entityId: d.derogation_id,
+            data: { matricule: d.matricule, yearLabel: dto.yearLabel.trim(), documentDate, until } as Prisma.InputJsonValue,
+          }],
+        });
+        await notifyDirection(tx, t.id, 'billing.count_request_derogation', 'Délai rouvert exceptionnellement par Cahiora',
+          `Cahiora a rouvert exceptionnellement, jusqu’au ${frDay(until)} inclus, le délai pour demander l’exclusion ou contester le comptage de l’inscription ${d.matricule} `
+          + `(document de Cahiora du ${frDay(documentDate)}). Une seule demande, dans Paramètres › Effectifs facturables ; Cahiora la décide.`);
+        return { id: d.derogation_id, matricule: d.matricule, documentDate, until };
       }, { timeout: 60000 });
     } catch (e) {
       const m = cahioraMessage(e);
@@ -710,6 +798,15 @@ export class BillingDocumentsController {
   @Post('platform/billing/exclusions/:id/decision') @Throttle({ default: { limit: 20, ttl: 60000 } })
   decide(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ExclusionDecisionDto) {
     return this.s.decideExclusion((req as unknown as { platformAdmin: PlatformActor }).platformAdmin, id, dto);
+  }
+
+  /** Lecture 1 (24 novembre 2026, soir) : dérogations exceptionnelles au délai de 30 jours d'une demande. */
+  @Get('platform/billing/derogations') @Header('Cache-Control', 'no-store')
+  derogations() { return this.s.platformDerogations(); }
+
+  @Post('platform/billing/derogations') @Throttle({ default: { limit: 10, ttl: 60000 } })
+  grant(@Req() req: Request, @Body() dto: DerogationDto) {
+    return this.s.grantDerogation((req as unknown as { platformAdmin: PlatformActor }).platformAdmin, dto);
   }
 }
 

@@ -34,8 +34,11 @@ type Count = {
 type Item = {
   enrollmentId: string; matricule: string; name: string; className: string; siteName: string | null; counted: boolean; basis: Basis; basisLabel: string;
   departureDate: string | null; enrollmentStatus: string | null; cancelReason: string | null; duplicate: 'SAME' | 'PENDING' | null;
-  /** Exclusion ou contestation de départ (`contest`, avec la date du départ) demandée ou validée. */
-  exclusion: { id: string; status: 'PENDING' | 'VALIDATED'; contest: boolean; departureDate: string | null } | null;
+  /**
+   * Exclusion ou contestation de départ (`contest`, avec la date du départ) demandée, ou validée et qui retire l'élève de
+   * ce comptage ; lecture 3 (24 novembre 2026) : `returnedOn`, jour du retour de l'élève, compté de nouveau ensuite.
+   */
+  exclusion: { id: string; status: 'PENDING' | 'VALIDATED'; contest: boolean; departureDate: string | null; returnedOn: string | null } | null;
   canExclude: boolean; canDate: boolean; auditDay: string | null; stillCounted: boolean | null;
   /**
    * Élève parti (transféré ou retiré), compté dans un comptage figé : premier comptage qui le compte, date de sa sortie
@@ -45,6 +48,8 @@ type Item = {
   canContest: boolean;
   /** Dernier jour pour demander l'exclusion (null : aucune limite tant qu'aucun document ne compte l'élève). */
   exclusionUntil: string | null;
+  /** Lecture 1 (24 novembre 2026) : délai de 30 jours passé, rouvert exceptionnellement par Cahiora jusqu'au `until`. */
+  derogation: { until: string; grantedOn: string; documentDate: string } | null;
   /** Dernier document de Cahiora qui compte l'élève, et qui décide d'une exclusion (D-G5-13 B). */
   documentDate: string | null; decider: 'PLATFORM' | 'SCHOOL';
   /** G5b-2 : « À vérifier » (départ sans date connue, compté) ; la direction peut confirmer la date introuvable. */
@@ -54,6 +59,8 @@ type Correction = {
   id: string; kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED'; enrollmentId: string; matricule: string; name: string;
   /** Exclusion qui porte une date de départ : contestation d'un élève parti avant le comptage (24 novembre 2026). */
   contest: boolean;
+  /** Demande faite après le délai de 30 jours, sous une dérogation de Cahiora (lecture 1). */
+  derogation: boolean;
   /** null : date fixée ou confirmée introuvable hors de tout comptage (liste « À vérifier »). */
   countId: string | null; status: 'PENDING' | 'VALIDATED' | 'REFUSED';
   departureDate: string | null; justification: string; fileUrl: string | null; requestedByName: string; requestedAt: string;
@@ -70,6 +77,8 @@ type Checks = { today: string; note: string; years: { academicYearId: string; ye
 /** Élève dont on fixe la date de départ, ou confirme qu'elle est introuvable. */
 type Departure = { enrollmentId: string; name: string; matricule: string; className: string; auditDay: string | null; since?: string | null };
 const CHECKS_URL = '/settings/billing-counts/checks';
+/** Lecture 1 (24 novembre 2026) : passé le délai, seul Cahiora peut le rouvrir, exceptionnellement. */
+const LATE_TEXT = 'Seul Cahiora peut rouvrir ce délai, exceptionnellement, pour cet élève (dérogation motivée) : contactez Cahiora.';
 
 const frDate = (d: string | null | undefined) => (d ? new Date(`${d.slice(0, 10)}T00:00:00Z`).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }) : '—');
 const pupils = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
@@ -328,13 +337,18 @@ function Liste({ d, filter, setFilter, search, setSearch, act }: {
                       ? `${i.exclusion.contest ? `Contestation demandée (départ le ${frDate(i.exclusion.departureDate)})` : 'Exclusion demandée'}, en attente ${i.decider === 'PLATFORM' ? 'de la décision de Cahiora' : 'de votre décision'}.`
                       : d.count.stage === 'FROZEN' && i.counted ? `${what} après le gel : retiré des élèves facturés ; le comptage figé reste tel quel.` : `${what}.`}</span>
                   )}
+                  {i.exclusion?.returnedOn && (
+                    <span className="text-muted">Revenu le {frDate(i.exclusion.returnedOn)} : il est compté de nouveau au premier comptage qui suit son retour, s’il est inscrit ce jour-là. L’année ne lui est jamais demandée deux fois : ce qui avait été demandé pour lui a été annulé.</span>
+                  )}
                   {i.canExclude && d.count.stage === 'FROZEN' && (
-                    <span className="text-muted">{i.exclusionUntil
-                      ? `Exclusion possible jusqu’au ${frDate(i.exclusionUntil)} inclus, 30 jours après le document de Cahiora du ${frDate(i.documentDate)} : Cahiora décide.`
-                      : 'Exclusion possible : aucun document de Cahiora ne compte encore cet élève, vous décidez.'}</span>
+                    <span className="text-muted">{i.derogation
+                      ? `Délai rouvert exceptionnellement par Cahiora jusqu’au ${frDate(i.derogation.until)} inclus (dérogation du ${frDate(i.derogation.grantedOn)}) : une seule demande ; Cahiora décide.`
+                      : i.exclusionUntil
+                        ? `Exclusion possible jusqu’au ${frDate(i.exclusionUntil)} inclus, 30 jours après le document de Cahiora du ${frDate(i.documentDate)} : Cahiora décide.`
+                        : 'Exclusion possible : aucun document de Cahiora ne compte encore cet élève, vous décidez.'}</span>
                   )}
                   {!i.canExclude && !i.exclusion && d.count.stage === 'FROZEN' && i.counted && i.enrollmentStatus === 'CANCELLED' && i.documentDate && (
-                    <span className="text-muted">Délai d’exclusion passé : 30 jours après le document de Cahiora du {frDate(i.documentDate)}.</span>
+                    <span className="text-muted">Délai d’exclusion passé : 30 jours après le document de Cahiora du {frDate(i.documentDate)}. {LATE_TEXT}</span>
                   )}
                   {i.stillCounted === false && i.counted && <span className="font-bold text-warn">Ne sera plus compté si la vérification se termine maintenant.</span>}
                   {(i.canExclude || i.canDate || i.canConfirm || i.canContest) && (
@@ -363,12 +377,14 @@ function Depart({ i }: { i: Item }) {
   }
   const when = c.exitDay ? `Parti le ${frDate(c.exitDay)} (sortie enregistrée)` : 'Parti sans date enregistrée';
   if (!i.canContest) {
-    return <span className="text-muted">{when}. Délai de contestation passé : 30 jours après le document de Cahiora du {frDate(i.documentDate)}.</span>;
+    return <span className="text-muted">{when}. Délai de contestation passé : 30 jours après le document de Cahiora du {frDate(i.documentDate)}. {LATE_TEXT}</span>;
   }
   return (
     <span className="text-[13.5px]">
       <b>{when}{c.exitDay ? `, avant la fin du jour du comptage du ${frDate(c.firstCounted)} qui le compte` : ''}</b> : vous pouvez contester son comptage
-      {i.exclusionUntil ? ` jusqu’au ${frDate(i.exclusionUntil)} inclus (30 jours après le document de Cahiora du ${frDate(i.documentDate)}), Cahiora décide.` : '. Aucun document de Cahiora ne le compte encore : vous décidez.'}
+      {i.derogation
+        ? ` jusqu’au ${frDate(i.derogation.until)} inclus : délai rouvert exceptionnellement par Cahiora (dérogation du ${frDate(i.derogation.grantedOn)}), une seule demande ; Cahiora décide.`
+        : i.exclusionUntil ? ` jusqu’au ${frDate(i.exclusionUntil)} inclus (30 jours après le document de Cahiora du ${frDate(i.documentDate)}), Cahiora décide.` : '. Aucun document de Cahiora ne le compte encore : vous décidez.'}
       {!c.exitDay && ` Donnez la date du départ, justifiée, au plus tard le ${frDate(c.max)}.`}
     </span>
   );
@@ -392,13 +408,14 @@ function Corrections({ d, decide }: { d: Detail; decide: (c: Correction) => void
                 <span className="text-xs text-muted">Demandée le {dateTime(k.requestedAt)} par {k.requestedByName}{k.decidedAt && k.kind === 'EXCLUSION' ? ` · décision le ${dateTime(k.decidedAt)} par ${k.decidedByKind === 'platform' ? `Cahiora (${k.decidedByName})` : k.decidedByName}` : ''}</span>
                 {k.decisionNote && <span className="text-xs">Motif de la décision : {k.decisionNote}</span>}
                 {k.status === 'PENDING' && k.decider === 'PLATFORM' && <span className="text-xs">Cette inscription est déjà comptée dans un document de Cahiora : Cahiora décide ; {k.contest ? 'acceptée, la contestation' : 'validée, l’exclusion'} peut donner un avoir provisoire.</span>}
+                {k.derogation && <span className="text-xs">Demande faite après le délai de 30 jours, sous la dérogation exceptionnelle accordée par Cahiora.</span>}
                 {k.status === 'PENDING' && k.decider !== 'PLATFORM' && <div className="pt-1"><Button size="sm" onClick={() => decide(k)}>Décider</Button></div>}
               </li>
             );
           })}
         </ul>
       )}
-      <p className="mt-3 text-xs text-muted">Une exclusion validée pendant la vérification vaut pour le comptage figé ensuite et pour les suivants ; une exclusion ou une contestation validée après le gel retire l’élève des élèves facturés, sans changer le comptage figé. Chaque demande et chaque décision sont datées et inscrites dans le journal.</p>
+      <p className="mt-3 text-xs text-muted">Une exclusion validée pendant la vérification vaut pour le comptage figé ensuite et pour les suivants ; une exclusion ou une contestation validée après le gel retire l’élève des élèves facturés, sans changer le comptage figé. Un élève revenu ensuite est compté de nouveau au premier comptage qui suit son retour, une seule fois dans l’année. Chaque demande et chaque décision sont datées et inscrites dans le journal.</p>
     </Section>
   );
 }

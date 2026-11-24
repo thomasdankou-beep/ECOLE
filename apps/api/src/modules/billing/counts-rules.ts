@@ -167,6 +167,30 @@ export function resolveItems(
   return out.sort((a, b) => a.enrollmentId.localeCompare(b.enrollmentId));
 }
 
+/**
+ * Lecture 3 (Dankou, 24 novembre 2026, soir) : « un élève revenu après une contestation acceptée doit pouvoir redevenir
+ * facturable au prochain comptage s'il remplit les conditions requises et que sa précédente facturation a été
+ * intégralement annulée ». Une exclusion validée (inscription annulée par erreur de saisie) ou une contestation acceptée
+ * (à partir du jour du départ contesté) retire l'élève des comptages qui l'ont compté avant son retour : la ligne est
+ * « annulée » pour la facturation, le comptage figé ne change pas. Revenu (inscription rétablie après la demande), il
+ * est compté de nouveau au premier comptage qui suit son retour, s'il est inscrit ce jour-là ; chaque inscription ne
+ * compte qu'une fois dans l'année. Même règle que la base (billing_item_voided).
+ */
+export type VoidingRequest = { id: string; status: string; departureDate: string | null; requestedAt: Date; decidedAt: Date | null };
+
+/** La demande `k` (comptée comme validée) retire-t-elle la ligne d'un comptage du jour `c.referenceDate`, fin du jour `c.at` ? */
+export function requestVoids(k: VoidingRequest, returns: Date[], c: { referenceDate: string; at: Date }) {
+  return (!k.departureDate || k.departureDate <= c.referenceDate) && !returns.some((r) => r > k.requestedAt && r <= c.at);
+}
+
+/**
+ * Demande validée (au plus tard à `until`, sauf `except`) qui annule la ligne de ce comptage pour cette inscription, ou
+ * null. `returns` : instants où l'inscription a été rétablie (événements « REINSTATED »).
+ */
+export function voidingRequest<T extends VoidingRequest>(requests: T[], returns: Date[], c: { referenceDate: string; at: Date }, o: { until?: Date; except?: string } = {}) {
+  return requests.find((k) => k.status === 'VALIDATED' && !!k.decidedAt && (!o.until || k.decidedAt <= o.until) && k.id !== o.except && requestVoids(k, returns, c)) ?? null;
+}
+
 /** Vérification encore ouverte : comptage provisoire, dernier jour de vérification pas encore passé, pas encore figé. */
 export function reviewOpen(c: { stage: string; reviewUntil: string | null }, today: string, frozen: boolean) {
   return c.stage === 'PROVISIONAL' && !!c.reviewUntil && c.reviewUntil >= today && !frozen;

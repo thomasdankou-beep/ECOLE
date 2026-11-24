@@ -3,8 +3,9 @@
 -- date de départ introuvable, les corrections de départ faites hors de tout comptage et la contestation d'un départ
 -- antérieur au comptage (G5b-2 ; les contestations déjà demandées restent, vues comme des exclusions), les liens des
 -- exclusions vers leur document d'origine (G5c-9), la ressaisie désignée d'un paiement annulé, l'empreinte des
--- justificatifs et le motif d'un paiement semblable (G5d2-5). Remet les fonctions des lots G5a, G5b, G5c, G5d-1 et G5d-2
--- telles qu'elles étaient. Ne touche à aucune autre donnée : comptages, documents, avoirs, paiements et abonnements
+-- justificatifs et le motif d'un paiement semblable (G5d2-5), les dérogations du Super Admin au délai de 30 jours
+-- (lecture 1 du 24 novembre 2026) et le retour d'un élève dans le compte après une exclusion ou une contestation validée
+-- (lecture 3). Remet les fonctions des lots G5a, G5b, G5c, G5d-1 et G5d-2 telles qu'elles étaient. Ne touche à aucune autre donnée : comptages, documents, avoirs, paiements et abonnements
 -- restent tels qu'ils sont. À passer avant celui de G5d-2 si plusieurs lots doivent être retirés.
 -- Attention : après ce retour arrière, les établissements de test ne sont plus protégés par la base ; le code
 -- précédent ne connaît pas ce statut (aucun abonnement n'est ouvert en production à ce jour pour un établissement de
@@ -14,8 +15,9 @@
 -- migration peut être rejouée par une nouvelle mise à jour (tous les établissements redeviennent alors « test »).
 -- Contrôle de sécurité : s'il existe un établissement passé en client réel, un lien d'exclusion inscrit depuis la mise à
 -- jour (ceux qu'elle a inscrits pour les exclusions plus anciennes se déduisent des données gardées), une correction
--- faite hors comptage, une confirmation de date introuvable ou une contestation de départ, ou un paiement qui porte une ressaisie, une empreinte de
--- justificatif ou un motif, le script les compte et S'ARRÊTE sans rien changer. Pour passer outre en connaissance de
+-- faite hors comptage, une confirmation de date introuvable ou une contestation de départ, une dérogation au délai de
+-- 30 jours, un élève revenu après une exclusion validée (le lot G5c le retirerait de toute l'année), ou un paiement qui
+-- porte une ressaisie, une empreinte de justificatif ou un motif, le script les compte et S'ARRÊTE sans rien changer. Pour passer outre en connaissance de
 -- cause seulement (ces données seront perdues : gardez d'abord une sauvegarde hors du serveur) :
 -- PGOPTIONS="-c cahiora.forcer_retour=oui".
 -- Lancement :
@@ -27,6 +29,8 @@ DECLARE
   n_clients int;
   n_links int;
   n_corrections int := 0;
+  n_returns int := 0;
+  n_derogations int;
   n_payments int;
   t record;
 BEGIN
@@ -38,12 +42,15 @@ BEGIN
     PERFORM set_config('app.tenant_id', t.id::text, true);
     n_corrections := n_corrections + (SELECT count(*) FROM count_corrections WHERE tenant_id = t.id
       AND ("countId" IS NULL OR kind::text = 'DEPARTURE_CONFIRMED' OR (kind::text = 'EXCLUSION' AND "departureDate" IS NOT NULL)));
+    n_returns := n_returns + (SELECT count(*) FROM count_corrections k WHERE k.tenant_id = t.id AND k.kind::text = 'EXCLUSION' AND k.status = 'VALIDATED'
+      AND EXISTS (SELECT 1 FROM enrollment_events r WHERE r."enrollmentId" = k."enrollmentId" AND r.kind = 'REINSTATED' AND r."createdAt" > k."requestedAt"));
   END LOOP;
   PERFORM set_config('app.tenant_id', '', true);
+  SELECT count(*) INTO n_derogations FROM count_request_derogations;
   SELECT count(*) INTO n_payments FROM billing_payments WHERE "replacesPaymentId" IS NOT NULL OR "proofSha256" IS NOT NULL OR "similarReason" IS NOT NULL;
-  IF n_clients + n_links + n_corrections + n_payments > 0 AND coalesce(current_setting('cahiora.forcer_retour', true), '') <> 'oui' THEN
-    RAISE EXCEPTION 'Retour arrière arrêté, rien n''a été changé : % établissement(s) en client réel, % lien(s) d''exclusion, % correction(s) de départ hors comptage, date introuvable ou contestation de départ, % paiement(s) avec ressaisie, empreinte ou motif',
-      n_clients, n_links, n_corrections, n_payments;
+  IF n_clients + n_links + n_corrections + n_returns + n_derogations + n_payments > 0 AND coalesce(current_setting('cahiora.forcer_retour', true), '') <> 'oui' THEN
+    RAISE EXCEPTION 'Retour arrière arrêté, rien n''a été changé : % établissement(s) en client réel, % lien(s) d''exclusion, % correction(s) de départ hors comptage, date introuvable ou contestation de départ, % élève(s) revenu(s) après une exclusion ou une contestation validée, % dérogation(s) au délai de 30 jours, % paiement(s) avec ressaisie, empreinte ou motif',
+      n_clients, n_links, n_corrections, n_returns, n_derogations, n_payments;
   END IF;
 END $$;
 
@@ -376,6 +383,67 @@ BEGIN
     FROM jsonb_to_recordset(p_items) AS x("enrollmentId" uuid, "classId" uuid, "siteId" uuid, counted boolean, basis text, "departureDate" date);
   RETURN QUERY SELECT v_id, v_pupils, v_cumulative, v_check, v_excluded, v_hash, v_review;
 END $$;
+
+-- Lectures 1 et 3 (24 novembre 2026, soir) : élèves facturables et date du document tels qu'au lot G5c (toute exclusion
+-- validée retire l'élève de l'année), contrôle des demandes tel qu'au lot G5b ; dérogations retirées (les demandes déjà
+-- faites restent, sans leur lien vers la dérogation).
+CREATE OR REPLACE FUNCTION billing_counts_billable(p_tenant uuid) RETURNS TABLE (count_id uuid, billable integer)
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+BEGIN
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  RETURN QUERY
+    SELECT c.id, (SELECT count(DISTINCT i."enrollmentId")::integer
+                    FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
+                   WHERE b.tenant_id = c.tenant_id AND b."yearLabel" = c."yearLabel" AND b.stage = 'FROZEN' AND b."referenceDate" <= c."referenceDate"
+                     AND i.counted
+                     AND NOT EXISTS (SELECT 1 FROM count_corrections k
+                                      WHERE k."enrollmentId" = i."enrollmentId" AND k.kind = 'EXCLUSION' AND k.status = 'VALIDATED'))
+    FROM billing_counts c
+    WHERE c.tenant_id = p_tenant AND c.stage = 'FROZEN';
+END $$;
+
+CREATE OR REPLACE FUNCTION billing_enrollment_document(p_tenant uuid, p_enrollment uuid, p_year text) RETURNS date
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v_first date;
+BEGIN
+  PERFORM set_config('app.tenant_id', p_tenant::text, true);
+  SELECT min(b."referenceDate") INTO v_first
+    FROM billing_count_items i JOIN billing_counts b ON b.id = i."countId"
+   WHERE i."enrollmentId" = p_enrollment AND i.counted AND b.tenant_id = p_tenant AND b."yearLabel" = p_year AND b.stage = 'FROZEN';
+  IF v_first IS NULL THEN
+    RETURN NULL;
+  END IF;
+  RETURN (SELECT max(d."issueDate") FROM billing_document_lines l JOIN billing_documents d ON d.id = l."documentId"
+           WHERE l.tenant_id = p_tenant AND d.kind = 'SUBSCRIPTION' AND d."yearLabel" = p_year AND l."referenceDate" >= v_first);
+END $$;
+
+CREATE OR REPLACE FUNCTION count_corrections_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD.status <> 'PENDING' THEN
+    RAISE EXCEPTION 'La décision sur une demande de correction ne change plus';
+  END IF;
+  IF NEW.status = 'PENDING' OR NEW."decidedAt" IS NULL OR NEW."decidedByName" IS NULL OR NEW."decidedByKind" IS NULL THEN
+    RAISE EXCEPTION 'Une demande de correction ne change que par sa décision, datée et signée';
+  END IF;
+  IF (NEW.id, NEW.tenant_id, NEW.kind, NEW."enrollmentId", NEW."countId", NEW."departureDate", NEW.justification, NEW."fileKey", NEW."fileMime",
+      NEW."fileSize", NEW."requestedById", NEW."requestedByName", NEW."requestedAt")
+     IS DISTINCT FROM (OLD.id, OLD.tenant_id, OLD.kind, OLD."enrollmentId", OLD."countId", OLD."departureDate", OLD.justification, OLD."fileKey", OLD."fileMime",
+      OLD."fileSize", OLD."requestedById", OLD."requestedByName", OLD."requestedAt") THEN
+    RAISE EXCEPTION 'Une demande de correction ne se modifie pas : seule sa décision s''inscrit';
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP FUNCTION IF EXISTS grant_count_request_derogation(uuid, text, text, text, uuid, text, text, date);
+DROP FUNCTION IF EXISTS current_tenant_count_derogations();
+DROP FUNCTION IF EXISTS billing_counts_billable_if(uuid, uuid);
+DROP FUNCTION IF EXISTS billing_enrollment_document_asof(uuid, uuid, text, timestamp, uuid);
+DROP FUNCTION IF EXISTS billing_item_voided(uuid, date, timestamp, timestamp, uuid, uuid);
+ALTER TABLE count_corrections DROP CONSTRAINT IF EXISTS "count_corrections_derogationId_fkey";
+DROP INDEX IF EXISTS "count_corrections_derogationId_key";
+ALTER TABLE count_corrections DROP COLUMN IF EXISTS "derogationId";
+DROP TABLE IF EXISTS count_request_derogations;
 
 -- Liste des exclusions du Super Admin telle qu'au lot G5c (sans la date d'un départ contesté). Fonction recréée : même
 -- propriétaire que les tables, aucun droit sauf pour le rôle de la plateforme (grant_platform_documents_role).

@@ -29,7 +29,7 @@ const SCHOOL_TABLES = [
   'billing_count_items', 'count_corrections',
 ];
 /** Colonnes ajoutées par la migration : vérifiées à part (le reste de chaque ligne ne change pas). */
-const NEW_COLUMNS = ['commercialStatus', 'commercialStatusAt', 'replacesPaymentId', 'proofSha256', 'similarReason'];
+const NEW_COLUMNS = ['commercialStatus', 'commercialStatusAt', 'replacesPaymentId', 'proofSha256', 'similarReason', 'derogationId'];
 const GUARDS = [
   'billing_counts:billing_counts_test_guard', 'billing_credit_entries:billing_credit_entries_test_guard', 'billing_credit_transfers:billing_credit_transfers_test_guard',
   'billing_document_lines:billing_document_lines_test_guard', 'billing_payments:billing_payments_test_guard', 'billing_refunds:billing_refunds_test_guard',
@@ -282,7 +282,16 @@ describe('Ajustements G5 · migration sur une base qui a déjà les lots G0 à G
         RETURNING id`;
       return r.id as string;
     });
-    expect(refusal()).toMatch(/Retour arrière arrêté, rien n'a été changé : 1 établissement\(s\) en client réel, 0 lien\(s\) d'exclusion, 2 correction\(s\) de départ hors comptage, date introuvable ou contestation de départ, 0 paiement\(s\) avec ressaisie, empreinte ou motif/);
+    // Lectures 1 et 3 du 24 novembre 2026 (soir) : l'élève exclu chez Psi revient (inscription rétablie), et le Super
+    // Admin a accordé une dérogation au délai de 30 jours pour une inscription.
+    await inSchool(psi.id, async (tx) => {
+      const [k] = await tx.$queryRaw`SELECT "enrollmentId" AS enrollment FROM count_corrections WHERE id = ${fx.exclusion}::uuid`;
+      await tx.$executeRaw`INSERT INTO enrollment_events (id, tenant_id, "enrollmentId", kind, data, "createdAt")
+        VALUES (gen_random_uuid(), ${psi.id}::uuid, ${k.enrollment}::uuid, 'REINSTATED', '{}'::jsonb, now())`;
+      await tx.$executeRaw`INSERT INTO count_request_derogations (id, tenant_id, "enrollmentId", matricule, "yearLabel", "documentDate", until, reason, "grantedById", "grantedByName", "grantedAt")
+        VALUES (gen_random_uuid(), ${psi.id}::uuid, ${k.enrollment}::uuid, 'ecole-psi-001', '2026-2027', DATE '2026-10-20', DATE '2026-12-31', 'Dérogation fictive', gen_random_uuid(), 'Super Admin fictif', now())`;
+    });
+    expect(refusal()).toMatch(/Retour arrière arrêté, rien n'a été changé : 1 établissement\(s\) en client réel, 0 lien\(s\) d'exclusion, 2 correction\(s\) de départ hors comptage, date introuvable ou contestation de départ, 1 élève\(s\) revenu\(s\) après une exclusion ou une contestation validée, 1 dérogation\(s\) au délai de 30 jours, 0 paiement\(s\) avec ressaisie, empreinte ou motif/);
     expect(await exists()).toBe('billing_exclusion_links');
     expect((await statuses() as { status: string }[]).map((s) => s.status)).toEqual(['CLIENT', 'TEST']);
     expect(await inSchool(omega.id, (tx) => tx.$queryRaw`SELECT kind::text AS kind, "countId" AS count FROM count_corrections`)).toEqual([{ kind: 'DEPARTURE_CONFIRMED', count: null }]);
@@ -295,7 +304,7 @@ describe('Ajustements G5 · migration sur une base qui a déjà les lots G0 à G
     expect(await inSchool(psi.id, (tx) => tx.$queryRaw`SELECT kind::text AS kind, status::text AS status FROM count_corrections WHERE id = ${contest}::uuid`))
       .toEqual([{ kind: 'EXCLUSION', status: 'PENDING' }]);
     unchanged(before, await snapshot(), {
-      platform_audit_logs: 3, group_audit_logs: 1, 'ecole-omega:students': 1, 'ecole-omega:enrollments': 1, 'ecole-psi:count_corrections': 1,
+      platform_audit_logs: 3, group_audit_logs: 1, 'ecole-omega:students': 1, 'ecole-omega:enrollments': 1, 'ecole-psi:count_corrections': 1, 'ecole-psi:enrollment_events': 1,
     });
     deploy();
     expect(await statuses()).toEqual([{ slug: 'ecole-omega', status: 'TEST', at: null }, { slug: 'ecole-psi', status: 'TEST', at: null }]);

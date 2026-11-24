@@ -66,10 +66,12 @@ model Tenant {
   billingAllocations     BillingAllocation[]
   billingCreditEntries   BillingCreditEntry[]
   billingRefunds         BillingRefund[]
-  creditTransfersOut     BillingCreditTransfer[] @relation("BillingCreditTransferFrom")
-  creditTransfersIn      BillingCreditTransfer[] @relation("BillingCreditTransferTo")
+  creditTransfersOut     BillingCreditTransfer[]  @relation("BillingCreditTransferFrom")
+  creditTransfersIn      BillingCreditTransfer[]  @relation("BillingCreditTransferTo")
   /// Liens des exclusions validées par le Super Admin vers leur document d'origine (G5c-9).
   billingExclusionLinks  BillingExclusionLink[]
+  /// Dérogations du Super Admin au délai de 30 jours d'une demande d'exclusion ou de contestation (lecture 1, 24 novembre 2026).
+  countDerogations       CountRequestDerogation[]
 
   @@index([groupId])
   @@map("tenants")
@@ -706,27 +708,27 @@ enum CountCorrectionStatus {
 /// justificatif. Une exclusion est validée par la direction tant qu'aucun document émis n'est touché (D-G5-13 B ; les
 /// documents arrivent au lot G5c). Jamais supprimée ; seule la décision s'inscrit, une fois.
 model CountCorrection {
-  id              String                @id @default(uuid()) @db.Uuid
-  tenantId        String                @map("tenant_id") @db.Uuid
+  id              String                  @id @default(uuid()) @db.Uuid
+  tenantId        String                  @map("tenant_id") @db.Uuid
   kind            CountCorrectionKind
-  enrollmentId    String                @db.Uuid
-  enrollment      Enrollment            @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  enrollmentId    String                  @db.Uuid
+  enrollment      Enrollment              @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
   /// Comptage en vérification au moment de la demande ; vide pour une date de départ fixée ou confirmée introuvable
   /// hors de tout comptage (G5b-2). Une exclusion porte toujours sur un comptage.
-  countId         String?               @db.Uuid
-  count           BillingCount?         @relation(fields: [countId], references: [id], onDelete: Restrict)
-  departureDate   DateTime?             @db.Date
+  countId         String?                 @db.Uuid
+  count           BillingCount?           @relation(fields: [countId], references: [id], onDelete: Restrict)
+  departureDate   DateTime?               @db.Date
   justification   String
   fileKey         String?
   fileMime        String?
   fileSize        Int?
   status          CountCorrectionStatus
-  requestedById   String?               @db.Uuid
+  requestedById   String?                 @db.Uuid
   requestedByName String
-  requestedAt     DateTime              @default(now())
+  requestedAt     DateTime                @default(now())
   /// school (direction) ; platform (Super Admin, quand un document émis est touché : lot G5c).
   decidedByKind   String?
-  decidedById     String?               @db.Uuid
+  decidedById     String?                 @db.Uuid
   decidedByName   String?
   decidedAt       DateTime?
   decisionNote    String?
@@ -734,10 +736,41 @@ model CountCorrection {
   creditLine      BillingDocumentLine?
   /// Document d'origine de l'exclusion, inscrit par la base à la décision du Super Admin (G5c-9).
   exclusionLink   BillingExclusionLink?
+  /// Lecture 1 (24 novembre 2026, soir) : demande faite après le délai de 30 jours, sous cette dérogation (une seule fois).
+  derogationId    String?                 @unique @db.Uuid
+  derogation      CountRequestDerogation? @relation(fields: [derogationId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, enrollmentId])
   @@index([countId])
   @@map("count_corrections")
+}
+
+/// Lecture 1 (Dankou, 24 novembre 2026, soir) : passé le délai de 30 jours après le dernier document qui a demandé un
+/// élève (D-G5-14 A), le Super Admin rouvre exceptionnellement, pour cette inscription, la demande d'une exclusion ou
+/// d'une contestation : motif obligatoire (journal de la plateforme seulement), une seule demande, dans les 30 jours.
+/// Zone de la plateforme, en ajout seul ; écrite par la seule fonction grant_count_request_derogation ; l'école lit les
+/// siennes sans le motif (current_tenant_count_derogations).
+model CountRequestDerogation {
+  id            String           @id @default(uuid()) @db.Uuid
+  tenantId      String           @map("tenant_id") @db.Uuid
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  enrollmentId  String           @db.Uuid
+  enrollment    Enrollment       @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  /// Matricule de l'élève (jamais son nom), pour la console du Super Admin.
+  matricule     String
+  yearLabel     String
+  /// Dernier document qui demandait l'élève quand le délai a été rouvert.
+  documentDate  DateTime         @db.Date
+  /// Dernier jour pour faire la demande (30 jours après l'accord).
+  until         DateTime         @db.Date
+  reason        String
+  grantedById   String?          @db.Uuid
+  grantedByName String
+  grantedAt     DateTime         @default(now())
+  request       CountCorrection?
+
+  @@index([tenantId, enrollmentId])
+  @@map("count_request_derogations")
 }
 
 /// Document provisoire de Cahiora (lot G5c) : proforma de l'abonnement (première facture, complément d'une
@@ -1489,29 +1522,31 @@ enum EnrollmentType {
 
 /// Inscription : élève × classe × année. Une seule par élève et par année ; jamais supprimée (lot G4).
 model Enrollment {
-  id               String             @id @default(uuid()) @db.Uuid
-  tenantId         String             @map("tenant_id") @db.Uuid
-  studentId        String             @db.Uuid
-  student          Student            @relation(fields: [studentId], references: [id])
-  classId          String             @db.Uuid
-  class            Class              @relation(fields: [classId], references: [id])
-  academicYearId   String             @db.Uuid
-  academicYear     AcademicYear       @relation(fields: [academicYearId], references: [id])
-  status           EnrollmentStatus   @default(ACTIVE)
-  enrolledAt       DateTime           @default(now())
+  id               String                   @id @default(uuid()) @db.Uuid
+  tenantId         String                   @map("tenant_id") @db.Uuid
+  studentId        String                   @db.Uuid
+  student          Student                  @relation(fields: [studentId], references: [id])
+  classId          String                   @db.Uuid
+  class            Class                    @relation(fields: [classId], references: [id])
+  academicYearId   String                   @db.Uuid
+  academicYear     AcademicYear             @relation(fields: [academicYearId], references: [id])
+  status           EnrollmentStatus         @default(ACTIVE)
+  enrolledAt       DateTime                 @default(now())
   /// Inscription ou réinscription ; vide pour les inscriptions enregistrées avant le lot G4.
   type             EnrollmentType?
   /// Départ en cours d'année (transfert, abandon) : date de sortie et motif.
-  exitDate         DateTime?          @db.Date
+  exitDate         DateTime?                @db.Date
   exitReason       String?
   /// Annulation par la direction : date, motif, auteur. Une inscription annulée ne compte plus à partir de cette date.
   cancelledAt      DateTime?
   cancelReason     String?
-  cancelledById    String?            @db.Uuid
+  cancelledById    String?                  @db.Uuid
   events           EnrollmentEvent[]
   /// Lot G5b : lignes des comptages des élèves facturables et demandes de correction de la direction.
   countItems       BillingCountItem[]
   countCorrections CountCorrection[]
+  /// Lecture 1 (24 novembre 2026, soir) : délai de demande rouvert par le Super Admin, par dérogation.
+  countDerogations CountRequestDerogation[]
 
   @@unique([studentId, academicYearId])
   @@index([classId])

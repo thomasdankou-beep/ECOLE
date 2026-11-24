@@ -61,6 +61,7 @@ const G2 = {} as School;
 const G3 = {} as School;
 const L = {} as School; // école indépendante : exclusion avant tout document, puis au minimum
 const P = {} as School; // école indépendante : contestation d'un élève « À vérifier » avant tout document (24 novembre 2026)
+const M = {} as School; // école indépendante : élèves revenus après une contestation ou une exclusion acceptée (lecture 3, 24 novembre 2026 au soir)
 const sa = { id: '', name: 'Super Admin documents (fictif)', email: `g5c-${stamp}@test.local`, cookie: '', secret: '' };
 
 const [ty, tm] = T.split('-').map(Number);
@@ -977,6 +978,194 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     expect(await item(legacy)).toMatchObject({ exclusion: { status: 'VALIDATED', contest: true, departureDate: d(-12) }, canContest: false });
     const log = await inTenant(P.id, (tx) => tx.auditLog.findFirstOrThrow({ where: { action: 'billing.count_exclusion_validated', entityId: r.body.id } }));
     expect(log.data).toMatchObject({ contest: true, departureDate: d(-12) });
+  });
+
+  it('lecture 1 (24 novembre 2026, soir) : passé 30 jours, seul le Super Admin rouvre la demande d’une inscription, par une dérogation motivée, tracée et valable une fois', async () => {
+    const trial = await frozen(K, 'TRIAL_END');
+    const [x, y, z] = [kFirst[6], kFirst[7], kFirst[8]];
+    for (const p of [x, y, z]) expect((await cancel(K, p)).status).toBe(201);
+    const matricule = (p: Pupil) => `G5C-${stamp}-${p.m}`;
+    const reason = 'Doublon signalé par le courrier de l’inspection du 3 mars (fictif)';
+    const body = (p: Pupil, o: object = {}) => ({ tenantId: K.id, yearLabel: year.label, matricule: matricule(p), reason, ...o });
+    const grant = async (p: Pupil, day: string, o: object = {}) => svc().grantDerogation(superAdmin(), { ...body(p, o), code: await code() }, at(day));
+    const ask = (p: Pupil, today: string) => inTenant(K.id, (tx) => tx.$queryRaw<{ id: string }[]>`
+      SELECT request_count_correction(${trial.id}::uuid, 'EXCLUSION', ${p.enrollmentId}::uuid, NULL::date, 'Élève saisi deux fois (fictif)', NULL, NULL,
+        NULL::integer, ${K.directionId}::uuid, 'Fictif DIRECTION k', NULL, ${today}::date) AS id`, appDb);
+    const derogationsAt = async (now?: Date) => (await svc().platformDerogations(now)).derogations;
+    const late = addDays(issued, 31);
+
+    // Sans dérogation, la demande tardive est refusée ; le message dit que seul le Super Admin peut rouvrir le délai.
+    await expect(ask(x, late)).rejects.toThrow(`délai passé : une exclusion se demande au plus tard 30 jours après le document concerné, émis le ${dmy(issued)} (D-G5-14 A) ; `
+      + 'seul le Super Admin de Cahiora peut rouvrir ce délai, par une dérogation exceptionnelle');
+    // Console : code et motif obligatoires ; aucune dérogation tant que le délai court (aujourd'hui, il court encore).
+    expect((await pf.post('/billing/derogations', body(x))).status).toBe(400);
+    expect(message(await pf.post('/billing/derogations', { ...body(x, { reason: 'abc' }), code: await code() }))).toMatch(/Motif : 5 à 300 caractères/);
+    expect(message(await pf.post('/billing/derogations', { ...body(x), code: await code() }))).toContain(`le délai n'est pas passé (jusqu'au ${dmy(addDays(issued, 30))} inclus)`);
+    // La base refait les contrôles : élève encore inscrit, matricule inconnu, motif ; seul le rôle de la plateforme accorde.
+    await expect(grant(kFirst[9], late)).rejects.toThrow(/inscription active : rien à exclure ni à contester/);
+    await expect(grant(x, late, { matricule: 'INCONNU' })).rejects.toThrow(/aucune inscription de cet établissement pour ce matricule et cette année scolaire/);
+    await expect(platform().$queryRaw`SELECT * FROM grant_count_request_derogation(${K.id}::uuid, ${year.label}, ${matricule(x)}, 'abc', ${sa.id}::uuid, ${sa.name}, NULL, ${late}::date)`)
+      .rejects.toThrow(/une dérogation exige un motif \(5 à 300 caractères\)/);
+    await expect(inTenant(K.id, (tx) => tx.$queryRaw`
+      SELECT * FROM grant_count_request_derogation(${K.id}::uuid, ${year.label}, ${matricule(x)}, ${reason}, ${sa.id}::uuid, ${sa.name}, NULL, ${late}::date)`, appDb))
+      .rejects.toThrow(/permission denied/);
+
+    const g = await grant(x, late);
+    expect(g).toEqual({ id: expect.any(String), matricule: matricule(x), documentDate: issued, until: addDays(late, 30) });
+    await expect(grant(x, late)).rejects.toThrow(/une dérogation encore valable, pas encore utilisée, existe déjà pour cette inscription/);
+    // Journaux : la plateforme garde le motif ; le groupe voit l'accord sans matricule ni motif ; l'école sans le motif.
+    const log = await admin.platformAuditLog.findFirstOrThrow({ where: { tenantId: K.id, action: 'billing.count_request_derogation_granted' } });
+    expect(log).toMatchObject({ adminId: sa.id, data: { derogationId: g.id, matricule: matricule(x), yearLabel: year.label, documentDate: issued, until: g.until, reason } });
+    const group = await admin.groupAuditLog.findFirstOrThrow({ where: { groupId: K.groupId, action: 'billing.count_request_derogation_granted' } });
+    expect(group).toMatchObject({ actorKind: 'platform', data: { tenantName: K.name, yearLabel: year.label, until: g.until } });
+    expect(JSON.stringify(group.data)).not.toMatch(/G5C-|inspection/);
+    const own = await inTenant(K.id, (tx) => tx.auditLog.findFirstOrThrow({ where: { action: 'billing.count_request_derogation_granted', entityId: g.id } }));
+    expect(own.data).toEqual({ matricule: matricule(x), yearLabel: year.label, documentDate: issued, until: g.until });
+    // La direction est prévenue dans l'application, sans le motif ; elle lit sa dérogation sans le motif, jamais la table.
+    const notes = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_request_derogation' } }));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ channel: 'IN_APP', title: 'Délai rouvert exceptionnellement par Cahiora' });
+    expect(notes[0].body).toContain(`jusqu’au ${frDay(g.until)} inclus, le délai pour demander l’exclusion ou contester le comptage de l’inscription ${matricule(x)}`);
+    expect(notes[0].body).not.toMatch(/inspection/);
+    const seen = await inTenant(K.id, (tx) => tx.$queryRaw<{ derogation_id: string; used: boolean }[]>`SELECT * FROM current_tenant_count_derogations()`, appDb);
+    expect(seen).toEqual([expect.objectContaining({ derogation_id: g.id, enrollment_id: x.enrollmentId, used: false })]);
+    expect(JSON.stringify(seen)).not.toMatch(/inspection/);
+    await expect(inTenant(K.id, (tx) => tx.$queryRaw`SELECT reason FROM count_request_derogations`, appDb)).rejects.toThrow(/permission denied/);
+    // La console la liste avec son motif, ouverte.
+    const listed = (await pf.get('/billing/derogations')).body;
+    expect(listed.note).toMatch(/jamais montré à l’école ni au groupe/);
+    expect(listed.derogations.find((r: { id: string }) => r.id === g.id)).toMatchObject({
+      tenant: { id: K.id, name: K.name }, matricule: matricule(x), yearLabel: year.label, documentDate: issued, until: g.until, reason, grantedByName: sa.name, state: 'OPEN', request: null,
+    });
+
+    // Une seule demande, pour cette inscription, dans les 30 jours ; elle suit le chemin habituel : le Super Admin la décide.
+    await expect(ask(y, addDays(late, 9))).rejects.toThrow(/délai passé/);
+    const [{ id: kx }] = await ask(x, addDays(late, 9));
+    expect(await correction(K, kx)).toMatchObject({ status: 'PENDING', derogationId: g.id });
+    await expect(ask(x, addDays(late, 9))).rejects.toThrow(/déjà en cours ou validée/);
+    const grantedDay = dayOf((await admin.countRequestDerogation.findUniqueOrThrow({ where: { id: g.id } })).grantedAt)!;
+    const alert = (await admin.platformAlert.findMany({ where: { tenantId: K.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' }, orderBy: { createdAt: 'desc' } }))[0];
+    expect(alert.message).toBe(`Demande d'exclusion à décider : ${K.name}, inscription ${matricule(x)} déjà demandée par le document du ${dmy(issued)} (D-G5-13 B), `
+      + `hors délai, sous la dérogation exceptionnelle du ${dmy(grantedDay)}`);
+    expect((await admin.platformAuditLog.findFirstOrThrow({ where: { tenantId: K.id, action: 'billing.count_exclusion_requested' }, orderBy: { createdAt: 'desc' } })).data)
+      .toMatchObject({ matricule: matricule(x), derogationId: g.id });
+    expect((await pf.get('/billing/exclusions')).body.exclusions.find((r: Exclusion) => r.id === kx)).toMatchObject({ status: 'PENDING', derogation: { id: g.id } });
+    expect((await derogationsAt()).find((r) => r.id === g.id)).toMatchObject({ state: 'USED', request: { id: kx, status: 'PENDING', contest: false } });
+    expect((await as(K.direction).get(`/settings/billing-counts/${trial.id}`)).body.corrections.find((k: { id: string }) => k.id === kx)).toMatchObject({ derogation: true, decider: 'PLATFORM' });
+    const before = await billed(K);
+    const done = await svc().decideExclusion(superAdmin(), kx, { tenantId: K.id, decision: 'VALIDATED', code: await code() }, at(addDays(late, 10)));
+    expect(done).toMatchObject({ status: 'VALIDATED', credit: { reference: expect.stringMatching(/^PROV-[0-9A-F]{10}$/) } });
+    expect(done.credit!.total).toBe(before - (await billed(K)));
+    expect(done.credit!.total).toBeGreaterThan(0);
+    // Utilisée, la dérogation ne rouvre plus rien.
+    await expect(grant(x, addDays(late, 11))).rejects.toThrow(/déjà en cours ou validée|inscription active|délai/);
+
+    // Dérogation expirée : 30 jours après l'accord, plus de demande ; le Super Admin peut en accorder une nouvelle.
+    const gz = await grant(z, late);
+    await expect(ask(z, addDays(gz.until, 1))).rejects.toThrow(/délai passé/);
+    expect((await derogationsAt(at(addDays(gz.until, 1)))).find((r) => r.id === gz.id)).toMatchObject({ state: 'EXPIRED', request: null });
+    const again = await grant(z, addDays(gz.until, 1));
+    expect(again.until).toBe(addDays(gz.until, 31));
+    const [{ id: kz }] = await ask(z, addDays(gz.until, 5));
+    expect(await correction(K, kz)).toMatchObject({ status: 'PENDING', derogationId: again.id });
+    const no = await pf.post(`/billing/exclusions/${kz}/decision`, { tenantId: K.id, decision: 'REFUSED', note: 'Doublon non établi (fictif)', code: await code() });
+    expect(no.status).toBe(201);
+    // Refusée, la demande a utilisé la dérogation : une autre demande tardive exigerait une nouvelle dérogation.
+    await expect(ask(z, addDays(gz.until, 6))).rejects.toThrow(/délai passé/);
+    expect(await admin.platformAuditLog.count({ where: { tenantId: K.id, action: 'billing.count_request_derogation_granted' } })).toBe(3);
+  });
+
+  it('lecture 3 (24 novembre 2026, soir) : un élève revenu après une contestation ou une exclusion acceptée est facturé de nouveau au comptage suivant, jamais deux fois dans l’année', async () => {
+    await newSchool(M, 'm', null);
+    const klass = await newClass(M);
+    const pupils = await enrol(90, year.start, klass.id, M);
+    const [a, b] = pupils;
+    const R2 = d(5); // première régularisation de M : après le retour des élèves
+    expect((await pf.post(`/billing/establishments/${M.id}/trial`, { startDate: d(-20), code: await code() })).status).toBe(201);
+    const cal = await pf.post(`/billing/establishments/${M.id}/calendars`, {
+      yearLabel: year.label, startDate: year.start, endDate: year.end, initialCountDate: d(-15), firstRegularizationDate: R2, finalRegularizationDate: FINAL,
+      formula: 'MANUEL', reason: 'Calendrier fictif (lecture 3)', code: await code(),
+    });
+    expect(cal.status).toBe(201);
+    await app.get(BillingJobsService).runDue(at(d(-6)));
+    await app.get(CountsService).runDue(at(d(-6)));
+    const trial = await frozen(M, 'TRIAL_END');
+    expect(trial).toMatchObject({ pupils: 90, cumulative: 90 });
+    expect((await as(M.direction).post('/settings/subscription/accept', { termsId, accepted: true })).status).toBe(201);
+    const [doc1] = await docsOf(M.groupId);
+    expect(doc1.lines[0]).toMatchObject({ countId: trial.id, pupils: 90, amount: share(45_000) });
+    const url = `/settings/billing-counts/${trial.id}`;
+    const item = async (p: Pupil, countUrl = url) => (await as(M.direction).get(countUrl)).body.items.find((i: Item) => i.enrollmentId === p.enrollmentId);
+    const billable = async () => Object.fromEntries((await platform().$queryRaw<{ count_id: string; billable: number }[]>`SELECT * FROM billing_counts_billable(${M.id}::uuid)`)
+      .map((r) => [r.count_id, r.billable]));
+    const documentOf = async (p: Pupil) => (await admin.$queryRaw<{ d: Date | null }[]>`SELECT billing_enrollment_document(${M.id}::uuid, ${p.enrollmentId}::uuid, ${year.label}) AS d`)[0].d;
+    const preview = async (id: string) => (await pf.get('/billing/exclusions')).body.exclusions.find((x: Exclusion) => x.id === id).preview;
+
+    // a : parti avant la fin de l'essai (sortie enregistrée tard), contestation acceptée ; b : inscription annulée pour erreur, exclusion acceptée.
+    expect((await as(M.direction).post(`/students/${a.studentId}/withdraw`, { status: 'WITHDRAWN', reason: 'Départ fictif enregistré tard', exitDate: d(-10) })).status).toBe(201);
+    const ra = await as(M.direction).post(`${url}/corrections`, { kind: 'DEPARTURE_CONTEST', enrollmentId: a.enrollmentId, justification: 'Départ avant la fin de l’essai : registre (fictif)' });
+    expect(ra.status).toBe(201);
+    expect((await cancel(M, b)).status).toBe(201);
+    const rb = await as(M.direction).post(`${url}/corrections`, exclusion(b));
+    expect(rb.status).toBe(201);
+    // Aperçu exact de l'avoir : la demande en attente comptée comme validée, les autres telles qu'elles sont.
+    expect(await preview(ra.body.id)).toMatchObject({ state: 'READY', amount: share(45_000) - share(44_500), alreadyBilled: share(45_000), year: { pupils: 89 } });
+    const da = await svc().decideExclusion(superAdmin(), ra.body.id, { tenantId: M.id, decision: 'VALIDATED', code: await code() }, at(T));
+    expect(da.credit!.total).toBe(share(45_000) - share(44_500));
+    expect(await preview(rb.body.id)).toMatchObject({ state: 'READY', amount: share(44_500) - share(44_000), alreadyBilled: share(44_500), year: { pupils: 88 } });
+    const db = await svc().decideExclusion(superAdmin(), rb.body.id, { tenantId: M.id, decision: 'VALIDATED', code: await code() }, at(T));
+    expect(db.credit!.total).toBe(share(44_500) - share(44_000));
+    expect(await billed(M)).toBe(share(44_000));
+    // Pas revenu : aucune nouvelle demande pour b, et la base refuse de le compter de nouveau.
+    expect(message(await as(M.direction).post(`${url}/corrections`, exclusion(b)))).toMatch(/déjà en cours ou validée/);
+    const endOfR2 = new Date(`${R2}T22:59:59.999Z`); // fin du jour R2 à Porto-Novo (UTC+1)
+    const record = () => platform().$queryRaw`
+      SELECT * FROM record_billing_count(${M.id}::uuid, ${M.yearId}::uuid, 'FIRST_REGULARIZATION', ${R2}::date, 'PROVISIONAL', 1,
+        ${JSON.stringify([{ enrollmentId: b.enrollmentId, classId: klass.id, siteId: null, counted: true, basis: 'ACTIVE', departureDate: null }])}::jsonb,
+        ${endOfR2}, ${at(addDays(R2, 1))}, ${addDays(R2, 1)}::date)`;
+    await expect(record()).rejects.toThrow(/n'est comptée de nouveau qu'après le retour de l'élève/);
+
+    // Retour des deux élèves : la même inscription de l'année est rétablie.
+    for (const p of [a, b]) {
+      const r = await as(M.direction).post(`/students/${p.studentId}/reenroll`, { classId: klass.id });
+      expect(r.status).toBe(201);
+      expect(r.body).toMatchObject({ enrollmentId: p.enrollmentId, reinstated: true });
+    }
+    // Les comptages déjà faits ne changent pas ; leurs lignes restent annulées ; l'écran dit le retour.
+    expect(await item(a)).toMatchObject({ enrollmentStatus: 'ACTIVE', exclusion: { id: ra.body.id, status: 'VALIDATED', contest: true, returnedOn: localDay(TZ) }, canContest: false });
+    expect(await item(b)).toMatchObject({ enrollmentStatus: 'ACTIVE', exclusion: { id: rb.body.id, status: 'VALIDATED', contest: false, returnedOn: localDay(TZ) }, canExclude: false });
+    expect(await billable()).toEqual({ [trial.id]: 88 });
+    expect(await documentOf(a)).toBeNull();
+
+    // Comptage suivant (première régularisation) : les deux élèves, inscrits ce jour-là, sont comptés et facturés de nouveau, une fois.
+    await app.get(CountsService).runDue(at(addDays(R2, 1)));
+    const provisional = await admin.billingCount.findFirstOrThrow({ where: { tenantId: M.id, kind: 'FIRST_REGULARIZATION', stage: 'PROVISIONAL' } });
+    const day1 = addDays(dayOf(provisional.reviewUntil)!, 1);
+    await app.get(CountsService).runDue(at(day1));
+    const regular = await frozen(M, 'FIRST_REGULARIZATION');
+    expect(regular).toMatchObject({ pupils: 90, cumulative: 90, excluded: 0 });
+    const lines = await inTenant(M.id, (tx) => tx.billingCountItem.findMany({ where: { countId: regular.id, enrollmentId: { in: [a.enrollmentId, b.enrollmentId] } } }));
+    expect(lines.map((l) => `${l.counted}:${l.basis}`)).toEqual(['true:ACTIVE', 'true:ACTIVE']);
+    expect(await billable()).toEqual({ [trial.id]: 88, [regular.id]: 90 });
+    const complement = share(45_000) - share(44_000);
+    expect(mine((await svc().runDue(at(day1))).done, M)).toEqual([`document:FIRST_REGULARIZATION:${R2}:${complement}:${M.groupName}`]);
+    const doc2 = (await docsOf(M.groupId)).filter((x) => x.kind === 'SUBSCRIPTION')[1];
+    expect(doc2.lines[0]).toMatchObject({ countId: regular.id, pupils: 90, pupilsChange: 2, yearAmount: share(45_000), alreadyBilled: share(44_000), amount: complement });
+    expect(await billed(M)).toBe(share(45_000));
+    // Ce document est désormais celui qui les demande : un nouveau délai de 30 jours court pour eux.
+    expect(await documentOf(a)).toEqual(doc2.issueDate);
+    expect(await item(a, `/settings/billing-counts/${regular.id}`)).toMatchObject({ counted: true, exclusion: null, documentDate: dayOf(doc2.issueDate) });
+
+    // Régularisation finale : mêmes élèves, relevé à 0 F ; documents moins avoirs : l'année de 90 élèves, chacun une seule fois.
+    await app.get(CountsService).runDue(at(addDays(FINAL, 1)));
+    const p2 = await admin.billingCount.findFirstOrThrow({ where: { tenantId: M.id, kind: 'FINAL_REGULARIZATION', stage: 'PROVISIONAL' } });
+    const day2 = addDays(dayOf(p2.reviewUntil)!, 1);
+    await app.get(CountsService).runDue(at(day2));
+    expect(mine((await svc().runDue(at(day2))).done, M)).toEqual([`document:FINAL_REGULARIZATION:${FINAL}:0:${M.groupName}`]);
+    const all = await docsOf(M.groupId);
+    expect(all.map((x) => x.kind)).toEqual(['SUBSCRIPTION', 'CREDIT_NOTE', 'CREDIT_NOTE', 'SUBSCRIPTION', 'SUBSCRIPTION']);
+    expect(all.reduce((n, x) => n + (x.kind === 'CREDIT_NOTE' ? -x.total : x.total), 0)).toBe(share(45_000));
+    expect(await billed(M)).toBe(share(45_000));
   });
 });
 
