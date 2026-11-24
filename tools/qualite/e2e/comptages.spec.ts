@@ -172,7 +172,6 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
 
   await page.getByRole('button', { name: `Voir la liste : Première régularisation du ${frDate(R)}, provisoire`, exact: true }).click();
   await expect(page.getByRole('heading', { name: `Première régularisation du ${frDate(R)}`, exact: true })).toBeVisible();
-  await expect(page.getByText('Comptés', { exact: true }).locator('..')).toContainText(String(pupils));
   // Ce que donnerait le comptage figé maintenant : sur une base neuve, la même liste que le comptage provisoire ; quand la
   // base a déjà servi aux autres essais (téléphone, nouvel essai), seules les différences dues aux corrections comptent.
   const resume = page.getByText('Si la vérification se terminait maintenant', { exact: false });
@@ -182,6 +181,14 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   };
   await expect(resume).toBeVisible();
   const avant = await lire();
+  // 24 novembre 2026 : les facturables confirmés à part des « À vérifier », comptés sous réserve. L'élève dont la date
+  // est confirmée introuvable est confirmé ; l'autre départ sans date reste « À vérifier ».
+  const bilan = page.getByRole('group', { name: 'Bilan du comptage' });
+  await expect(bilan.getByText('Facturables confirmés', { exact: true })).toBeVisible();
+  await expect(bilan.getByText('À vérifier', { exact: true })).toBeVisible();
+  const surs = pupils - 1 - avant.retires;
+  await expect(bilan).toContainText(`Comptés le ${frDate(R)} : ${eleveTexte(pupils)} = ${surs} confirmé${surs > 1 ? 's' : ''} + 1 « À vérifier »`
+    + `${avant.retires ? ` + ${avant.retires} retiré${avant.retires > 1 ? 's' : ''} après décision` : ''}.`);
   if (neuve) {
     expect(avant).toEqual({ n: pupils, retires: 0 });
     await expect(resume).toContainText('Aucun ajout, aucun retrait.');
@@ -195,7 +202,11 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   await expect(exclu.getByText('Inscription annulée depuis : « Inscription saisie en double (fictive E2E) ».')).toBeVisible();
   await exclu.getByRole('button', { name: 'Demander l’exclusion' }).click();
   await expect(dlg.getByText('Un départ réel ne s’exclut jamais', { exact: false })).toBeVisible();
+  // Bouton désactivé tant que la justification manque, avec ce qui reste à compléter (24 novembre 2026).
+  await expect(dlg.getByRole('button', { name: 'Demander l’exclusion' })).toBeDisabled();
+  await expect(dlg.getByTestId('a-completer')).toHaveText('À compléter : la justification (5 caractères au moins).');
   await dlg.getByLabel('Justification').fill('Élève saisi deux fois : voir le registre (test de navigateur)');
+  await expect(dlg.getByTestId('a-completer')).toHaveCount(0);
   await dlg.locator('input[type=file]').setInputFiles({ name: 'registre.png', mimeType: 'image/png', buffer: PNG });
   await expect(dlg.getByText('registre.png')).toBeVisible();
   await shot(page, 'g5b-3-exclusion');
@@ -205,10 +216,10 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   const demande = page.locator('li', { hasText: `(${eleves.exclu.matricule})` });
   await expect(demande.getByText('En attente de décision')).toBeVisible();
   await expect(demande.getByRole('link', { name: 'Justificatif' })).toBeVisible();
-  // Décision : un refus exige un motif ; validée.
+  // Décision : un refus exige un motif (bouton désactivé tant qu'il manque) ; validée.
   await demande.getByRole('button', { name: 'Décider' }).click();
-  await dlg.getByRole('button', { name: 'Refuser' }).click();
-  await expect(dlg.getByText('Un refus exige un motif (5 caractères au moins).')).toBeVisible();
+  await expect(dlg.getByRole('button', { name: 'Refuser' })).toBeDisabled();
+  await expect(dlg.getByTestId('a-completer')).toHaveText('À compléter : pour refuser, le motif de la décision (5 caractères au moins).');
   await dlg.getByRole('button', { name: 'Valider l’exclusion' }).click();
   await expect(dlg).toBeHidden();
   await expect(demande.getByText('Validée', { exact: true })).toBeVisible();
@@ -216,18 +227,24 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   await expect(exclu.getByText('Ne sera plus compté si la vérification se termine maintenant.')).toBeVisible();
   await expect(resume).toContainText(`maintenant : ${eleveTexte(avant.n - 1)}.`);
 
-  // Départs enregistrés avant l'historique, sans date : comptés et signalés. Celui dont la date est confirmée introuvable
-  // (page des effectifs) reste compté, sans être « À vérifier » ; pour l'autre, la direction fixe la date.
+  // Départs enregistrés avant l'historique, sans date : comptés et signalés. « À vérifier » ne montre que l'élève compté
+  // sous réserve ; celui dont la date est confirmée introuvable (page des effectifs) reste compté, facturable confirmé,
+  // dans « Partis » ; pour l'autre, la direction fixe la date.
+  const liste = page.getByRole('list', { name: 'Élèves du comptage' });
+  const ligne = (e: { matricule: string }) => liste.locator(':scope > li', { hasText: e.matricule });
   await page.getByRole('group', { name: 'Afficher' }).getByRole('button', { name: /^À vérifier/ }).click();
-  const verif = page.locator('li', { hasText: eleves.verif.matricule });
+  await expect(ligne(eleves.parti).getByText('À vérifier : compté sous réserve', { exact: true })).toBeVisible();
+  await expect(ligne(eleves.verif)).toHaveCount(0);
+  await page.getByRole('group', { name: 'Afficher' }).getByRole('button', { name: /^Partis/ }).click();
+  const verif = ligne(eleves.verif);
   await expect(verif.getByText('Date de départ confirmée introuvable : l’élève reste compté.', { exact: false })).toBeVisible();
-  await expect(verif.getByText('Compté', { exact: true })).toBeVisible();
+  await expect(verif.getByText('Facturable confirmé', { exact: true })).toBeVisible();
   await expect(verif.getByRole('button', { name: 'Date introuvable' })).toHaveCount(0);
   const confirmee = page.locator('li', { hasText: `(${eleves.verif.matricule})` });
   await expect(confirmee.getByText('Date de départ introuvable, confirmée (élève compté)')).toBeVisible();
   await expect(confirmee.getByText('hors comptage', { exact: false })).toBeVisible();
   await expect(confirmee.getByText('Validée', { exact: true })).toBeVisible();
-  const parti = page.locator('li', { hasText: eleves.parti.matricule });
+  const parti = ligne(eleves.parti);
   await expect(parti.getByText('Aucune date de départ connue : l’élève reste compté tant que vous ne fixez pas sa date ou ne confirmez pas qu’elle est introuvable. Il n’est jamais retiré sans votre décision.')).toBeVisible();
   await expect(parti.getByRole('button', { name: 'Date introuvable' })).toBeVisible();
   await parti.getByRole('button', { name: 'Dater le départ' }).click();
@@ -237,8 +254,10 @@ test('Direction : liste d’un comptage provisoire, exclusion d’une inscriptio
   await dlg.getByRole('button', { name: 'Enregistrer la date' }).click();
   await expect(dlg).toBeHidden();
   await expect(parti.getByText('Ne sera plus compté si la vérification se termine maintenant.')).toBeVisible();
+  await expect(parti.getByText('Retiré après décision', { exact: true })).toBeVisible();
   await expect(resume).toContainText(`maintenant : ${eleveTexte(avant.n - 2)}.`);
   await expect(resume).toContainText(`${avant.retires + 2} retirés (exclusion validée ou départ daté)`);
+  await expect(bilan).toContainText(`+ 0 « À vérifier » + ${avant.retires + 2} retirés après décision.`);
   const date = page.locator('li', { hasText: `(${eleves.parti.matricule})` });
   await expect(date.getByText(`Date de départ : ${frDate(addDays(R, -2))}`)).toBeVisible();
   await expect(date.getByText('Validée', { exact: true })).toBeVisible();
@@ -261,6 +280,8 @@ test('Super Admin : les nombres du comptage dans « Établissements clients », 
   const dlg = page.getByRole('dialog');
   const ligne = dlg.locator('li', { hasText: `Première régularisation du ${frDate(R)}` });
   await expect(ligne.getByText(eleveTexte(pupils), { exact: true })).toBeVisible();
+  // 24 novembre 2026 : les facturables confirmés à part des « À vérifier » (les deux départs sans date, au comptage).
+  await expect(ligne).toContainText(`${eleveTexte(pupils)} comptés : ${pupils - 2} confirmés facturables, 2 « À vérifier » comptés sous réserve`);
   await expect(ligne.getByText(`Vérification par la direction jusqu’au ${frDate(reviewUntil)} inclus.`)).toBeVisible();
   await expect(dlg.getByText('Des nombres seulement', { exact: false })).toBeVisible();
   for (const e of Object.values(eleves)) {

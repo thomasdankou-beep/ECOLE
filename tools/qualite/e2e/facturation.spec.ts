@@ -116,14 +116,16 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   const publier = page.getByRole('dialog');
   await publier.getByLabel('Titre').fill(titre);
   await publier.getByLabel('Texte des conditions').fill('Texte fictif publié par les tests de navigateur du lot G5a. Ce ne sont pas les conditions commerciales de Cahiora.');
-  // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est envoyé.
+  // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est envoyé ; le
+  // bouton reste désactivé tant qu'elle manque (24 novembre 2026).
   const attestation = publier.getByLabel(/Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora/);
   await expect(attestation).not.toBeChecked();
   await publier.getByLabel('Code de votre application d’authentification').fill(await code(page));
-  await publier.getByRole('button', { name: 'Publier' }).click();
-  await expect(publier).toBeVisible();
+  await expect(publier.getByRole('button', { name: 'Publier' })).toBeDisabled();
+  await expect(publier.getByTestId('a-completer')).toHaveText('À compléter : la case de confirmation.');
   expect(await attestation.evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true);
   await attestation.check();
+  await expect(publier.getByTestId('a-completer')).toHaveCount(0);
   await publier.getByLabel('Code de votre application d’authentification').fill(await code(page));
   await publier.getByRole('button', { name: 'Publier' }).click();
   await expect(publier).toBeHidden();
@@ -133,7 +135,8 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   // Abonnements : l'établissement fictif est un établissement de test, jamais facturé ni limité, sans essai ni pilote.
   await rubrique(page, 'Commercial et facturation', 'Abonnements');
   const ligne = page.locator('tr', { hasText: ecole });
-  await expect(ligne.getByText('Test', { exact: true })).toBeVisible();
+  // 24 novembre 2026 : badge distinct, « Établissement de test » (contour pointillé), puis « Client réel » (plein).
+  await expect(ligne.getByText('Établissement de test', { exact: true })).toBeVisible();
   await expect(ligne.getByText('Jamais facturé ni limité')).toBeVisible();
   await expect(ligne.getByRole('button', { name: 'Ouvrir l’essai' })).toHaveCount(0);
   await expect(ligne.getByRole('button', { name: 'École pilote' })).toHaveCount(0);
@@ -142,21 +145,27 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   // Capture sans le message de la publication des conditions (il disparaît seul après quelques secondes).
   if (SHOTS) await expect(page.getByText('Conditions commerciales publiées', { exact: true })).toBeHidden({ timeout: 10_000 });
   await shot(page, '3a-etablissement-de-test');
-  // Passage en client réel : confirmation cochée obligatoire, motif et code.
+  // Passage en client réel : confirmation cochée obligatoire, motif et code. Case décochée à l'ouverture, bouton
+  // désactivé tant qu'il manque une information, avec ce qui reste à compléter (24 novembre 2026).
   await ligne.getByRole('button', { name: 'Passer en client réel' }).click();
   const statut = page.getByRole('dialog', { name: `Passer en client réel : ${ecole}` });
   await expect(statut).toBeVisible();
-  await statut.getByLabel('Motif').fill('Accord fictif de la direction pour un abonnement (test de navigateur)');
   const client = statut.getByLabel(/Je confirme que cet établissement est un client commercial réel de Cahiora/);
+  const passer = statut.getByRole('button', { name: 'Passer en client réel' });
   await expect(client).not.toBeChecked();
+  await expect(passer).toBeDisabled();
+  await expect(statut.getByTestId('a-completer')).toHaveText('À compléter : le motif (5 caractères au moins), la case de confirmation, le code à 6 chiffres de votre application d’authentification.');
+  await statut.getByLabel('Motif').fill('Accord fictif de la direction pour un abonnement (test de navigateur)');
   await statut.getByLabel('Code de votre application d’authentification').fill(await code(page));
-  await statut.getByRole('button', { name: 'Passer en client réel' }).click();
-  await expect(statut).toBeVisible();
+  await expect(passer).toBeDisabled();
+  await expect(statut.getByTestId('a-completer')).toHaveText('À compléter : la case de confirmation.');
   expect(await client.evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true);
-  await client.check();
   await shot(page, '3b-passer-en-client-reel');
+  await client.check();
+  await expect(passer).toBeEnabled();
+  await expect(statut.getByTestId('a-completer')).toHaveCount(0);
   await statut.getByLabel('Code de votre application d’authentification').fill(await code(page));
-  await statut.getByRole('button', { name: 'Passer en client réel' }).click();
+  await passer.click();
   await expect(statut).toBeHidden();
   await expect(ligne.getByText('Client réel', { exact: true })).toBeVisible();
   // Essai gratuit du client réel, avec un code ; son statut ne change plus dès que l'abonnement existe.
@@ -201,7 +210,11 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   await shot(page, '4a-calendrier-annee-courte');
   await cal.getByRole('button', { name: 'Saisir les dates à la main' }).click();
   await expect(cal.getByLabel('Formule des dates proposées')).toHaveValue('MANUEL');
-  await expect(enregistrer).toBeEnabled();
+  await expect(cal.getByText('La formule B ne s’applique pas à une année de 6 mois ou moins', { exact: false })).toBeHidden();
+  // 24 novembre 2026 : le bouton reste désactivé tant que l'obligatoire manque, et la liste dit quoi.
+  await expect(enregistrer).toBeDisabled();
+  await expect(cal.getByTestId('a-completer')).toContainText('le motif (5 caractères au moins)');
+  await expect(cal.getByTestId('a-completer')).toContainText('le code à 6 chiffres de votre application d’authentification');
   // Retour à la formule B, puis la première régularisation avancée à la main : la version sera « ajustée », avec son motif.
   await cal.getByLabel('Début de l’année scolaire').fill('2026-09-14');
   await cal.getByLabel('Fin de l’année scolaire').fill('2027-07-09');

@@ -247,7 +247,7 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await expect(emis.filter({ hasText: abonnement.reference })).toContainText('41 000 FCFA');
 
   // Exclusion à décider : établissement, inscription et avoir qu'elle donnerait ; jamais le nom de l'élève.
-  const demande = page.getByRole('list', { name: 'Exclusions à décider' }).locator(':scope > li', { hasText: ecole.name });
+  const demande = page.getByRole('list', { name: 'Exclusions et contestations à décider' }).locator(':scope > li', { hasText: ecole.name });
   await expect(demande).toContainText(`Inscription ${eleves.premier.matricule}`);
   await expect(demande).toContainText(`Si elle est validée : avoir provisoire de 500 FCFA sur le document ${abonnement.reference}`);
   await expect(demande).toContainText('81 élèves après l’exclusion : 40 500 FCFA pour l’année, 41 000 FCFA déjà demandés.');
@@ -263,9 +263,10 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await page.getByRole('button', { name: `Décider : inscription ${eleves.premier.matricule}, ${ecole.name}` }).click();
   const dlg = page.getByRole('dialog');
   await expect(dlg.getByText(`Annulation : « ${CANCEL} »`, { exact: false })).toBeVisible();
+  await expect(dlg.getByTestId('a-completer')).toHaveText('À compléter : le code à 6 chiffres de votre application d’authentification, pour refuser, le motif de la décision (5 caractères au moins).');
   await dlg.getByLabel('Code de votre application d’authentification').fill('000000');
-  await dlg.getByRole('button', { name: 'Refuser' }).click();
-  await expect(dlg.getByText('Un refus exige un motif (5 caractères au moins).')).toBeVisible();
+  // Refus impossible sans motif : le bouton reste désactivé (24 novembre 2026).
+  await expect(dlg.getByRole('button', { name: 'Refuser' })).toBeDisabled();
   await dlg.getByRole('button', { name: 'Valider l’exclusion' }).click();
   await expect(dlg.getByText('Code de votre application incorrect ou expiré')).toBeVisible();
   await dlg.getByLabel('Motif de la décision').fill('Doublon vérifié dans le registre (test de navigateur)');
@@ -273,7 +274,7 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await shot(page, 'g5c-2-decision');
   await dlg.getByRole('button', { name: 'Valider l’exclusion' }).click();
   await expect(dlg).toBeHidden();
-  await expect(page.getByRole('list', { name: 'Exclusions à décider' }).locator(':scope > li', { hasText: ecole.name })).toHaveCount(0);
+  await expect(page.getByRole('list', { name: 'Exclusions et contestations à décider' }).locator(':scope > li', { hasText: ecole.name })).toHaveCount(0);
   await page.locator('summary', { hasText: /^Décisions prises/ }).click();
   const decidee = page.locator('details li', { hasText: `${ecole.name} · ${eleves.premier.matricule}` });
   await expect(decidee).toContainText('Validée');

@@ -383,8 +383,12 @@ test('Établissement de test : jamais limité, ni alerte ni bandeau ; la directi
   await expect(page.getByRole('region', { name: 'Abonnement Cahiora' })).toHaveCount(0);
   await page.goto(`${adresse(X)}/espace/parametres?rubrique=abonnement`);
   await expect(page.getByTestId('etablissement-de-test')).toHaveText(SCHOOL_TEST_NOTICE);
-  await expect(page.getByText('Aucun abonnement : rien n’est facturé et l’accès n’est jamais limité.')).toBeVisible();
+  // 24 novembre 2026 : une seule carte simple ; ni tarif, ni calendrier, ni documents, ni rubrique « Effectifs facturables ».
+  await expect(page.getByRole('list', { name: 'Établissement de test : ce que cela veut dire' })).toContainText('Accès complet à Cahiora, jamais limité.');
   await expect(page.locator('#regulariser')).toHaveCount(0);
+  for (const titre of ['Tarif de Cahiora', 'Calendrier de facturation', 'Documents de Cahiora', 'Historique']) await expect(page.getByRole('heading', { name: titre })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Rubrique' }).getByRole('button', { name: 'Abonnement Cahiora' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('group', { name: 'Rubrique' }).getByRole('button', { name: 'Effectifs facturables' })).toHaveCount(0);
   await tientEnLargeur(page);
   await shot(page, 'g5d-7b-etablissement-de-test');
   // L’abonnement d’avant reste figé dans la base : jamais limité.

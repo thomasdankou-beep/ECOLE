@@ -245,6 +245,10 @@ async function enregistrer(page: Page, o: { montant: string; reference: string; 
     await dlg.getByRole('button', { name: 'Enregistrer le paiement' }).click();
     await expect(dlg.getByText(`Cette référence est celle du paiement annulé du reçu ${o.ressaisie} : enregistrez la ressaisie de ce paiement en le désignant`)).toBeVisible();
     await choix.selectOption((await choix.locator('option', { hasText: o.ressaisie }).getAttribute('value'))!);
+    // DS-7 A (24 novembre 2026) : toute ressaisie est justifiée par son motif ; le bouton attend ce motif.
+    await expect(dlg.getByRole('button', { name: 'Enregistrer le paiement' })).toBeDisabled();
+    await expect(dlg.getByTestId('a-completer')).toHaveText('À compléter : le motif de la ressaisie (5 caractères au moins).');
+    await dlg.getByLabel('Motif de la ressaisie').fill('Montant corrigé après la saisie annulée (test de navigateur)');
     await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
   }
   await tientEnLargeur(page);
