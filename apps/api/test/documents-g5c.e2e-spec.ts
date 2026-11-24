@@ -22,8 +22,8 @@ import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/bootstrap';
 import { localDay, money } from '../src/common/country';
 import { PrismaService } from '../src/common/prisma.service';
-import { AmountDecisions, DECISIONS, isClosed, Line } from '../src/modules/billing/amounts-rules';
-import { BillingService } from '../src/modules/billing/billing';
+import { AmountDecisions, DECISIONS, DUE_TO_BE_FIXED, exclusionTarget, isClosed, Line } from '../src/modules/billing/amounts-rules';
+import { BillingService, PLATFORM_TZ } from '../src/modules/billing/billing';
 import { BillingJobsService } from '../src/modules/billing/billing-jobs';
 import { addDays, frDay, lastDayOfMonth, monthsSpanned } from '../src/modules/billing/billing-rules';
 import { CountsService } from '../src/modules/billing/counts';
@@ -106,7 +106,7 @@ async function newSchool(s: School, key: string, group: { id: string; name: stri
   const groupName = group?.name ?? `Groupe fictif G5c ${key.toUpperCase()} ${stamp}`;
   const t = await admin.tenant.create({
     data: {
-      slug: `g5c-${key}-${stamp}`, name: `École fictive G5c ${key.toUpperCase()} ${stamp}`, timezone: TZ, createdAt: morning(d(-60)),
+      commercialStatus: 'CLIENT', slug: `g5c-${key}-${stamp}`, name: `École fictive G5c ${key.toUpperCase()} ${stamp}`, timezone: TZ, createdAt: morning(d(-60)),
       group: group ? { connect: { id: group.id } } : { create: { name: groupName } },
     },
   });
@@ -170,8 +170,8 @@ async function computed(groupId: string, decisions: AmountDecisions) {
 type JsonLine = Awaited<ReturnType<typeof computed>>[number];
 
 /** Émission directe par le rôle de la plateforme, comme l'API (fonction issue_billing_document). */
-function issue(groupId: string, lines: object[], o: { kind?: string; year?: string; due?: string | null; issueDay?: string; related?: string | null } = {}) {
-  const data = { mention: PROVISIONAL_MENTION, test: 'G5c' };
+function issue(groupId: string, lines: object[], o: { kind?: string; year?: string; due?: string | null; issueDay?: string; related?: string | null; data?: object } = {}) {
+  const data = { mention: PROVISIONAL_MENTION, test: 'G5c', ...o.data };
   return platform().$queryRaw<{ document_id: string; document_reference: string; document_total: number }[]>`
     SELECT * FROM issue_billing_document(${groupId}::uuid, ${o.kind ?? 'SUBSCRIPTION'}, 'XOF', ${o.issueDay ?? T}::date, ${o.due ?? null}::date, ${o.year ?? year.label},
       ${o.related ?? null}::uuid, ${JSON.stringify(data)}::jsonb, ${JSON.stringify(lines)}::jsonb, 'platform', ${sa.id}::uuid, ${sa.name})`;
@@ -372,6 +372,14 @@ describe('Lot G5c · documents provisoires de l’abonnement (données fictives)
     expect(second.issueDate.toISOString().slice(0, 10)).toBe(day1);
     expect(second.lines[0]).toMatchObject({ countKind: 'FIRST_REGULARIZATION', pupils: 101, pupilsChange: 11, yearAmount: share(50_500), alreadyBilled: share(45_000), amount: complement, shareMonths: months() });
     expect(second.data).toMatchObject({ statement: false, graceEnd: null, countKind: 'FIRST_REGULARIZATION' });
+    // Ajustement G5c-1 : un complément à payer porte une échéance explicite dès que son délai est en vigueur ; délai
+    // proposé (30 jours) pas encore activé : « échéance à fixer », jamais une date inventée.
+    expect(second.data).toMatchObject({ dueRule: 'TO_BE_FIXED', dueNote: DUE_TO_BE_FIXED });
+    expect(await admin.billingParameter.count({ where: { key: { in: ['COMPLEMENT_DUE_DAYS', 'SERVICE_DUE_DAYS'] } } })).toBe(0);
+    const proposals = (await pf.get('/billing/parameters')).body.proposals;
+    expect(proposals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'COMPLEMENT_DUE_DAYS', proposed: 30 }), expect.objectContaining({ key: 'SERVICE_DUE_DAYS', proposed: 15 }),
+    ]));
 
     // Régularisation finale : mêmes élèves, aucun complément ; un relevé à 0 F, jamais un montant négatif.
     await app.get(CountsService).runDue(at(addDays(FINAL, 1)));
@@ -382,7 +390,7 @@ describe('Lot G5c · documents provisoires de l’abonnement (données fictives)
     const docs = await docsOf(K.groupId);
     expect(docs).toHaveLength(3);
     expect(docs[2]).toMatchObject({ total: 0, dueDate: null });
-    expect(docs[2].data).toMatchObject({ statement: true });
+    expect(docs[2].data).toMatchObject({ statement: true, dueRule: 'NOTHING_DUE' });
     expect(docs[2].lines[0]).toMatchObject({ pupils: 101, pupilsChange: 0, yearAmount: share(50_500), alreadyBilled: share(50_500), amount: 0 });
     // Aucun élève facturé deux fois : la somme des documents de l'année est le montant de l'année.
     expect(docs.reduce((s, x) => s + x.total, 0)).toBe(share(50_500));
@@ -542,6 +550,20 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     const alerts = await admin.platformAlert.findMany({ where: { tenantId: K.id, kind: 'COUNT_EXCLUSION_TO_DECIDE' } });
     expect(alerts).toHaveLength(1);
     expect(alerts[0].message).toBe(`Demande d'exclusion à décider : ${K.name}, inscription G5C-${stamp}-${pupil.m} déjà demandée par le document du ${dmy(issued)} (D-G5-13 B)`);
+
+    // Ajustement G5c-7 : passé l'objectif de 7 jours ouvrés, une alerte pour le Super Admin, une seule fois ; la demande
+    // reste en attente : aucune acceptation ni aucun refus d'office.
+    const [first] = await docsOf(K.groupId);
+    const target = exclusionTarget(localDay(PLATFORM_TZ, (await correction(K, k1)).requestedAt), dayOf(first.issueDate));
+    const overdue = (done: string[]) => done.filter((x) => x === `exclusion-overdue:G5C-${stamp}-${pupil.m}:${K.name}`);
+    expect(overdue(await svc().exclusionAlerts(at(target)))).toEqual([]);
+    expect(overdue(await svc().exclusionAlerts(at(addDays(target, 1))))).toHaveLength(1);
+    expect(overdue(await svc().exclusionAlerts(at(addDays(target, 5))))).toEqual([]);
+    const late = await admin.platformAlert.findMany({ where: { tenantId: K.id, kind: 'EXCLUSION_OVERDUE' } });
+    expect(late).toHaveLength(1);
+    expect(late[0].message).toBe(`Demande d’exclusion en attente au-delà de l’objectif de 7 jours ouvrés : ${K.name}, inscription G5C-${stamp}-${pupil.m}, `
+      + `demandée le ${frDay(localDay(PLATFORM_TZ, (await correction(K, k1)).requestedAt))}, à décider au plus tard le ${frDay(target)}. Aucune acceptation automatique : décidez dans Commercial et facturation › Factures et documents.`);
+    expect(await correction(K, k1)).toMatchObject({ status: 'PENDING', decidedAt: null, decidedByKind: null });
   });
 
   it('le Super Admin voit la demande et l’avoir qu’elle donnerait ; il décide avec son code ; l’avoir provisoire suit, sinon rien n’est inscrit', async () => {
@@ -563,6 +585,14 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
       },
     });
     expect(row.requestedByName).toMatch(/DIRECTION k/);
+    // Ajustement G5c-9 : le document d'origine (le premier qui a demandé l'élève) ; G5c-7 : objectif de 7 jours ouvrés à
+    // partir de la demande, sans aucune acceptation d'office.
+    const first = docs[0];
+    expect(row.origin).toEqual({ id: first.id, reference: first.reference, issueDate: dayOf(first.issueDate) });
+    expect(row.creditNote).toBeNull();
+    const requestedDay = localDay(PLATFORM_TZ, new Date(row.requestedAt));
+    expect(row.target).toEqual({ workingDays: 7, until: exclusionTarget(requestedDay, dayOf(first.issueDate)), late: false });
+    expect(list.body.targetNote).toMatch(/7 jours ouvrés .* Aucune demande n’est acceptée d’office/);
     // Le Super Admin ne voit jamais le nom d'un élève.
     expect(JSON.stringify(list.body)).not.toMatch(/FICTIF[0-9A-F]{8}/);
 
@@ -596,6 +626,22 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
       relatedLineId: last.lines[0].id, correctionId: k1, serviceId: null,
     });
     expect(dayOf(credit.lines[0].referenceDate)).toBe(FINAL);
+    // Ajustement G5c-9 : la base a relié l'exclusion à son document d'origine à la décision ; l'avoir cite l'exclusion, ce
+    // document d'origine (sa référence) et le document qu'il corrige (le dernier de l'année).
+    const link = await inTenant(K.id, (tx) => tx.billingExclusionLink.findUniqueOrThrow({ where: { correctionId: k1 } }));
+    expect(link).toMatchObject({ tenantId: K.id, originDocumentId: docs[0].id });
+    expect(credit.data).toMatchObject({
+      exclusion: {
+        correctionId: k1, matricule: `G5C-${stamp}-${kFirst[1].m}`, countKind: 'TRIAL_END', countDate: trialEnd, originDocumentId: docs[0].id, originReference: docs[0].reference,
+        originIssueDate: dayOf(docs[0].issueDate),
+      },
+    });
+    const decidedRow = (await pf.get('/billing/exclusions')).body.exclusions.find((x: Exclusion) => x.id === k1);
+    expect(decidedRow).toMatchObject({
+      status: 'VALIDATED', origin: { id: docs[0].id, reference: docs[0].reference }, creditNote: { id: credit.id, reference: credit.reference, total: avoir }, target: { late: false },
+    });
+    const originDoc = (await pf.get(`/billing/documents/${docs[0].id}`)).body;
+    expect(originDoc.exclusionOrigins).toEqual([{ correctionId: k1, tenantId: K.id, linkedAt: expect.any(String), creditNote: { id: credit.id, reference: credit.reference, total: avoir } }]);
     expect(credit.lines[0].label).toBe(`${K.name} · Avoir après exclusion d’une inscription erronée (${COUNT_KIND_LABELS.FINAL_REGULARIZATION.toLowerCase()} du ${frDay(FINAL)})`);
     // Déjà demandé pour l'année : les documents moins l'avoir ; jamais un remboursement automatique.
     expect(await billed(K)).toBe(share(50_000));
@@ -670,6 +716,10 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
     await refused([good, { ...good }], /un avoir a une seule ligne/);
     await refused([good], /jamais daté avant le document auquel il est lié/, { issueDay: T });
     await refused([good], /ce document ne peut pas être lié/, { related: (await docsOf(K.groupId)).find((x) => x.kind === 'CREDIT_NOTE')!.id });
+    // Ajustement G5c-9 : la base a relié k2 à son document d'origine ; un avoir qui en cite un autre est refusé.
+    expect(await inTenant(K.id, (tx) => tx.billingExclusionLink.findUniqueOrThrow({ where: { correctionId: k2 } }))).toMatchObject({ originDocumentId: first.id });
+    await refused([good], /exclusion ou document d'origine de l'avoir différents de ceux de la décision/, { data: { exclusion: { correctionId: k2, originDocumentId: last.id } } });
+    await refused([good], /exclusion ou document d'origine de l'avoir différents de ceux de la décision/, { data: { exclusion: { correctionId: k1, originDocumentId: first.id } } });
 
     const [ok] = await credit([good]);
     expect(ok.document_total).toBe(share(50_000) - share(49_500));
@@ -787,7 +837,7 @@ describe('Lot G5c · exclusions après un document et avoirs provisoires (D-G5-1
       'Proforma de l’abonnement', 'Proforma de l’abonnement', 'Relevé de l’abonnement, rien à payer', 'Avoir provisoire', 'Avoir provisoire',
     ]);
     // Échéance : celle du premier document, dernier jour de grâce (G5c) ; le complément n'en a pas encore, l'écran le dit.
-    expect(r).toMatchObject({ documents: 3, dueDate: d(8), dueDatePending: true, groupPending: null });
+    expect(r).toMatchObject({ documents: 3, dueDate: d(8), dueDatePending: true, dueDateNote: DUE_TO_BE_FIXED, groupPending: null });
 
     // L : un seul document, au minimum annuel, sans avoir ; son échéance est la sienne, rien n'est en attente.
     const [docL] = await docsOf(L.groupId);

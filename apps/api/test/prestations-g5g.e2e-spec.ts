@@ -73,7 +73,7 @@ async function addRate(body: object, expected = 201) {
 
 async function newSchool(k: 'A' | 'B' | 'C'): Promise<School> {
   const t = await admin.tenant.create({
-    data: { slug: `g5g-${k.toLowerCase()}-${stamp}`, name: `École fictive G5g ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5g ${k} ${stamp}` } } },
+    data: { commercialStatus: 'CLIENT', slug: `g5g-${k.toLowerCase()}-${stamp}`, name: `École fictive G5g ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5g ${k} ${stamp}` } } },
   });
   const hash = await argon2.hash(PASSWORD, { type: argon2.argon2id });
   await inTenant(t.id, async (tx) => {

@@ -12,10 +12,13 @@ import { PrismaService } from '../../common/prisma.service';
 import { FilesService } from '../files/files.service';
 import { PlatformActor } from '../platform/group-journal';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
-import { AmountDecisions, DECISIONS, exclusionDeadline, FREE_END_KINDS, firstDueDate, GRACE_DAYS, Line, OPEN_DECISIONS, SchoolYear } from './amounts-rules';
+import {
+  AmountDecisions, DECISIONS, DUE_TO_BE_FIXED, DueRule, EXCLUSION_TARGET_WORKING_DAYS, exclusionDeadline, exclusionLate, exclusionTarget, FREE_END_KINDS, firstDueDate, GRACE_DAYS,
+  laterDueDate, Line, OPEN_DECISIONS, SchoolYear,
+} from './amounts-rules';
 import { BillingService, PLATFORM_TZ } from './billing';
-import { addDays, frDay, isDay } from './billing-rules';
-import { notifyDirection, SYSTEM } from './billing-tasks';
+import { addDays, frDay, isDay, versionOn } from './billing-rules';
+import { jobOnce, notifyDirection, SYSTEM } from './billing-tasks';
 import { COUNT_KIND_LABELS, CountKind } from './counts-rules';
 import { accessSentence, creditNoteSentence, creditSentence, imputeCreditNote, useCredit } from './payments-access';
 import {
@@ -58,6 +61,12 @@ export const DOCUMENT_KIND_LABELS = {
 
 type DocumentKind = 'SUBSCRIPTION' | 'CREDIT_NOTE' | 'SERVICE_QUOTE' | 'SERVICE_PROFORMA';
 type IssueRow = { document_id: string; document_reference: string; document_total: number };
+/** Document d'origine et document corrigé d'une exclusion (billing_exclusion_origin, G5c-9). */
+type OriginRow = {
+  origin_id: string | null; origin_reference: string | null; origin_issue_date: Date | null; corrected_id: string | null; corrected_reference: string | null;
+  corrected_issue_date: Date | null; matricule: string | null; count_kind: CountKind | null; reference_date: Date | null; year_label: string | null;
+  requested_at: Date; decided_at: Date | null;
+};
 type ExclusionRow = {
   tenant_id: string; correction_id: string; status: 'PENDING' | 'VALIDATED' | 'REFUSED'; count_id: string; count_kind: CountKind; reference_date: Date; year_label: string;
   matricule: string; class_name: string | null; cancel_reason: string | null; justification: string; file_key: string | null; file_mime: string | null;
@@ -91,6 +100,12 @@ const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''} facturable${n
 export function cahioraMessage(e: unknown) {
   const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"`]+)/);
   return m ? m[1].trim() : null;
+}
+
+/** Délai d'échéance proposé (G5c-1) en vigueur le jour `onDay`, ou null tant qu'aucune version n'est saisie. */
+export async function dueDaysOn(db: PlatformDb, key: 'COMPLEMENT_DUE_DAYS' | 'SERVICE_DUE_DAYS', onDay: string) {
+  const versions = (await db.billingParameter.findMany({ where: { key, currency: null } })).map((v) => ({ ...v, effectiveFrom: iso(v.effectiveFrom)! }));
+  return versionOn(versions, key, null, onDay)?.value ?? null;
 }
 
 /** Libellé d'un document : un document d'abonnement à 0 F est un relevé. */
@@ -161,7 +176,9 @@ export class BillingDocumentsService {
       where: { id: groupId },
       select: {
         id: true, name: true,
+        // Un établissement de test n'est jamais facturé (demande de Dankou du 20 novembre 2026) : la base le refuse aussi.
         tenants: {
+          where: { commercialStatus: 'CLIENT' },
           orderBy: [{ name: 'asc' }, { createdAt: 'asc' }],
           select: {
             id: true, name: true, timezone: true, currency: true, groupId: true,
@@ -217,12 +234,13 @@ export class BillingDocumentsService {
     return groupPlan(planned);
   }
 
-  /** Clients dont au moins un établissement a accepté les conditions commerciales. */
+  /** Clients dont au moins un établissement, client réel, a accepté les conditions commerciales. */
   private async clientGroups() {
     return this.platform.schoolGroup.findMany({
-      where: { tenants: { some: { subscription: { acceptedAt: { not: null } } } } }, select: { id: true, name: true }, orderBy: { name: 'asc' },
+      where: { tenants: { some: { commercialStatus: 'CLIENT', subscription: { acceptedAt: { not: null } } } } }, select: { id: true, name: true }, orderBy: { name: 'asc' },
     });
   }
+
 
   // ---------------------------------------------------------------- Émission
 
@@ -239,6 +257,11 @@ export class BillingDocumentsService {
           // Un client en erreur n'empêche pas les autres ; le document sera repris au passage suivant.
           this.log.error(`Documents de ${g.name} : ${e instanceof Error ? e.message : e}`);
         }
+      }
+      try {
+        done.push(...(await this.exclusionAlerts(now)));
+      } catch (e) {
+        this.log.error(`Objectif de traitement des exclusions : ${e instanceof Error ? e.message : e}`);
       }
       return { done };
     } finally {
@@ -285,7 +308,10 @@ export class BillingDocumentsService {
     const lastFreeDay = first?.lastFreeDay ?? null;
     // Délai de grâce fixé dans l'abonnement à la fin de la gratuité (lot G5d-1), sinon 15 jours (D-G5-30 A).
     const graceEnd = lastFreeDay ? first!.graceEnd ?? addDays(lastFreeDay, GRACE_DAYS) : null;
-    const dueDate = lastFreeDay ? firstDueDate(lastFreeDay, issueDay, graceEnd) : null;
+    // G5c-1 : un complément qui porte un montant à payer a son échéance quand le délai proposé a une valeur (sinon « à fixer »).
+    const later = lastFreeDay ? null : laterDueDate(issueDay, plan.total, await dueDaysOn(this.platform, 'COMPLEMENT_DUE_DAYS', issueDay));
+    const dueDate = lastFreeDay ? firstDueDate(lastFreeDay, issueDay, graceEnd) : later!.dueDate;
+    const dueRule: DueRule = lastFreeDay ? 'GRACE_END' : later!.rule;
     const lines = plan.lines.map((l) => ({
       tenantId: l.tenantId, label: subscriptionLineLabel(l.name, l.count.kind, l.count.date), amount: l.line.due, countId: l.count.id, pupils: l.line.pupils,
       pupilsChange: l.line.pupilsChange, pricePerPupil: l.line.pricePerPupil, minimum: l.line.minimum, minimumApplied: l.line.minimumApplied, fullYear: l.line.fullYear,
@@ -299,7 +325,7 @@ export class BillingDocumentsService {
       establishments: tenants.map((t) => ({ tenantId: t.tenantId, name: t.name })),
       tariff: { currency, pricePerPupil: plan.lines[0].line.pricePerPupil, minimum: plan.lines[0].line.minimum },
       countKind: kind, countDate: plan.date, statement: plan.total === 0,
-      graceEnd,
+      graceEnd, dueRule, ...(dueRule === 'TO_BE_FIXED' ? { dueNote: DUE_TO_BE_FIXED } : {}),
       rounded: plan.lines.some((l) => l.line.rounded) ? 'FLOOR' : null,
       decisions: { ...this.decisions },
     };
@@ -321,7 +347,7 @@ export class BillingDocumentsService {
           await notifyDirection(tx, l.tenantId, 'billing.document_issued',
             r.document_total ? `Document provisoire de votre abonnement Cahiora : ${money(r.document_total, currency)}` : 'Relevé de votre abonnement Cahiora : rien à payer',
             `${label} ${r.document_reference} du ${frDay(issueDay)} : ${pupilsText(l.line.pupils)} au ${frDay(l.count.date)} (${COUNT_KIND_LABELS[l.count.kind].toLowerCase()}), `
-            + `${r.document_total ? `${money(r.document_total, currency)}${dueDate ? `, échéance le ${frDay(dueDate)}` : ''}` : 'rien de plus à payer à cette date'}. `
+            + `${r.document_total ? `${money(r.document_total, currency)}${dueDate ? `, échéance le ${frDay(dueDate)}` : ', échéance à fixer'}` : 'rien de plus à payer à cette date'}. `
             + `${PROVISIONAL_MENTION} Il est dans Paramètres › Abonnement Cahiora.`
             + (used ? ` ${creditSentence(used, currency)}${accessSentence(used.access, currency) ? ` ${accessSentence(used.access, currency)}` : ''}` : ''));
         }
@@ -369,13 +395,19 @@ export class BillingDocumentsService {
       include: {
         group: { select: { id: true, name: true } }, lines: { orderBy: { position: 'asc' }, include: { tenant: { select: { id: true, name: true } } } },
         related: { select: { id: true, reference: true, kind: true } }, relatedBy: { select: { id: true, reference: true, kind: true, total: true } },
+        exclusionOrigins: { orderBy: { createdAt: 'asc' }, select: { correctionId: true, tenantId: true, createdAt: true } },
       },
     });
     if (!d) throw new NotFoundException('Document introuvable');
+    // G5c-9 : avoirs des exclusions dont ce document est le document d'origine.
+    const originCredits = new Map((await this.platform.billingDocumentLine.findMany({
+      where: { correctionId: { in: d.exclusionOrigins.map((x) => x.correctionId) } }, select: { correctionId: true, document: { select: { id: true, reference: true, total: true } } },
+    })).map((l) => [l.correctionId!, l.document]));
     return {
       id: d.id, kind: d.kind, label: documentLabel(d.kind, d.total), reference: d.reference, group: d.group, currency: d.currency, issueDate: iso(d.issueDate),
       dueDate: iso(d.dueDate), total: d.total, yearLabel: d.yearLabel, data: d.data, createdByKind: d.createdByKind, createdByName: d.createdByName, createdAt: d.createdAt,
       related: d.related, relatedBy: d.relatedBy,
+      exclusionOrigins: d.exclusionOrigins.map((x) => ({ correctionId: x.correctionId, tenantId: x.tenantId, linkedAt: x.createdAt, creditNote: originCredits.get(x.correctionId) ?? null })),
       lines: d.lines.map((l) => ({
         id: l.id, position: l.position, tenant: l.tenant, label: l.label, amount: l.amount, countKind: l.countKind, referenceDate: iso(l.referenceDate), pupils: l.pupils,
         pupilsChange: l.pupilsChange, pricePerPupil: l.pricePerPupil, minimum: l.minimum, minimumApplied: l.minimumApplied, fullYear: l.fullYear, shareMonths: l.shareMonths,
@@ -418,21 +450,63 @@ export class BillingDocumentsService {
     const tenants = new Map((await this.platform.tenant.findMany({
       where: { id: { in: [...new Set(rows.map((r) => r.tenant_id))] } }, select: { id: true, name: true, currency: true },
     })).map((t) => [t.id, t]));
+    const today = localDay(PLATFORM_TZ);
+    const credits = new Map((await this.platform.billingDocumentLine.findMany({
+      where: { correctionId: { in: rows.map((r) => r.correction_id) } }, select: { correctionId: true, document: { select: { id: true, reference: true, total: true } } },
+    })).map((l) => [l.correctionId!, l.document]));
     const exclusions = [];
     for (const r of rows) {
       const t = tenants.get(r.tenant_id);
       const documentDate = iso(r.document_date);
       const credit = r.status === 'PENDING' ? await this.creditFor(this.platform, r.tenant_id, r.year_label, true) : null;
+      // G5c-9 : document d'origine (premier document qui a demandé l'élève) ; G5c-7 : objectif de 7 jours ouvrés.
+      const [o] = await this.platform.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${r.tenant_id}::uuid, ${r.correction_id}::uuid)`;
+      const target = exclusionTarget(localDay(PLATFORM_TZ, r.requested_at), iso(o?.origin_issue_date));
       exclusions.push({
         id: r.correction_id, tenant: { id: r.tenant_id, name: t?.name ?? '' }, currency: t?.currency ?? null, status: r.status, countKind: r.count_kind,
         countLabel: COUNT_KIND_LABELS[r.count_kind], referenceDate: iso(r.reference_date), yearLabel: r.year_label, matricule: r.matricule, className: r.class_name,
         cancelReason: r.cancel_reason, justification: r.justification, fileUrl: r.file_key ? this.files.signedUrl(r.file_key) : null,
         requestedByName: r.requested_by_name, requestedAt: r.requested_at, decidedByName: r.decided_by_name, decidedAt: r.decided_at, decisionNote: r.decision_note,
         documentDate, requestDeadline: documentDate ? exclusionDeadline(documentDate) : null,
+        origin: o?.origin_id ? { id: o.origin_id, reference: o.origin_reference, issueDate: iso(o.origin_issue_date) } : null,
+        creditNote: credits.get(r.correction_id) ?? null,
+        target: { workingDays: EXCLUSION_TARGET_WORKING_DAYS, until: target, late: exclusionLate(r.status, target, today) },
         preview: credit && { related: credit.related.document.reference, ...creditView(credit.plan) },
       });
     }
-    return { mention: PROVISIONAL_MENTION, waiting: exclusions.filter((x) => x.status === 'PENDING').length, exclusions };
+    return {
+      mention: PROVISIONAL_MENTION, waiting: exclusions.filter((x) => x.status === 'PENDING').length, late: exclusions.filter((x) => x.target.late).length,
+      targetNote: `Objectif de Cahiora : décider dans les ${EXCLUSION_TARGET_WORKING_DAYS} jours ouvrés (lundi à vendredi ; jours fériés : INFORMATION MANQUANTE). Aucune demande n’est acceptée d’office.`,
+      exclusions,
+    };
+  }
+
+  /**
+   * G5c-7 : une alerte pour le Super Admin, une seule fois par demande, quand une demande d'exclusion qui lui revient
+   * attend encore au-delà de l'objectif de 7 jours ouvrés. Rien d'autre : jamais d'acceptation ni de refus d'office.
+   */
+  async exclusionAlerts(now = new Date()) {
+    const today = localDay(PLATFORM_TZ, now);
+    const rows = (await this.platform.$queryRaw<ExclusionRow[]>`SELECT * FROM platform_count_exclusions()`).filter((r) => r.status === 'PENDING');
+    const out: string[] = [];
+    for (const r of rows) {
+      const [o] = await this.platform.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${r.tenant_id}::uuid, ${r.correction_id}::uuid)`;
+      const requested = localDay(PLATFORM_TZ, r.requested_at);
+      const target = exclusionTarget(requested, iso(o?.origin_issue_date));
+      if (!exclusionLate(r.status, target, today)) continue;
+      const t = await this.platform.tenant.findUnique({ where: { id: r.tenant_id }, select: { name: true } });
+      const done = await jobOnce(this.platform, `exclusion-overdue:${r.correction_id}`, 'EXCLUSION_OVERDUE', r.tenant_id, target, async (tx) => {
+        await tx.platformAlert.create({
+          data: {
+            tenantId: r.tenant_id, kind: 'EXCLUSION_OVERDUE', dueDate: new Date(`${target}T00:00:00.000Z`),
+            message: `Demande d’exclusion en attente au-delà de l’objectif de ${EXCLUSION_TARGET_WORKING_DAYS} jours ouvrés : ${t?.name ?? 'établissement'}, inscription ${r.matricule}, `
+              + `demandée le ${frDay(requested)}, à décider au plus tard le ${frDay(target)}. Aucune acceptation automatique : décidez dans Commercial et facturation › Factures et documents.`,
+          },
+        });
+      });
+      if (done) out.push(`exclusion-overdue:${r.matricule}:${t?.name ?? r.tenant_id}`);
+    }
+    return out;
   }
 
   /**
@@ -492,6 +566,10 @@ export class BillingDocumentsService {
   ) {
     const issueDay = localDay(PLATFORM_TZ, now);
     const y = plan.year;
+    // G5c-9 : l'exclusion et son document d'origine, inscrits par la base à la décision ; l'avoir les cite (la base vérifie).
+    const link = await tx.billingExclusionLink.findUnique({ where: { correctionId }, select: { originDocumentId: true } });
+    const [o] = await tx.$queryRaw<OriginRow[]>`SELECT * FROM billing_exclusion_origin(${t.id}::uuid, ${correctionId}::uuid)`;
+    if (!link || !o?.origin_id || o.origin_id !== link.originDocumentId) throw new BadRequestException('Document d’origine de l’exclusion introuvable : aucun avoir n’est émis');
     const line = {
       tenantId: t.id, label: creditLineLabel(t.name, related.countKind, related.referenceDate), amount: plan.amount, pupils: y.pupils, pupilsChange: plan.pupilsChange,
       pricePerPupil: y.pricePerPupil, minimum: y.minimum, minimumApplied: y.minimumApplied, fullYear: y.fullYear, shareMonths: y.share?.months ?? null,
@@ -504,6 +582,10 @@ export class BillingDocumentsService {
       establishments: [{ tenantId: t.id, name: t.name }],
       reason: 'Exclusion validée d’une inscription annulée pour erreur de saisie (D-G5-13 B)',
       related: { documentId: related.documentId, reference: related.document.reference, countKind: related.countKind, countDate: related.referenceDate },
+      exclusion: {
+        correctionId, matricule: o.matricule, countKind: o.count_kind, countDate: iso(o.reference_date), requestedAt: o.requested_at, decidedAt: o.decided_at,
+        originDocumentId: o.origin_id, originReference: o.origin_reference, originIssueDate: iso(o.origin_issue_date),
+      },
       tariff: { currency: t.currency, pricePerPupil: y.pricePerPupil, minimum: y.minimum },
       rounded: y.rounded ? 'FLOOR' : null,
     };
@@ -513,7 +595,7 @@ export class BillingDocumentsService {
     await documentJournals(tx, t.group, r.document_id, 'billing.credit_note_issued', {
       documentId: r.document_id, reference: r.document_reference, kind: 'CREDIT_NOTE', total: r.document_total, yearLabel, issueDate: issueDay,
       relatedDocumentId: related.documentId,
-    }, [{ tenant: { id: t.id, name: t.name }, data: { pupils: y.pupils, amount: plan.amount, correctionId } }], admin);
+    }, [{ tenant: { id: t.id, name: t.name }, data: { pupils: y.pupils, amount: plan.amount, correctionId, originDocumentId: o.origin_id, originReference: o.origin_reference } }], admin);
     // Lot G5d-2 (choix 1 A) : l'avoir s'impute aussitôt sur le document qu'il corrige, puis les autres, puis le crédit.
     const imputed = await imputeCreditNote(tx, r.document_id, { id: t.id, name: t.name, groupId: t.group.id }, admin);
     return { documentId: r.document_id, reference: r.document_reference, total: r.document_total, imputed };

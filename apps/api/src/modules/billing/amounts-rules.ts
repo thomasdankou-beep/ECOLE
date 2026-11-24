@@ -268,9 +268,9 @@ export const GRACE_DAYS = 15;
 
 /**
  * Échéance du premier document, celui de la fin de la gratuité : le dernier jour de grâce (D-G5-30 A). Un document émis
- * plus tard (conditions acceptées après la grâce) est à régler dès son émission. Les compléments n'ont pas d'échéance
- * décidée : null. Depuis le lot G5d-1, le délai de grâce est fixé dans l'abonnement à la fin de la gratuité (paramètre
- * daté) : c'est lui qui compte quand il est connu, 15 jours sinon.
+ * plus tard (conditions acceptées après la grâce) est à régler dès son émission. Les autres documents suivent
+ * laterDueDate (G5c-1). Depuis le lot G5d-1, le délai de grâce est fixé dans l'abonnement à la fin de la gratuité
+ * (paramètre daté) : c'est lui qui compte quand il est connu, 15 jours sinon.
  */
 export function firstDueDate(lastFreeDay: string, issueDay: string, graceEnd: string | null = null) {
   day('Dernier jour gratuit', lastFreeDay);
@@ -372,3 +372,48 @@ export function exclusionDeadline(documentDay: string) {
 }
 
 export const exclusionOpen = (documentDay: string, today: string) => today <= exclusionDeadline(documentDay);
+
+/**
+ * G5c-1 (Dankou, 20 novembre 2026) : échéance d'un document qui porte un montant à payer, hors celui de la fin de la
+ * gratuité (firstDueDate) : sa date plus le délai du paramètre en vigueur ce jour-là (COMPLEMENT_DUE_DAYS pour un
+ * complément de l'abonnement, SERVICE_DUE_DAYS pour une proforma de prestations). Délais proposés, pas activés : sans
+ * version du paramètre, aucune échéance (« à fixer »). Rien à payer : aucune échéance. Une échéance passée ne limite
+ * jamais l'accès (D-G5-18 ouverte).
+ */
+export function laterDueDate(issueDay: string, total: number, days: number | null): { dueDate: string | null; rule: DueRule } {
+  day('Date du document', issueDay);
+  if (total <= 0) return { dueDate: null, rule: 'NOTHING_DUE' };
+  if (days === null) return { dueDate: null, rule: 'TO_BE_FIXED' };
+  if (!Number.isInteger(days) || days < 1) throw new Error('Délai d’échéance : nombre entier de jours, 1 au moins');
+  return { dueDate: addDays(issueDay, days), rule: 'PARAMETER' };
+}
+export type DueRule = 'GRACE_END' | 'PARAMETER' | 'TO_BE_FIXED' | 'NOTHING_DUE';
+/** Ce que dit un document sans échéance qui porte un montant à payer (G5c-1). */
+export const DUE_TO_BE_FIXED = 'Échéance à fixer : délai proposé, en attente de la validation des conditions commerciales de Cahiora';
+
+/**
+ * G5c-7 (Dankou, 20 novembre 2026) : objectif de traitement d'une demande d'exclusion par Cahiora, 7 jours ouvrés, sans
+ * aucune acceptation automatique : passé l'objectif, une alerte pour le Super Admin seulement. Jours ouvrés : du lundi
+ * au vendredi ; les jours fériés ne sont pas retirés (liste : INFORMATION MANQUANTE). L'objectif part du jour où la
+ * demande revient à Cahiora : sa date, ou celle du premier document qui a demandé l'élève s'il est émis après elle.
+ */
+export const EXCLUSION_TARGET_WORKING_DAYS = 7;
+
+export function addWorkingDays(start: string, n: number) {
+  day('Date de départ', start);
+  let d = start;
+  for (let left = n; left > 0;) {
+    d = addDays(d, 1);
+    const weekday = new Date(`${d}T00:00:00Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6) left--;
+  }
+  return d;
+}
+
+export function exclusionTarget(requestedDay: string, firstDocumentDay: string | null) {
+  const start = firstDocumentDay && firstDocumentDay > requestedDay ? firstDocumentDay : requestedDay;
+  return addWorkingDays(start, EXCLUSION_TARGET_WORKING_DAYS);
+}
+
+/** En retard : demande encore en attente le lendemain du dernier jour de l'objectif. */
+export const exclusionLate = (status: string, target: string, today: string) => status === 'PENDING' && today > target;

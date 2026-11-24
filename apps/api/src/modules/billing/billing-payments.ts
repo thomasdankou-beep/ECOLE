@@ -6,11 +6,12 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Prisma } from '@prisma/client';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+import { createHash } from 'crypto';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUUID, Length, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import type { Request } from 'express';
 import { AuditService } from '../../common/audit.service';
-import { Actor, Can, CurrentActor, forgetAccess, Public, WholeSchool } from '../../common/auth';
+import { Actor, AllowedWhenLimited, Can, CurrentActor, forgetAccess, Public, WholeSchool } from '../../common/auth';
 import { CURRENCIES, localDay, money } from '../../common/country';
 import { PrismaService, Tx } from '../../common/prisma.service';
 import { RawValue } from '../../common/util';
@@ -19,15 +20,15 @@ import { PlatformActor, platformLog } from '../platform/group-journal';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
 import { cahioraMessage } from './access';
 import { BillingService, PLATFORM_TZ } from './billing';
-import { STATUS_LABELS } from './billing-rules';
+import { addDays, STATUS_LABELS } from './billing-rules';
 import { notifyDirection } from './billing-tasks';
 import {
   accessSentence, creditSentence, dayLabel, meansVersion, paymentJournals, syncPaymentAccess, useCredit,
 } from './payments-access';
 import {
-  activeMeans, availableCredit, CREDIT_ENTRY_LABELS, CreditEntryKind, documentPayment, GROUP_PAYMENT_PENDING, matchesStatus, meansCode, meansError, meansOn,
+  activeMeans, availableCredit, CREDIT_ENTRY_LABELS, CreditEntryKind, documentPayment, duplicateError, GROUP_PAYMENT_PENDING, matchesStatus, meansCode, meansError, meansOn,
   normalizedReference, PAYMENT_STATUS_LABELS, paymentError, PAYMENTS_LOCKED, paymentsUnlocked, RECEIPT_MENTION, REFUND_STATUS_LABELS, refundDecisionError,
-  refundRequestError, REFUNDS_CLOSED, RefundStatus, STATUS_FILTERS, StatusFilter, transferError,
+  PaymentTrace, refundRequestError, REFUNDS_CLOSED, RefundStatus, SIMILAR_PAYMENT_DAYS, STATUS_FILTERS, StatusFilter, transferError,
 } from './payments-rules';
 import { financialTotals } from './payments-totals';
 
@@ -88,6 +89,12 @@ export class RecordPaymentDto {
   @Matches(/^[A-Z0-9_]{1,40}$/, MEANS) meansCode: string;
   @IsString() @Length(3, 100, { message: 'Référence de la transaction : 3 à 100 caractères' }) transactionRef: string;
   @IsOptional() @IsString() @MaxLength(500, { message: 'Commentaire : 500 caractères au plus' }) note?: string;
+  /** G5d2-5 : ressaisie d'un paiement dont la saisie est annulée (champ vide : aucune). */
+  @Transform(({ value }) => (value === '' ? undefined : value))
+  @IsOptional() @IsUUID('all', { message: 'Paiement annulé à ressaisir invalide' }) replacesPaymentId?: string;
+  /** G5d2-5 : motif d'un autre versement, quand un paiement semblable ou un même justificatif existe déjà. */
+  @Transform(({ value }) => (typeof value === 'string' && value.trim() === '' ? undefined : value))
+  @IsOptional() @IsString() @Length(5, 300, { message: 'Motif d’un autre versement : 5 à 300 caractères' }) similarReason?: string;
   @IsString(CODE) @Length(6, 8, CODE) code: string;
 }
 
@@ -142,8 +149,12 @@ const PAYMENT_INCLUDE = {
 } satisfies Prisma.BillingPaymentInclude;
 type PaymentWithAll = Prisma.BillingPaymentGetPayload<{ include: typeof PAYMENT_INCLUDE }>;
 
+/** Liens d'une ressaisie (G5d2-5) : reçu du paiement annulé qu'elle remplace, reçu de la ressaisie d'un paiement annulé. */
+type ReentryLinks = (p: { id: string; replacesPaymentId: string | null }) => { replacesReceipt: string | null; reenteredBy: string | null };
+const NO_LINKS: ReentryLinks = () => ({ replacesReceipt: null, reenteredBy: null });
+
 /** Un paiement tel que le lit le Super Admin : jamais modifié ; une saisie annulée le reste, marquée. */
-function paymentView(p: PaymentWithAll) {
+function paymentView(p: PaymentWithAll, links: ReentryLinks = NO_LINKS) {
   const status = p.cancelledAt ? 'CANCELLED' : 'VALIDATED';
   return {
     id: p.id, receiptNumber: p.receiptNumber, tenantId: p.tenantId, tenantName: p.tenant.name, group: p.tenant.group, documentId: p.documentId, documentReference: p.document.reference,
@@ -151,6 +162,8 @@ function paymentView(p: PaymentWithAll) {
     creditAmount: p.creditAmount, note: p.note, recordedByName: p.recordedByName, recordedAt: p.recordedAt, status, statusLabel: PAYMENT_STATUS_LABELS[status],
     cancelledAt: p.cancelledAt, cancelledByName: p.cancelledByName, cancelReason: p.cancelReason,
     allocations: p.allocations.filter((a) => a.amount > 0).map((a) => ({ reference: a.document.reference, amount: a.amount })),
+    // G5d2-5 : ressaisie d'un paiement annulé, et motif d'un versement semblable ou d'un même justificatif.
+    replacesPaymentId: p.replacesPaymentId, ...links(p), similarReason: p.similarReason,
   };
 }
 
@@ -185,10 +198,57 @@ export class BillingPaymentsService {
   /** Établissement (avec son groupe et sa taille) ; 404 s'il n'existe pas. */
   private async tenant(id: string) {
     const t = await this.db.tenant.findUnique({
-      where: { id }, select: { id: true, name: true, groupId: true, timezone: true, currency: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
+      where: { id },
+      select: { id: true, name: true, groupId: true, timezone: true, currency: true, commercialStatus: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
     });
     if (!t) throw new NotFoundException('Établissement introuvable');
     return t;
+  }
+
+  /** Reçus liés par les ressaisies (G5d2-5), pour une liste de paiements. */
+  private async links(ps: { id: string; replacesPaymentId: string | null }[]): Promise<ReentryLinks> {
+    const replaced = [...new Set(ps.map((p) => p.replacesPaymentId).filter((x): x is string => !!x))];
+    const rows = await this.db.billingPayment.findMany({
+      where: { OR: [{ id: { in: replaced } }, { replacesPaymentId: { in: ps.map((p) => p.id) } }] }, select: { id: true, receiptNumber: true, replacesPaymentId: true },
+    });
+    const receipts = new Map(rows.map((r) => [r.id, r.receiptNumber]));
+    const reentries = new Map(rows.filter((r) => r.replacesPaymentId).map((r) => [r.replacesPaymentId!, r.receiptNumber]));
+    return (p) => ({ replacesReceipt: p.replacesPaymentId ? receipts.get(p.replacesPaymentId) ?? null : null, reenteredBy: reentries.get(p.id) ?? null });
+  }
+
+  /**
+   * Paiements déjà enregistrés que la règle des doubles saisies compare au nouveau (G5d2-5) : même référence, même
+   * justificatif, paiement désigné, ou même établissement et même montant à 3 jours près ; avec leur ressaisie.
+   */
+  private async traces(tenantId: string, amount: number, paidOn: string, key: string, proofSha256: string, replaces: string | null): Promise<PaymentTrace[]> {
+    const rows = await this.db.billingPayment.findMany({
+      where: {
+        OR: [
+          { transactionKey: key }, { proofSha256 }, ...(replaces ? [{ id: replaces }] : []),
+          { tenantId, amount, paidOn: { gte: new Date(`${addDays(paidOn, -SIMILAR_PAYMENT_DAYS)}T00:00:00.000Z`), lte: new Date(`${addDays(paidOn, SIMILAR_PAYMENT_DAYS)}T00:00:00.000Z`) } },
+        ],
+      },
+      orderBy: { recordedAt: 'desc' },
+      select: { id: true, receiptNumber: true, tenantId: true, amount: true, paidOn: true, transactionKey: true, proofSha256: true, cancelledAt: true, replacesPaymentId: true, means: { select: { code: true } } },
+    });
+    const links = await this.links(rows);
+    return rows.map((r) => ({
+      id: r.id, receiptNumber: r.receiptNumber, tenantId: r.tenantId, amount: r.amount, meansCode: r.means.code, paidOn: iso(r.paidOn)!, transactionKey: r.transactionKey,
+      proofSha256: r.proofSha256, cancelled: !!r.cancelledAt, reenteredBy: links(r).reenteredBy,
+    }));
+  }
+
+  /** Paiements annulés pas encore ressaisis (G5d2-5), à désigner lors de leur ressaisie : tous établissements. */
+  private async toReenter() {
+    const rows = await this.db.billingPayment.findMany({
+      where: { cancelledAt: { not: null } }, orderBy: { cancelledAt: 'desc' }, take: 300,
+      select: { id: true, receiptNumber: true, tenantId: true, amount: true, currency: true, paidOn: true, transactionRef: true, cancelledAt: true, replacesPaymentId: true, tenant: { select: { name: true } } },
+    });
+    const links = await this.links(rows);
+    return rows.filter((r) => !links(r).reenteredBy).map((r) => ({
+      id: r.id, receiptNumber: r.receiptNumber, tenantId: r.tenantId, tenantName: r.tenant.name, amount: r.amount, currency: r.currency, paidOn: iso(r.paidOn),
+      transactionRef: r.transactionRef, cancelledAt: r.cancelledAt,
+    }));
   }
 
   private async credit(db: Pick<PlatformDb, '$queryRaw'>, tenantId: string) {
@@ -205,8 +265,9 @@ export class BillingPaymentsService {
     const unlocked = paymentsUnlocked();
     const today = localDay(PLATFORM_TZ);
     const means = await this.means(today);
+    // Établissements clients réels seulement : un établissement de test n'a ni document ni paiement (la base le refuse).
     const tenants = await this.db.tenant.findMany({
-      where: { billingDocumentLines: { some: { document: { kind: 'SUBSCRIPTION' } } } }, orderBy: { name: 'asc' },
+      where: { commercialStatus: 'CLIENT', billingDocumentLines: { some: { document: { kind: 'SUBSCRIPTION' } } } }, orderBy: { name: 'asc' },
       select: {
         id: true, name: true, currency: true, timezone: true, groupId: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } },
         subscription: { select: { status: true } },
@@ -233,9 +294,13 @@ export class BillingPaymentsService {
       });
     }
     const payments = await this.db.billingPayment.findMany({ orderBy: { recordedAt: 'desc' }, take: 200, include: PAYMENT_INCLUDE });
+    const links = await this.links(payments);
     return {
       unlocked, lockMessage: unlocked ? null : PAYMENTS_LOCKED, mention: RECEIPT_MENTION, today, currencies: CURRENCIES,
-      means: { current: means.current, versions: means.versions }, establishments, payments: payments.map(paymentView),
+      means: { current: means.current, versions: means.versions }, establishments, payments: payments.map((p) => paymentView(p, links)),
+      // G5d2-5 : paiements annulés à désigner lors de leur ressaisie, et règle des doubles saisies.
+      toReenter: await this.toReenter(),
+      duplicateRule: `Une ressaisie désigne le paiement annulé qu’elle remplace, une seule fois. Un justificatif déjà joint à un autre paiement, ou un paiement semblable (même établissement, même montant, même moyen, à ${SIMILAR_PAYMENT_DAYS} jours près), exige le motif de cet autre versement.`,
     };
   }
 
@@ -245,7 +310,7 @@ export class BillingPaymentsService {
     if (!p) throw new NotFoundException('Paiement introuvable');
     const entries = await this.db.billingCreditEntry.findMany({ where: { paymentId: id }, orderBy: { createdAt: 'asc' } });
     return {
-      ...paymentView(p), proofUrl: this.files.signedUrl(p.proofKey), proofMime: p.proofMime,
+      ...paymentView(p, await this.links([p])), proofUrl: this.files.signedUrl(p.proofKey), proofMime: p.proofMime,
       movements: p.allocations.map((a) => ({ reference: a.document.reference, amount: a.amount, reversal: a.amount < 0, createdAt: a.createdAt })),
       creditEntries: entries.map((e) => ({ kind: e.kind, label: CREDIT_ENTRY_LABELS[e.kind as CreditEntryKind], amount: e.amount, createdAt: e.createdAt })),
       receipt: receiptView({
@@ -293,6 +358,7 @@ export class BillingPaymentsService {
   async record(actor: PlatformActor, dto: RecordPaymentDto, file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('Justificatif du paiement : joignez la preuve (photo ou PDF)');
     const t = await this.tenant(dto.tenantId);
+    if (t.commercialStatus !== 'CLIENT') throw new ConflictException('Établissement de test : aucun paiement ne s’enregistre pour lui (passez-le d’abord en client réel)');
     if (t.group._count.tenants !== 1) throw new BadRequestException(GROUP_PAYMENT_PENDING);
     const doc = await this.db.billingDocument.findUnique({ where: { id: dto.documentId }, select: { id: true, reference: true, issueDate: true } });
     if (!doc) throw new NotFoundException('Document introuvable');
@@ -300,8 +366,15 @@ export class BillingPaymentsService {
     const amount = Number(dto.amount);
     const error = paymentError({ amount, paidOn: dto.paidOn, transactionRef: dto.transactionRef }, today, iso(doc.issueDate)!);
     if (error) throw new BadRequestException(error);
-    const twin = await this.db.billingPayment.findFirst({ where: { transactionKey: normalizedReference(dto.transactionRef), cancelledAt: null }, select: { receiptNumber: true } });
-    if (twin) throw new ConflictException(`Cette référence de transaction est déjà enregistrée (reçu ${twin.receiptNumber}) : un même paiement ne s’enregistre qu’une fois`);
+    // G5d2-5 : doubles saisies, contrôlées avant le code de l'application (la base refait chaque contrôle).
+    const proofSha256 = createHash('sha256').update(file.buffer).digest('hex');
+    const replaces = dto.replacesPaymentId ?? null;
+    const similarReason = dto.similarReason?.trim() || null;
+    const twin = duplicateError(
+      { tenantId: t.id, amount, meansCode: dto.meansCode, paidOn: dto.paidOn, transactionRef: dto.transactionRef, proofSha256, replacesPaymentId: replaces, similarReason },
+      await this.traces(t.id, amount, dto.paidOn, normalizedReference(dto.transactionRef), proofSha256, replaces),
+    );
+    if (twin) throw new ConflictException(twin.message);
     await this.billing.confirm(actor, dto.code);
     const key = await this.files.save(t.id, 'paiements-cahiora', file);
     try {
@@ -309,23 +382,34 @@ export class BillingPaymentsService {
         result: await this.db.$transaction(async (tx) => {
           const [r] = await tx.$queryRaw<RecordRow[]>`
             SELECT * FROM record_billing_payment(${t.id}::uuid, ${doc.id}::uuid, ${amount}::integer, ${dto.paidOn}::date, ${dto.meansCode}, ${dto.transactionRef}, ${key},
-              ${file.mimetype}, ${dto.note?.trim() || null}, ${actor.id}::uuid, ${actor.name}, ${actor.ip ?? null}, ${today}::date)`;
+              ${file.mimetype}, ${dto.note?.trim() || null}, ${actor.id}::uuid, ${actor.name}, ${actor.ip ?? null}, ${today}::date,
+              ${replaces}::uuid, ${proofSha256}, ${similarReason})`;
           const p = await tx.billingPayment.findUniqueOrThrow({ where: { id: r.payment_id }, include: PAYMENT_INCLUDE });
+          const replaced = replaces ? await tx.billingPayment.findUniqueOrThrow({ where: { id: replaces }, select: { receiptNumber: true, tenantId: true, tenant: { select: { name: true } } } }) : null;
           const v = paymentView(p);
           const data = {
             paymentId: p.id, receiptNumber: p.receiptNumber, documentReference: doc.reference, amount, expected: r.expected, allocated: r.allocated, credit: r.credit,
             paidOn: dto.paidOn, means: p.meansName, transactionRef: p.transactionRef, allocations: v.allocations,
+            // Ressaisie d'un paiement annulé du même établissement : lisible par l'établissement et son groupe.
+            ...(replaced && replaced.tenantId === t.id ? { replacesReceipt: replaced.receiptNumber } : {}),
           };
-          await paymentJournals(tx, actor, t, 'billing.payment_recorded', data, { note: p.note });
+          // Ressaisie d'un paiement saisi d'abord pour un autre établissement : au journal de la plateforme seulement,
+          // comme le motif d'un autre versement et le commentaire interne (rien d'un établissement n'atteint un autre).
+          const internal = {
+            note: p.note, ...(p.similarReason ? { similarReason: p.similarReason } : {}),
+            ...(replaced && replaced.tenantId !== t.id ? { replacesReceipt: replaced.receiptNumber, replacesTenant: replaced.tenant.name } : {}),
+          };
+          await paymentJournals(tx, actor, t, 'billing.payment_recorded', data, internal);
           const access = await syncPaymentAccess(tx, t.id, { cause: 'PAYMENT', receiptNumber: p.receiptNumber }, actor);
           const parts = [
             `Cahiora a enregistré votre paiement de ${money(amount, t.currency)} du ${dayLabel(dto.paidOn)} (${p.meansName}, référence ${p.transactionRef}) : reçu provisoire ${p.receiptNumber}.`,
+            replaced && replaced.tenantId === t.id ? `Il remplace la saisie annulée du reçu ${replaced.receiptNumber}.` : '',
             v.allocations.length ? `Imputé sur ${v.allocations.map((a) => `${a.reference} (${money(a.amount, t.currency)})`).join(', ')}.` : '',
             r.credit > 0 ? `${money(r.credit, t.currency)} deviennent un crédit de votre établissement, déduit du prochain document.` : '',
             accessSentence(access, t.currency), `${RECEIPT_MENTION} Le reçu est dans Paramètres › Abonnement Cahiora.`,
           ];
           await notifyDirection(tx, t.id, 'billing.payment_recorded', `Paiement reçu par Cahiora : reçu provisoire ${p.receiptNumber}`, parts.filter(Boolean).join(' '));
-          return { ...v, expected: r.expected, allocated: r.allocated, credit: r.credit, access: { kind: access.kind, status: access.status } };
+          return { ...v, replacesReceipt: replaced?.receiptNumber ?? null, expected: r.expected, allocated: r.allocated, credit: r.credit, access: { kind: access.kind, status: access.status } };
         }, { timeout: 60000 }),
       }));
       forgetAccess(t.id);
@@ -376,7 +460,8 @@ export class BillingPaymentsService {
    */
   async credits() {
     const tenants = await this.db.tenant.findMany({
-      orderBy: { name: 'asc' }, select: { id: true, name: true, currency: true, groupId: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true, currency: true, groupId: true, commercialStatus: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
     });
     const names = new Map(tenants.map((t) => [t.id, t.name]));
     const entries = await this.db.billingCreditEntry.findMany({
@@ -386,7 +471,8 @@ export class BillingPaymentsService {
     const establishments = [];
     for (const t of tenants) {
       const multi = t.group._count.tenants > 1;
-      if (!withCredit.has(t.id) && !multi) continue;
+      // Un établissement de test n'a ni crédit ni transfert (la base le refuse) : il n'est pas proposé.
+      if (t.commercialStatus !== 'CLIENT' || (!withCredit.has(t.id) && !multi)) continue;
       establishments.push({
         tenantId: t.id, name: t.name, currency: t.currency, group: { id: t.group.id, name: t.group.name, size: t.group._count.tenants }, credit: await this.credit(this.db, t.id),
         entries: entries.filter((e) => e.tenantId === t.id).slice(0, 50).map((e) => ({
@@ -562,9 +648,10 @@ export class BillingPaymentsService {
       },
       orderBy: [{ paidOn: 'desc' }, { recordedAt: 'desc' }], take: 500, include: PAYMENT_INCLUDE,
     });
+    const links = await this.links(payments);
     return {
       filters: { from: q.from ?? null, to: q.to ?? null, tenantId: q.tenantId ?? null, groupId: q.groupId ?? null, status: q.status ?? null },
-      totals, documents, payments: payments.map(paymentView), mention: RECEIPT_MENTION,
+      totals, documents, payments: payments.map((p) => paymentView(p, links)), mention: RECEIPT_MENTION,
       groups: await this.db.schoolGroup.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true } }),
       tenants: await this.db.tenant.findMany({ orderBy: { name: 'asc' }, select: { id: true, name: true, groupId: true } }),
     };
@@ -730,8 +817,12 @@ export class SchoolBillingPaymentsController {
   @Get('settings/subscription/receipts/:id') @Can('settings.manage') @Header('Cache-Control', 'no-store')
   receipt(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.receipt(a, id); }
 
-  /** Fermée pendant l'accès limité : seules la consultation, l'impression, l'export, la caisse et la régularisation y restent. */
-  @Post('settings/subscription/refund-requests') @PaymentsOpen() @Can('settings.manage')
+  /**
+   * Ouverte aussi pendant l'accès limité (G5d2-7, Dankou, 20 novembre 2026) : la direction peut demander le
+   * remboursement de son crédit disponible dès que Cahiora ouvre les remboursements (verrou 1), sans attendre la fin
+   * de la limitation. Tant que le verrou est fermé, la demande est refusée avant même la lecture du corps.
+   */
+  @Post('settings/subscription/refund-requests') @AllowedWhenLimited() @PaymentsOpen() @Can('settings.manage')
   @WholeSchool('Seule la direction de tout l’établissement demande un remboursement')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   requestRefund(@CurrentActor() a: Actor, @Body() dto: RefundRequestDto) { return this.s.requestRefund(a, dto); }

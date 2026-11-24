@@ -11,6 +11,7 @@ import { RawValue } from '../../common/util';
 import { schoolAccess, schoolRequests } from './access';
 import { daysLeft, STATUS_LABELS, subscriptionKindLabel, SubscriptionStatus } from './billing-rules';
 import { schoolPayments } from './billing-payments';
+import { DUE_TO_BE_FIXED } from './amounts-rules';
 import { BillingDocumentsService, documentLabel, GROUP_SCHOOL_PENDING, PROVISIONAL_MENTION } from './documents';
 import { documentPayment, paymentsUnlocked, RECEIPT_MENTION } from './payments-rules';
 
@@ -38,6 +39,10 @@ type SubscriptionRow = {
 };
 const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 
+/** Ce que lit la direction d'un établissement de test (ajustements G5, Dankou, 20 novembre 2026). */
+export const SCHOOL_TEST_NOTICE =
+  'Établissement de test : Cahiora ne lui ouvre ni essai, ni abonnement, ni document, ni paiement, et ne limite jamais son accès. Rien ne vous est facturé.';
+
 /** Les conditions s'acceptent en attente d'acceptation, ou en accès limité avant toute acceptation (lot G5d-1). */
 const awaitsAcceptance = (s: SubscriptionRow | null) => !!s && (s.status === 'AWAITING_ACCEPTANCE' || (s.status === 'LIMITED' && !s.accepted_at));
 
@@ -58,7 +63,7 @@ export class SchoolSubscriptionService {
   constructor(private db: PrismaService, private audit: AuditService, @Optional() private documents?: BillingDocumentsService) {}
 
   private async read(tx: Tx, tenantId: string) {
-    const t = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { currency: true, timezone: true } });
+    const t = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { currency: true, timezone: true, commercialStatus: true } });
     const today = localDay(t.timezone);
     const [s] = await tx.$queryRaw<SubscriptionRow[]>`SELECT * FROM current_tenant_subscription()`;
     return { t, today, s: s ?? null };
@@ -78,6 +83,9 @@ export class SchoolSubscriptionService {
       const last = s?.status === 'TRIAL' ? iso(s.trial_end) : s?.status === 'PILOT' ? iso(s.pilot_end) : null;
       return {
         today, currency: t.currency,
+        // Établissement de test : rien n'est facturé ni limité ; la page le dit (l'abonnement d'avant, s'il y en avait un,
+        // n'est plus lu par la base).
+        commercialStatus: t.commercialStatus, testNotice: t.commercialStatus === 'TEST' ? SCHOOL_TEST_NOTICE : null,
         // Tarif public de Cahiora en vigueur ce jour ; un tarif accepté est figé dans l'abonnement.
         tariff: { pricePerPupil: price?.v ?? null, minimum: minimum?.v ?? null },
         subscription: s && {
@@ -142,8 +150,12 @@ export class SchoolSubscriptionService {
       documents: subscription.length,
       requested,
       dueDate: toPay.map((d) => iso(d.due_date)).filter((x): x is string => !!x).sort()[0] ?? null,
-      /** Un document à payer n'a pas encore d'échéance (compléments des régularisations, lot G5c). */
+      /**
+       * Un document à payer n'a pas encore d'échéance (G5c-1) : délai proposé, pas encore en vigueur tant que les
+       * conditions commerciales de Cahiora ne sont pas validées.
+       */
       dueDatePending: toPay.some((d) => !d.due_date),
+      dueDateNote: toPay.some((d) => !d.due_date) ? DUE_TO_BE_FIXED : null,
       lines: ordered.map((d) => ({
         kind: d.kind, label: documentLabel(d.kind, d.total), reference: d.reference, yearLabel: d.year_label, issueDate: iso(d.issue_date), dueDate: iso(d.due_date),
         amount: d.kind === 'CREDIT_NOTE' ? -d.total : d.total,

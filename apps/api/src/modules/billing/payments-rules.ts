@@ -225,6 +225,85 @@ export function paymentError(p: PaymentInput, today: string, documentIssueDate: 
   return null;
 }
 
+// ---------------------------------------------------------------- Doubles saisies (G5d2-5)
+
+/** Écart, en jours, sous lequel deux paiements du même établissement, du même montant et du même moyen sont « semblables ». */
+export const SIMILAR_PAYMENT_DAYS = 3;
+
+/** Un paiement déjà enregistré, tel que le compare la règle des doubles saisies. */
+export interface PaymentTrace {
+  id: string;
+  receiptNumber: string;
+  tenantId: string;
+  amount: number;
+  meansCode: string;
+  paidOn: string;
+  transactionKey: string;
+  proofSha256: string | null;
+  cancelled: boolean;
+  /** Numéro du reçu de sa ressaisie, s'il a été ressaisi après l'annulation de sa saisie. */
+  reenteredBy: string | null;
+}
+
+export interface NewPayment {
+  tenantId: string;
+  amount: number;
+  meansCode: string;
+  paidOn: string;
+  transactionRef: string;
+  proofSha256: string;
+  replacesPaymentId?: string | null;
+  similarReason?: string | null;
+}
+
+/**
+ * Doubles saisies après l'annulation d'un paiement (G5d2-5, demande de Dankou du 20 novembre 2026), dans l'ordre des
+ * contrôles de la base (record_billing_payment, qui reste seule à faire foi) :
+ * 1. une référence portée par un paiement validé ne revient jamais ;
+ * 2. la ressaisie désigne un paiement dont la saisie est annulée, et une seule fois (au besoin pour un autre
+ *    établissement, choisi par erreur la première fois) ;
+ * 3. la référence d'un paiement annulé et pas encore ressaisi ne revient que dans sa ressaisie, désignée ;
+ * 4. un justificatif déjà joint à un autre paiement (même fichier) exige un motif, sauf pour la ressaisie qu'il
+ *    justifiait ;
+ * 5. un paiement semblable (même établissement, montant et moyen, à 3 jours près), validé ou annulé sans ressaisie,
+ *    exige un motif.
+ * Renvoie le refus, avec `needsReason` quand un motif suffit à passer, ou null.
+ */
+export function duplicateError(p: NewPayment, others: PaymentTrace[]): { message: string; needsReason: boolean } | null {
+  const key = normalizedReference(p.transactionRef);
+  const reason = (p.similarReason ?? '').trim();
+  const replaces = p.replacesPaymentId ?? null;
+  const live = others.find((o) => o.transactionKey === key && !o.cancelled);
+  if (live) return { message: `Cette référence de transaction est déjà enregistrée (reçu ${live.receiptNumber}) : un même paiement ne s’enregistre qu’une fois`, needsReason: false };
+  if (replaces) {
+    const r = others.find((o) => o.id === replaces);
+    if (!r) return { message: 'Paiement annulé à ressaisir introuvable', needsReason: false };
+    if (!r.cancelled) return { message: `Seul un paiement dont la saisie est annulée se ressaisit (reçu ${r.receiptNumber})`, needsReason: false };
+    if (r.reenteredBy) return { message: `Ce paiement annulé a déjà été ressaisi (reçu ${r.reenteredBy}) : une ressaisie ne se fait qu’une fois`, needsReason: false };
+  }
+  const waiting = others.find((o) => o.transactionKey === key && o.cancelled && o.id !== replaces && !o.reenteredBy);
+  if (waiting) {
+    return { message: `Cette référence est celle du paiement annulé du reçu ${waiting.receiptNumber} : enregistrez la ressaisie de ce paiement en le désignant`, needsReason: false };
+  }
+  if (reason && (reason.length < 5 || reason.length > 300)) return { message: 'Motif d’un autre versement : 5 à 300 caractères', needsReason: true };
+  const sameProof = others.find((o) => o.proofSha256 === p.proofSha256 && o.id !== replaces);
+  if (sameProof && !reason) {
+    return {
+      message: `Ce justificatif est déjà joint au paiement du reçu ${sameProof.receiptNumber} : un même versement ne s’enregistre qu’une fois ; s’il justifie aussi un autre versement, donnez-en le motif`,
+      needsReason: true,
+    };
+  }
+  const similar = others.find((o) => o.tenantId === p.tenantId && o.amount === p.amount && o.meansCode === p.meansCode && o.id !== replaces
+    && Math.abs(daysBetween(o.paidOn, p.paidOn)) <= SIMILAR_PAYMENT_DAYS && (!o.cancelled || !o.reenteredBy));
+  if (similar && !reason) {
+    return {
+      message: `Paiement semblable déjà enregistré (reçu ${similar.receiptNumber} du ${frDay(similar.paidOn)}, même montant et même moyen${similar.cancelled ? ', saisie annulée sans ressaisie' : ''}) : s’il s’agit d’un autre versement, donnez-en le motif`,
+      needsReason: true,
+    };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- Accès (choix 2 A)
 
 /**

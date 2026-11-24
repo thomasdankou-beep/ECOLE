@@ -14,11 +14,11 @@ import { FilesService, MAX_UPLOAD_BYTES, UPLOAD_THROTTLE } from '../files/files.
 import { PlatformDb } from '../platform/platform';
 import { billableRows, BillableRow, endOfSchoolDay, enrollmentEpisodes } from '../students/enrollments';
 import { exclusionDeadline } from './amounts-rules';
-import { frDay, isDay } from './billing-rules';
+import { daysBetween, frDay, isDay } from './billing-rules';
 import { AlreadyDone, jobOnce, notifyDirection, systemJournals } from './billing-tasks';
 import {
   auditDepartureDays, BASIS_LABELS, CountBasis, CountCalendar, CountItem, CountKind, CountRecord, CountStage, COUNT_KIND_LABELS, countView, DueCount, dueCounts,
-  freeEndYear, resolveItems, sortCounts,
+  FREE_END_CHECK_REMINDER_DAYS, freeEndYear, isToCheck, resolveItems, sortCounts, TO_CHECK_BASES, TO_CHECK_REMINDER_DAYS,
 } from './counts-rules';
 
 /**
@@ -31,6 +31,12 @@ import {
  * - direction : comptages, liste nominative, demandes de correction et décisions (Paramètres › Effectifs facturables) ;
  * - Super Admin : les nombres de chaque comptage, jamais un nom (BillingService.establishments).
  * Aucun montant, aucune facture, aucun SMS : le calcul et les documents arrivent au lot G5c.
+ * G5b-2 (Dankou, 20 novembre 2026) : un élève parti sans date connue est « À vérifier » et reste compté, jamais exclu
+ * d'office. Procédure : la liste des élèves à vérifier est ouverte à tout moment (Paramètres › Effectifs facturables) ;
+ * la direction fixe la date ou confirme qu'elle est introuvable, avant le comptage (période gratuite comprise) ou
+ * pendant sa vérification ; rappel 3 jours avant la fin de la gratuité et 2 jours avant la fin d'une vérification s'il
+ * en reste ; au comptage figé, ceux qui restent sont comptés et le Super Admin reçoit une alerte. Seuls les
+ * établissements clients réels ont des comptages (établissements de test : aucun).
  */
 
 type Sub = Subscription & { tenant: { id: string; name: string; timezone: string; groupId: string } };
@@ -44,12 +50,22 @@ type CountRow = {
 const iso = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
 const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 const pupilsText = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
-const DEPARTURE_BASES: CountBasis[] = ['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN', 'DEPARTURE_DIRECTION'];
+const DEPARTURE_BASES: CountBasis[] = ['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN', 'DEPARTURE_DIRECTION', 'DEPARTURE_CONFIRMED'];
+const toCheckText = (n: number) => `${n} élève${n > 1 ? 's' : ''} « À vérifier »`;
+/** Accord au singulier ou au pluriel (« 1 élève … reste compté », « 2 élèves … restent comptés »). */
+const pl = (n: number, one: string, many: string) => (n > 1 ? many : one);
 
 /** Erreur d'une fonction de la base (préfixe « CAHIORA: ») rendue à l'écran ; toute autre erreur reste une erreur. */
 function cahioraMessage(e: unknown) {
   const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"`]+)/);
   return m ? m[1].trim() : null;
+}
+
+/** Forme d'une demande : date obligatoire pour fixer un départ, interdite pour une exclusion ou une date introuvable. */
+function checkShape(dto: { kind: string; departureDate?: string }) {
+  if (dto.kind === 'DEPARTURE_DATE' && !(dto.departureDate && isDay(dto.departureDate))) throw new BadRequestException('Date de départ : date invalide');
+  if (dto.kind === 'EXCLUSION' && dto.departureDate) throw new BadRequestException('Une exclusion ne porte pas de date de départ');
+  if (dto.kind === 'DEPARTURE_CONFIRMED' && dto.departureDate) throw new BadRequestException('Une date confirmée introuvable ne porte pas de date de départ');
 }
 
 /** Dernière version du calendrier de chaque année scolaire, dates en AAAA-MM-JJ. */
@@ -72,7 +88,15 @@ function record(c: CountRow): CountRecord & { academicYearId: string } {
 }
 
 export class CountCorrectionDto {
-  @IsIn(['EXCLUSION', 'DEPARTURE_DATE'], { message: 'Type de correction inconnu' }) kind: 'EXCLUSION' | 'DEPARTURE_DATE';
+  @IsIn(['EXCLUSION', 'DEPARTURE_DATE', 'DEPARTURE_CONFIRMED'], { message: 'Type de correction inconnu' }) kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED';
+  @IsUUID('all', { message: 'Inscription invalide' }) enrollmentId: string;
+  @IsString() @Length(5, 500, { message: 'Justification : 5 à 500 caractères' }) justification: string;
+  @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'Date de départ attendue au format AAAA-MM-JJ' }) departureDate?: string;
+}
+
+/** G5b-2 : date d'un départ fixée, ou confirmée introuvable, hors de tout comptage. */
+export class CountCheckDto {
+  @IsIn(['DEPARTURE_DATE', 'DEPARTURE_CONFIRMED'], { message: 'Type de correction inconnu' }) kind: 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED';
   @IsUUID('all', { message: 'Inscription invalide' }) enrollmentId: string;
   @IsString() @Length(5, 500, { message: 'Justification : 5 à 500 caractères' }) justification: string;
   @IsOptional() @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: 'Date de départ attendue au format AAAA-MM-JJ' }) departureDate?: string;
@@ -98,7 +122,10 @@ export class CountsService {
     this.running = true;
     try {
       const done: string[] = [];
-      const subs: Sub[] = await this.platform.subscription.findMany({ include: { tenant: { select: { id: true, name: true, timezone: true, groupId: true } } } });
+      // Établissements clients réels seulement : un établissement de test n'a aucun comptage (la base le refuse aussi).
+      const subs: Sub[] = await this.platform.subscription.findMany({
+        where: { tenant: { commercialStatus: 'CLIENT' } }, include: { tenant: { select: { id: true, name: true, timezone: true, groupId: true } } },
+      });
       for (const s of subs) {
         try {
           done.push(...(await this.forSubscription(s, now)));
@@ -128,9 +155,11 @@ export class CountsService {
       calendars,
       recorded.map((r) => ({ kind: r.kind, stage: r.stage, date: iso(r.referenceDate)!, yearLabel: r.yearLabel, reviewUntil: iso(r.reviewUntil) })),
     );
-    if (!due.length) return [];
-    const years = await this.yearsOf(s.tenantId);
     const out: string[] = [];
+    // G5b-2 : rappels à la direction tant qu'il reste des élèves « À vérifier », avant la fin de la gratuité ou d'une vérification.
+    out.push(...(await this.checkReminders(s, now, today, calendars)));
+    if (!due.length) return out;
+    const years = await this.yearsOf(s.tenantId);
     for (const d of due) {
       const year = d.yearLabel ? years.find((y) => y.label === d.yearLabel) ?? null : freeEndYear(d.date, calendars, years);
       if (!year) {
@@ -167,9 +196,11 @@ export class CountsService {
     });
     const direction = new Map<string, string>();
     for (const c of corrections) if (c.kind === 'DEPARTURE_DATE' && c.departureDate) direction.set(c.enrollmentId, iso(c.departureDate)!);
+    // G5b-2 : date confirmée introuvable par la direction (compté, sans être « À vérifier »).
+    const confirmed = new Set(corrections.filter((c) => c.kind === 'DEPARTURE_CONFIRMED').map((c) => c.enrollmentId));
     const excluded = new Set(corrections.filter((c) => c.kind === 'EXCLUSION').map((c) => c.enrollmentId));
     const audit = auditDepartureDays(unknown, logs, knownAt, timeZone);
-    return { rows, audit, list: resolveItems(date, rows, { direction, audit }, excluded) };
+    return { rows, audit, list: resolveItems(date, rows, { direction, audit, confirmed }, excluded) };
   }
 
   /** Enregistre un comptage : liste calculée dans l'école, puis la base contrôle, compte, calcule le cumul et l'empreinte. */
@@ -195,16 +226,63 @@ export class CountsService {
       };
       await systemJournals(tx, s.tenant, 'BillingCount', r.count_id, d.stage === 'FROZEN' ? 'billing.count_frozen' : 'billing.count_recorded', data);
       const n = pupilsText(r.count_pupils);
+      const k = r.count_to_check;
+      const toCheck = k > 0
+        ? ` Dont ${toCheckText(k)} (départ enregistré sans date connue) : fixez ${pl(k, 'sa', 'leur')} date de départ ou confirmez qu’elle est introuvable ; sans réponse, ${pl(k, 'il reste compté', 'ils restent comptés')}.`
+        : '';
       if (d.stage === 'PROVISIONAL') {
         await notifyDirection(tx, s.tenantId, 'billing.count_recorded', `Comptage des élèves du ${frDay(d.date)} : vérifiez la liste`,
-          `${label} de l’année ${year.label} : ${n} au ${frDay(d.date)}. Vous avez jusqu’au ${frDay(reviewUntil!)} inclus pour vérifier la liste dans Paramètres › Effectifs facturables : demander l’exclusion d’une inscription annulée par erreur de saisie, ou dater un départ enregistré avant l’historique des inscriptions. Le comptage sera ensuite figé.`);
+          `${label} de l’année ${year.label} : ${n} au ${frDay(d.date)}.${toCheck} Vous avez jusqu’au ${frDay(reviewUntil!)} inclus pour vérifier la liste dans Paramètres › Effectifs facturables : demander l’exclusion d’une inscription annulée par erreur de saisie, ou dater un départ enregistré avant l’historique des inscriptions. Le comptage sera ensuite figé.`);
       } else {
+        // G5b-2 : élèves encore « À vérifier » au comptage figé, comptés ; le Super Admin le sait (des nombres, jamais un nom).
+        if (k > 0) {
+          await tx.platformAlert.create({
+            data: {
+              tenantId: s.tenantId, kind: 'COUNT_TO_CHECK', dueDate: day(d.date),
+              message: `${label} du ${frDay(d.date)} figé pour ${s.tenant.name} avec ${toCheckText(k)} (départ sans date connue), ${pl(k, 'compté', 'comptés')}. La direction peut encore fixer ${pl(k, 'sa', 'leur')} date pour les comptages suivants.`,
+            },
+          });
+        }
         await notifyDirection(tx, s.tenantId, 'billing.count_frozen', `Comptage des élèves du ${frDay(d.date)} : ${n}`,
-          d.kind === 'TRIAL_END' || d.kind === 'PILOT_END'
+          (d.kind === 'TRIAL_END' || d.kind === 'PILOT_END'
             ? `${n} inscrit${r.count_pupils > 1 ? 's' : ''} à la fin de votre ${d.kind === 'TRIAL_END' ? 'essai gratuit' : 'période pilote'}, le ${frDay(d.date)}. Ce comptage est figé et sert au calcul de votre abonnement Cahiora ; la liste est dans Paramètres › Effectifs facturables.`
-            : `La vérification est terminée : ${label.toLowerCase()} de l’année ${year.label} figé à ${n} au ${frDay(d.date)}. Il ne change plus et sert au calcul de votre abonnement Cahiora ; la liste reste dans Paramètres › Effectifs facturables.`);
+            : `La vérification est terminée : ${label.toLowerCase()} de l’année ${year.label} figé à ${n} au ${frDay(d.date)}. Il ne change plus et sert au calcul de votre abonnement Cahiora ; la liste reste dans Paramètres › Effectifs facturables.`)
+          + (k > 0 ? ` ${toCheckText(k)} y ${pl(k, 'reste compté', 'restent comptés')} : vous pouvez encore fixer ${pl(k, 'sa', 'leur')} date de départ pour les comptages suivants.` : ''));
       }
     });
+  }
+
+  /**
+   * G5b-2 : rappel à la direction, une seule fois, s'il reste des élèves « À vérifier » 3 jours avant la fin de sa
+   * période gratuite (comptage figé aussitôt) ou 2 jours avant la fin de la vérification d'un comptage provisoire.
+   */
+  private async checkReminders(s: Sub, now: Date, today: string, calendars: CountCalendar[]) {
+    const out: string[] = [];
+    const tz = s.tenant.timezone;
+    const lastFree = s.status === 'TRIAL' ? iso(s.trialEnd) : s.status === 'PILOT' ? iso(s.pilotEnd) : null;
+    if (lastFree && daysBetween(today, lastFree) >= 0 && daysBetween(today, lastFree) <= FREE_END_CHECK_REMINDER_DAYS) {
+      const year = freeEndYear(lastFree, calendars, await this.yearsOf(s.tenantId));
+      const n = year ? (await this.db.forTenant(s.tenantId, (tx) => this.items(tx, year.id, lastFree, tz, now), { timeout: 60000 })).list.filter(isToCheck).length : 0;
+      if (n > 0 && await jobOnce(this.platform, `count-check-free-end:${s.tenantId}:${lastFree}`, 'COUNT_CHECK_REMINDER', s.tenantId, lastFree, (tx) =>
+        notifyDirection(tx, s.tenantId, 'billing.count_check_reminder', `${toCheckText(n)} avant la fin de votre ${s.status === 'TRIAL' ? 'essai gratuit' : 'période pilote'}`,
+          `Votre ${s.status === 'TRIAL' ? 'essai gratuit' : 'période pilote'} se termine le ${frDay(lastFree)} : les élèves sont alors comptés et ce comptage est figé aussitôt. ${toCheckText(n)} ${pl(n, 'a', 'ont')} un départ enregistré sans date connue : dans Paramètres › Effectifs facturables, fixez ${pl(n, 'sa', 'leur')} date de départ ou confirmez qu’elle est introuvable. Sans réponse, ${pl(n, 'il reste compté', 'ils restent comptés')}.`))) {
+        out.push(`count-check-free-end:${lastFree}:${s.tenant.name}`);
+      }
+    }
+    const counts = await this.platform.billingCount.findMany({ where: { tenantId: s.tenantId }, select: { id: true, kind: true, stage: true, referenceDate: true, yearLabel: true, academicYearId: true, reviewUntil: true } });
+    for (const c of counts) {
+      const reviewUntil = iso(c.reviewUntil);
+      if (c.stage !== 'PROVISIONAL' || !reviewUntil || reviewUntil < today || daysBetween(today, reviewUntil) > TO_CHECK_REMINDER_DAYS) continue;
+      if (counts.some((f) => f.stage === 'FROZEN' && f.kind === c.kind && f.yearLabel === c.yearLabel && iso(f.referenceDate) === iso(c.referenceDate))) continue;
+      const date = iso(c.referenceDate)!;
+      const n = (await this.db.forTenant(s.tenantId, (tx) => this.items(tx, c.academicYearId, date, tz, now), { timeout: 60000 })).list.filter(isToCheck).length;
+      if (n > 0 && await jobOnce(this.platform, `count-check-review:${c.id}`, 'COUNT_CHECK_REMINDER', s.tenantId, reviewUntil, (tx) =>
+        notifyDirection(tx, s.tenantId, 'billing.count_check_reminder', `${toCheckText(n)} dans le comptage du ${frDay(date)}`,
+          `La vérification du ${COUNT_KIND_LABELS[c.kind].toLowerCase()} du ${frDay(date)} se termine le ${frDay(reviewUntil)} inclus. ${toCheckText(n)} ${pl(n, 'a', 'ont')} un départ enregistré sans date connue : dans Paramètres › Effectifs facturables, fixez ${pl(n, 'sa', 'leur')} date de départ ou confirmez qu’elle est introuvable. Sans réponse, ${pl(n, 'il reste compté', 'ils restent comptés')} au comptage figé.`))) {
+        out.push(`count-check-review:${date}:${s.tenant.name}`);
+      }
+    }
+    return out;
   }
 
   /** Comptage impossible faute d'année scolaire : une alerte et une notification, une seule fois ; il se fera dès que l'année existera. */
@@ -299,6 +377,10 @@ export class CountsService {
           exclusionUntil: count.reviewOpen ? count.reviewUntil : afterFreeze ? until : null,
           documentDate, decider: documentDate ? 'PLATFORM' as const : 'SCHOOL' as const,
           canDate: count.reviewOpen && DEPARTURE_BASES.includes(i.basis),
+          // G5b-2 : « À vérifier » (départ sans date connue, compté) ; la direction peut confirmer la date introuvable.
+          toCheck: isToCheck(i),
+          canConfirm: count.reviewOpen && i.counted && TO_CHECK_BASES.includes(i.basis)
+            && !corrections.some((k) => k.enrollmentId === enrollmentId && k.status === 'VALIDATED' && (k.kind === 'DEPARTURE_DATE' || k.kind === 'DEPARTURE_CONFIRMED')),
           auditDay: live?.audit.get(enrollmentId) ?? (i.basis === 'DEPARTURE_AUDIT' ? i.departureDate : null),
           stillCounted: live ? liveIds.has(enrollmentId) : null,
         };
@@ -371,34 +453,107 @@ export class CountsService {
    * concerné (D-G5-14 A), avec un justificatif facultatif (photo ou PDF). La base contrôle chaque délai.
    */
   async requestCorrection(actor: Actor, countId: string, dto: CountCorrectionDto, file?: { buffer: Buffer; mimetype: string; size: number }) {
-    if (dto.kind === 'DEPARTURE_DATE' && !(dto.departureDate && isDay(dto.departureDate))) throw new BadRequestException('Date de départ : date invalide');
-    if (dto.kind === 'EXCLUSION' && dto.departureDate) throw new BadRequestException('Une exclusion ne porte pas de date de départ');
+    checkShape(dto);
     const newKey = file ? await this.files.save(actor.tenantId, 'comptages', file) : null;
     return this.files.commit(newKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
       const tz = await this.timezone(tx, actor.tenantId);
       const today = localDay(tz);
-      if (dto.kind === 'DEPARTURE_DATE') {
+      if (dto.kind !== 'EXCLUSION') {
         const c = (await this.rows(tx)).find((r) => r.id === countId);
         if (!c) throw new NotFoundException('Comptage introuvable');
-        const limits = await this.departureLimits(tx, dto.enrollmentId, c.referenceDate, tz);
-        if (!limits) throw new BadRequestException('Cette inscription n’a pas de départ enregistré avant l’historique des inscriptions à cette date');
-        if (dto.departureDate! < limits.since) throw new BadRequestException(`La date de départ précède l’arrivée de l’élève (le ${frDay(limits.since)})`);
-        if (limits.auditDay && dto.departureDate! > limits.auditDay) {
-          throw new BadRequestException(`La date de départ ne peut pas être après celle du journal (le ${frDay(limits.auditDay)}) : vous pouvez seulement l’avancer`);
-        }
+        await this.checkDeparture(tx, dto, c.referenceDate, tz);
       }
-      try {
-        const [r] = await tx.$queryRaw<{ id: string }[]>`
-          SELECT request_count_correction(${countId}::uuid, ${dto.kind}, ${dto.enrollmentId}::uuid, ${dto.departureDate ?? null}::date, ${dto.justification.trim()},
-            ${newKey}, ${file?.mimetype ?? null}, ${file?.size ?? null}::int, ${actor.userId}::uuid, ${actor.name}, ${actor.ip ?? null}, ${today}::date) AS id`;
-        await this.audit.log(tx, actor, dto.kind === 'EXCLUSION' ? 'billing.count_exclusion_requested' : 'billing.count_departure_dated', 'CountCorrection', r.id,
-          { countId, enrollmentId: dto.enrollmentId, departureDate: dto.departureDate ?? null, justificatif: !!newKey });
-        return { result: { id: r.id, status: dto.kind === 'EXCLUSION' ? 'PENDING' : 'VALIDATED' } };
-      } catch (e) {
-        const message = cahioraMessage(e);
-        if (message) throw new BadRequestException(message);
-        throw e;
+      return this.saveCorrection(tx, actor, countId, dto, today, newKey, file);
+    }));
+  }
+
+  /** Contrôle d'une date de départ fixée ou confirmée introuvable, pour la période qui couvre le jour R. */
+  private async checkDeparture(tx: Tx, dto: { kind: string; enrollmentId: string; departureDate?: string }, referenceDate: string, tz: string) {
+    const limits = await this.departureLimits(tx, dto.enrollmentId, referenceDate, tz);
+    if (!limits) throw new BadRequestException('Cette inscription n’a pas de départ enregistré avant l’historique des inscriptions à cette date');
+    if (dto.kind !== 'DEPARTURE_DATE') return;
+    if (dto.departureDate! < limits.since) throw new BadRequestException(`La date de départ précède l’arrivée de l’élève (le ${frDay(limits.since)})`);
+    if (limits.auditDay && dto.departureDate! > limits.auditDay) {
+      throw new BadRequestException(`La date de départ ne peut pas être après celle du journal (le ${frDay(limits.auditDay)}) : vous pouvez seulement l’avancer`);
+    }
+  }
+
+  /** Enregistre la demande par la base (request_count_correction), qui contrôle chaque délai, puis le journal de l'école. */
+  private async saveCorrection(
+    tx: Tx, actor: Actor, countId: string | null, dto: { kind: 'EXCLUSION' | 'DEPARTURE_DATE' | 'DEPARTURE_CONFIRMED'; enrollmentId: string; justification: string; departureDate?: string },
+    today: string, newKey: string | null, file?: { mimetype: string; size: number },
+  ) {
+    try {
+      const [r] = await tx.$queryRaw<{ id: string }[]>`
+        SELECT request_count_correction(${countId}::uuid, ${dto.kind}, ${dto.enrollmentId}::uuid, ${dto.departureDate ?? null}::date, ${dto.justification.trim()},
+          ${newKey}, ${file?.mimetype ?? null}, ${file?.size ?? null}::int, ${actor.userId}::uuid, ${actor.name}, ${actor.ip ?? null}, ${today}::date) AS id`;
+      const action = dto.kind === 'EXCLUSION' ? 'billing.count_exclusion_requested' : dto.kind === 'DEPARTURE_DATE' ? 'billing.count_departure_dated' : 'billing.count_departure_confirmed';
+      await this.audit.log(tx, actor, action, 'CountCorrection', r.id,
+        { countId, outsideCount: countId === null, enrollmentId: dto.enrollmentId, departureDate: dto.departureDate ?? null, justificatif: !!newKey });
+      return { result: { id: r.id, status: dto.kind === 'EXCLUSION' ? 'PENDING' : 'VALIDATED' } };
+    } catch (e) {
+      const message = cahioraMessage(e);
+      if (message) throw new BadRequestException(message);
+      throw e;
+    }
+  }
+
+  /**
+   * G5b-2 : élèves « À vérifier » de chaque année scolaire en cours ou à venir, tels qu'ils seraient comptés aujourd'hui
+   * (au premier jour d'une année qui n'a pas encore commencé) : départ enregistré sans date connue avant l'historique des
+   * inscriptions, toujours compté. La direction fixe leur date ou confirme qu'elle est introuvable, à tout moment et hors
+   * de tout comptage ; les élèves dont la date est confirmée introuvable restent visibles (date encore modifiable).
+   */
+  schoolChecks(actor: Actor) {
+    return this.db.forTenant(actor.tenantId, async (tx) => {
+      const tz = await this.timezone(tx, actor.tenantId);
+      const today = localDay(tz);
+      const now = new Date();
+      const years = (await tx.academicYear.findMany({ select: { id: true, label: true, startDate: true, endDate: true }, orderBy: { startDate: 'asc' } }))
+        .map((y) => ({ id: y.id, label: y.label, startDate: iso(y.startDate)!, endDate: iso(y.endDate)! }))
+        .filter((y) => y.endDate >= today);
+      const sites = new Map((await tx.site.findMany({ select: { id: true, name: true } })).map((x) => [x.id, x.name]));
+      const out = [];
+      for (const y of years) {
+        const date = y.startDate > today ? y.startDate : today;
+        const { list, audit, rows } = await this.items(tx, y.id, date, tz, now);
+        const shown = list.filter((i) => isToCheck(i) || (i.counted && i.basis === 'DEPARTURE_CONFIRMED'));
+        const enrollments = new Map((await tx.enrollment.findMany({
+          where: { id: { in: shown.map((i) => i.enrollmentId) } }, select: { id: true, status: true, student: { select: { id: true, matricule: true, firstName: true, lastName: true } } },
+        })).map((e) => [e.id, e]));
+        const classes = new Map((await tx.class.findMany({ where: { id: { in: [...new Set(shown.map((i) => i.classId))] } }, select: { id: true, name: true } })).map((x) => [x.id, x.name]));
+        const pupils = shown.map((i) => {
+          const e = enrollments.get(i.enrollmentId);
+          const row = rows.find((r) => r.enrollmentId === i.enrollmentId);
+          return {
+            enrollmentId: i.enrollmentId, studentId: e?.student.id ?? null, matricule: e?.student.matricule ?? '', name: e ? `${e.student.lastName} ${e.student.firstName}` : '',
+            className: classes.get(i.classId) ?? 'Classe supprimée', siteName: i.siteId ? sites.get(i.siteId) ?? null : null, enrollmentStatus: e?.status ?? null,
+            basis: i.basis, basisLabel: BASIS_LABELS[i.basis], toCheck: isToCheck(i), since: row?.unknown ? localDay(tz, row.unknown.since) : null,
+            auditDay: audit.get(i.enrollmentId) ?? null, canDate: true, canConfirm: isToCheck(i),
+          };
+        }).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+        out.push({ academicYearId: y.id, yearLabel: y.label, date, toCheck: pupils.filter((p) => p.toCheck).length, pupils });
       }
+      return {
+        today, years: out,
+        note: 'Un élève « À vérifier » a un départ enregistré sans date connue : il reste compté à chaque comptage tant que vous ne fixez pas sa date de départ ou ne confirmez pas qu’elle est introuvable. Aucun élève n’est retiré sans votre décision.',
+      };
+    });
+  }
+
+  /** G5b-2 : date d'un départ fixée, ou confirmée introuvable, hors de tout comptage (liste des élèves « À vérifier »). */
+  async requestCheck(actor: Actor, dto: CountCheckDto, file?: { buffer: Buffer; mimetype: string; size: number }) {
+    checkShape(dto);
+    const newKey = file ? await this.files.save(actor.tenantId, 'comptages', file) : null;
+    return this.files.commit(newKey, () => this.db.forTenant(actor.tenantId, async (tx) => {
+      const tz = await this.timezone(tx, actor.tenantId);
+      const today = localDay(tz);
+      const e = await tx.enrollment.findUnique({ where: { id: dto.enrollmentId }, select: { academicYear: { select: { startDate: true, endDate: true } } } });
+      if (!e) throw new NotFoundException('Inscription introuvable');
+      const start = iso(e.academicYear.startDate)!;
+      if (iso(e.academicYear.endDate)! < today) throw new BadRequestException('Cette année scolaire est terminée : corrigez un comptage pendant sa vérification');
+      await this.checkDeparture(tx, dto, start > today ? start : today, tz);
+      return this.saveCorrection(tx, actor, null, dto, today, newKey, file);
     }));
   }
 
@@ -428,6 +583,18 @@ export class CountsController {
   /** Comptages des élèves facturables de l'établissement : direction seulement. */
   @Get('settings/billing-counts') @Can('settings.manage') @Header('Cache-Control', 'no-store')
   list(@CurrentActor() a: Actor) { return this.s.schoolCounts(a); }
+
+  /** G5b-2 : élèves « À vérifier » (départ sans date connue), à résoudre avant le comptage ; déclaré avant « :id ». */
+  @Get('settings/billing-counts/checks') @Can('settings.manage') @Header('Cache-Control', 'no-store')
+  checks(@CurrentActor() a: Actor) { return this.s.schoolChecks(a); }
+
+  @Post('settings/billing-counts/checks') @AllowedWhenLimited() @Can('settings.manage') @WholeSchool('Seule la direction de tout l’établissement corrige un comptage')
+  @ApiConsumes('multipart/form-data')
+  @Throttle(UPLOAD_THROTTLE)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES } }))
+  check(@CurrentActor() a: Actor, @Body() dto: CountCheckDto, @UploadedFile() file?: Express.Multer.File) {
+    return this.s.requestCheck(a, dto, file);
+  }
 
   @Get('settings/billing-counts/:id') @Can('settings.manage') @Header('Cache-Control', 'no-store')
   one(@CurrentActor() a: Actor, @Param('id', ParseUUIDPipe) id: string) { return this.s.schoolCount(a, id); }

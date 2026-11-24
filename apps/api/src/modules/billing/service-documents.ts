@@ -10,7 +10,8 @@ import { PlatformActor } from '../platform/group-journal';
 import { PlatformDb, PlatformGuard } from '../platform/platform';
 import { BillingService, PLATFORM_TZ } from './billing';
 import { notifyDirection } from './billing-tasks';
-import { cahioraMessage, DOCUMENT_KIND_LABELS, documentJournals, PROVISIONAL_MENTION } from './documents';
+import { DUE_TO_BE_FIXED, laterDueDate } from './amounts-rules';
+import { cahioraMessage, DOCUMENT_KIND_LABELS, documentJournals, dueDaysOn, PROVISIONAL_MENTION } from './documents';
 import { ServicesService } from './services';
 import { PriceBasis } from './services-rules';
 
@@ -22,13 +23,15 @@ import { PriceBasis } from './services-rules';
  * règle, jamais de cumul). Une prestation sur devis n'entre que dans un devis, au prix qu'il saisit ; une proforma
  * reprend un devis tel quel, une seule fois, ou se fait directement avec des prestations à prix du catalogue. Rien
  * n'est jamais ajouté d'office. La base refait chaque prix (service_unit_price) avant d'écrire.
- * INFORMATION MANQUANTE : durée de validité d'un devis, échéance d'une proforma (aucune date n'est inscrite).
+ * INFORMATION MANQUANTE : durée de validité d'un devis. Échéance d'une proforma (G5c-1, 20 novembre 2026) : sa date
+ * plus le délai proposé SERVICE_DUE_DAYS quand il a une valeur, sinon « à fixer ». Un établissement de test n'en reçoit
+ * aucun (demande de Dankou du 20 novembre 2026 ; la base le refuse aussi).
  */
 
 const CODE = { message: 'Code de votre application d’authentification : 6 chiffres' };
 const NOT_OFFERED: PriceBasis[] = ['NOT_IN_CATALOG', 'INACTIVE', 'MISSING'];
 export const QUOTE_VALIDITY_MISSING = 'INFORMATION MANQUANTE : durée de validité d’un devis non fixée';
-export const PROFORMA_DUE_MISSING = 'INFORMATION MANQUANTE : échéance d’une proforma non fixée';
+export const PROFORMA_DUE_MISSING = DUE_TO_BE_FIXED;
 
 export class ServiceItemDto {
   @IsUUID('all', { message: 'Prestation invalide' }) serviceId: string;
@@ -63,15 +66,19 @@ export class ServiceDocumentsService {
   async issue(admin: PlatformActor, dto: ServiceDocumentDto, now = new Date()) {
     const issueDay = localDay(PLATFORM_TZ, now);
     const t = await this.platform.tenant.findUnique({
-      where: { id: dto.tenantId }, select: { id: true, name: true, currency: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
+      where: { id: dto.tenantId },
+      select: { id: true, name: true, currency: true, commercialStatus: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } },
     });
     if (!t) throw new NotFoundException('Établissement introuvable');
+    if (t.commercialStatus !== 'CLIENT') throw new BadRequestException('Établissement de test : aucun devis ni proforma. Passez-le d’abord en client réel, s’il est un client commercial réel de Cahiora.');
     const fromQuote = dto.kind === 'SERVICE_PROFORMA' && !!dto.quoteId;
     if (dto.quoteId && dto.kind !== 'SERVICE_PROFORMA') throw new BadRequestException('Seule une proforma reprend un devis');
     if (fromQuote && dto.items?.length) throw new BadRequestException('Une proforma reprend les lignes du devis telles quelles : n’ajoutez pas de prestation');
     if (!fromQuote && !dto.items?.length) throw new BadRequestException('Ajoutez au moins une prestation');
 
     const { lines, notes, quote } = fromQuote ? await this.fromQuote(t, dto.quoteId!) : await this.priced(t, dto, issueDay);
+    const total = lines.reduce((n, l) => n + l.amount, 0);
+    const due = dto.kind === 'SERVICE_PROFORMA' ? laterDueDate(issueDay, total, await dueDaysOn(this.platform, 'SERVICE_DUE_DAYS', issueDay)) : null;
     await this.billing.confirm(admin, dto.code);
     const label = DOCUMENT_KIND_LABELS[dto.kind];
     const data = {
@@ -83,12 +90,13 @@ export class ServiceDocumentsService {
       items: notes,
       quote: quote && { documentId: quote.id, reference: quote.reference },
       validity: dto.kind === 'SERVICE_QUOTE' ? QUOTE_VALIDITY_MISSING : null,
-      due: dto.kind === 'SERVICE_PROFORMA' ? PROFORMA_DUE_MISSING : null,
+      due: due?.rule === 'TO_BE_FIXED' ? PROFORMA_DUE_MISSING : null,
+      dueRule: due?.rule ?? null,
     };
     try {
       return await this.platform.$transaction(async (tx) => {
         const [r] = await tx.$queryRaw<{ document_id: string; document_reference: string; document_total: number }[]>`
-          SELECT * FROM issue_billing_document(${t.group.id}::uuid, ${dto.kind}, ${t.currency}, ${issueDay}::date, NULL::date, NULL, ${quote?.id ?? null}::uuid,
+          SELECT * FROM issue_billing_document(${t.group.id}::uuid, ${dto.kind}, ${t.currency}, ${issueDay}::date, ${due?.dueDate ?? null}::date, NULL, ${quote?.id ?? null}::uuid,
             ${JSON.stringify(data)}::jsonb, ${JSON.stringify(lines)}::jsonb, 'platform', ${admin.id}::uuid, ${admin.name})`;
         const action = dto.kind === 'SERVICE_QUOTE' ? 'billing.service_quote_issued' : 'billing.service_proforma_issued';
         await documentJournals(tx, t.group, r.document_id, action, {

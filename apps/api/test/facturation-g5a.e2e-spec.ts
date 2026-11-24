@@ -73,7 +73,7 @@ async function login(s: School, phone: string) {
 /** Établissement fictif, seul dans son groupe, avec un compte Direction (tout l'établissement) et, au besoin, un comptable. */
 async function newSchool(k: 'A' | 'B' | 'C', withComptable = false): Promise<School> {
   const t = await admin.tenant.create({
-    data: { slug: `g5a-${k.toLowerCase()}-${stamp}`, name: `École fictive G5a ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5a ${k} ${stamp}` } } },
+    data: { commercialStatus: 'CLIENT', slug: `g5a-${k.toLowerCase()}-${stamp}`, name: `École fictive G5a ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5a ${k} ${stamp}` } } },
   });
   const hash = await argon2.hash(PASSWORD, { type: argon2.argon2id });
   const people = await inTenant(t.id, async (tx) => {

@@ -1,5 +1,6 @@
 import {
-  auditDepartureDays, CountCalendar, CountRecord, CountSubscription, countView, dueCounts, freeEndYear, ItemRow, RecordedCount, resolveItems, reviewOpen, sortCounts,
+  auditDepartureDays, BASIS_LABELS, CountCalendar, CountRecord, CountSubscription, countView, dueCounts, freeEndYear, isToCheck, ItemRow, RecordedCount, resolveItems,
+  reviewOpen, sortCounts, TO_CHECK_BASES,
 } from './counts-rules';
 
 /**
@@ -188,5 +189,51 @@ describe('Comptages G5b : vérification et affichage', () => {
       rec({ id: '4', kind: 'FIRST_REGULARIZATION', referenceDate: '2027-03-31' }),
     ];
     expect(sortCounts(rows).map((r) => r.id)).toEqual(['4', '2', '1', '3']);
+  });
+});
+
+describe('Ajustements G5b-2 : élève parti sans date connue, « À vérifier »', () => {
+  const since = new Date('2026-09-14T08:00:00Z');
+  const row = (id: string): ItemRow => ({ enrollmentId: id, studentId: `s-${id}`, classId: 'c1', siteId: null, state: 'UNKNOWN', unknown: { since, before: null } });
+  const none = { direction: new Map<string, string>(), audit: new Map<string, string>() };
+
+  it('sans date connue : compté et « À vérifier », jamais retiré par un silence', () => {
+    const [a] = resolveItems('2026-11-30', [row('a')], none, new Set());
+    expect(a).toMatchObject({ counted: true, basis: 'DEPARTURE_UNKNOWN', departureDate: null });
+    expect(isToCheck(a)).toBe(true);
+    expect(BASIS_LABELS.DEPARTURE_UNKNOWN.startsWith('À vérifier')).toBe(true);
+    expect(BASIS_LABELS.DEPARTURE_AUDIT.startsWith('À vérifier')).toBe(true);
+    expect(TO_CHECK_BASES).toEqual(['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN']);
+  });
+
+  it('date confirmée introuvable par la direction : toujours compté, plus « À vérifier »', () => {
+    const [a] = resolveItems('2026-11-30', [row('a')], { ...none, confirmed: new Set(['a']) }, new Set());
+    expect(a).toMatchObject({ counted: true, basis: 'DEPARTURE_CONFIRMED', departureDate: null });
+    expect(isToCheck(a)).toBe(false);
+  });
+
+  it('date fixée par la direction : elle l’emporte sur une confirmation antérieure', () => {
+    const before = resolveItems('2026-11-30', [row('a')], { ...none, direction: new Map([['a', '2026-10-15']]), confirmed: new Set(['a']) }, new Set());
+    expect(before).toEqual([]);
+    const [after] = resolveItems('2026-11-30', [row('a')], { ...none, direction: new Map([['a', '2026-12-10']]), confirmed: new Set(['a']) }, new Set());
+    expect(after).toMatchObject({ counted: true, basis: 'DEPARTURE_DIRECTION', departureDate: '2026-12-10' });
+    expect(isToCheck(after)).toBe(false);
+  });
+
+  it('date du journal après le jour R : compté et « À vérifier » ; confirmée introuvable, compté sans l’être', () => {
+    const audit = new Map([['a', '2026-12-05']]);
+    const [a] = resolveItems('2026-11-30', [row('a')], { ...none, audit }, new Set());
+    expect(a).toMatchObject({ counted: true, basis: 'DEPARTURE_AUDIT', departureDate: '2026-12-05' });
+    expect(isToCheck(a)).toBe(true);
+    const [b] = resolveItems('2026-11-30', [row('a')], { ...none, audit, confirmed: new Set(['a']) }, new Set());
+    expect(b).toMatchObject({ counted: true, basis: 'DEPARTURE_CONFIRMED', departureDate: '2026-12-05' });
+    // Date du journal le jour R ou avant : l'élève était déjà parti, confirmé ou non.
+    expect(resolveItems('2026-12-05', [row('a')], { ...none, audit, confirmed: new Set(['a']) }, new Set())).toEqual([]);
+  });
+
+  it('une inscription exclue n’est jamais « À vérifier »', () => {
+    const [a] = resolveItems('2026-11-30', [row('a')], none, new Set(['a']));
+    expect(a).toMatchObject({ counted: false, basis: 'EXCLUDED' });
+    expect(isToCheck(a)).toBe(false);
   });
 });

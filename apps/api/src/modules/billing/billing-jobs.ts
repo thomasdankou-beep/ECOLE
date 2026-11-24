@@ -68,8 +68,10 @@ export class BillingJobsService implements OnModuleInit, OnModuleDestroy {
     this.running = true;
     try {
       const done: string[] = [];
+      // Établissements clients réels seulement : un établissement de test n'a ni essai, ni pilote, ni rappel, ni délai de
+      // grâce, et n'est jamais limité (la base refuse aussi tout abonnement pour lui et fige un abonnement ancien).
       const subs: Sub[] = await this.db.subscription.findMany({
-        where: { status: { in: ['TRIAL', 'PILOT', 'AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT'] } },
+        where: { status: { in: ['TRIAL', 'PILOT', 'AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT'] }, tenant: { commercialStatus: 'CLIENT' } },
         include: { tenant: { select: { id: true, name: true, timezone: true, groupId: true, currency: true, group: { select: { _count: { select: { tenants: true } } } } } } },
       });
       // Moyens de paiement (lot G5d-2) : un établissement qui peut payer n'est plus retenu par sa demande (D-G5-42 A).

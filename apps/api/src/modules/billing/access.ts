@@ -208,8 +208,9 @@ export class PlatformAccessService {
    */
   async overview() {
     const now = new Date();
+    // Établissements clients réels seulement : un établissement de test n'est jamais en attente ni limité.
     const subs = await this.db.subscription.findMany({
-      where: { status: { in: ['AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT', 'LIMITED'] } },
+      where: { status: { in: ['AWAITING_ACCEPTANCE', 'AWAITING_PAYMENT', 'LIMITED'] }, tenant: { commercialStatus: 'CLIENT' } },
       include: { tenant: { select: { id: true, name: true, timezone: true, currency: true, group: { select: { id: true, name: true, _count: { select: { tenants: true } } } } } } },
     });
     // Moyens de paiement (lot G5d-2) : aucun tant que le verrou 1 est fermé.
