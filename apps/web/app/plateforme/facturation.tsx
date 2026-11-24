@@ -285,7 +285,7 @@ function Abonnements() {
                   <td>
                     {e.commercialStatus === 'TEST' ? (
                       e.subscription ? (
-                        <span className="grid justify-items-start gap-1"><Badge tone="info">{e.subscription.statusLabel}</Badge><span className="text-xs text-muted">Abonnement de test figé : jamais facturé ni limité</span></span>
+                        <span className="flex flex-col items-start gap-1"><Badge tone="info">{e.subscription.statusLabel}</Badge><span className="text-xs text-muted">Abonnement de test figé : jamais facturé ni limité</span></span>
                       ) : <span className="text-sm text-muted">Jamais facturé ni limité</span>
                     ) : e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}
                   </td>
