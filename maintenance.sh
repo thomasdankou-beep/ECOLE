@@ -41,9 +41,17 @@ LOCAL=${ESSAI_LOCAL:-127.0.0.1:443}
 commun() {
   cat <<'FIN_COMMUN'
 dans_caddy() { docker compose exec -T caddy "$@"; }
-# Configuration chargée dans Caddy (interface d'administration, dans son conteneur) : maintenance, habituelle ou illisible.
+# Interface d'administration de Caddy (dans son conteneur) : 127.0.0.1, puis [::1], puis localhost. Le wget du conteneur
+# n'essaie qu'une adresse, et « localhost » peut y désigner ::1 alors que Caddy n'écoute que sur 127.0.0.1 (vu sur GitHub).
+admin_caddy() {
+  for adm_a in 127.0.0.1 '[::1]' localhost; do
+    adm_r=$(dans_caddy wget -q -T 5 -O - "http://$adm_a:2019$1" </dev/null 2>/dev/null) && { printf '%s\n' "$adm_r"; return 0; }
+  done
+  return 1
+}
+# Configuration chargée dans Caddy : maintenance, habituelle ou illisible.
 chargee() {
-  c=$(dans_caddy wget -q -T 5 -O - http://localhost:2019/config/ </dev/null 2>/dev/null) || { echo illisible; return; }
+  c=$(admin_caddy /config/) || { echo illisible; return; }
   case "$c" in
     *'"apps"'*X-Cahiora-Maintenance* | *X-Cahiora-Maintenance*'"apps"'*) echo maintenance ;;
     *'"apps"'*) echo habituelle ;;

@@ -95,6 +95,12 @@ sonder_pendant() { # sonder_pendant <secondes> <fichier> : une requête toutes l
   while [ "$(date +%s)" -lt "$fin" ]; do http GET http://saint-kisito.cahiora.test/connexion; sleep 0.2; done > "$2"
 }
 gardien() { cat "$HOME/.cahiora-maintenance/gardien.pid" 2> /dev/null; }
+tuer_gardien() { # arrête le gardien d'un coup, comme une panne
+  local g
+  g=$(gardien)
+  verifier "gardien en marche avant son arrêt simulé" test -n "$g" && kill -s KILL -- "-$g"
+  sleep 1
+}
 fin_des_essais() {
   local g
   g=$(gardien) && kill -s TERM -- "-$g" 2> /dev/null
@@ -207,6 +213,12 @@ tar -czf "$HOME/sauvegardes/fichiers-$D.tar.gz" -C "$tmp/app" serveur.js
 cp "$HOME/ecole/.env" "$HOME/sauvegardes/env-$D.txt"
 : > "$HOME/copies-hors-serveur/cahiora-$D.tar.enc"
 echo "  banc prêt : Caddy $(docker compose exec -T caddy caddy version | cut -d' ' -f1), commit essayé $court"
+adm=""
+for a in localhost 127.0.0.1 '[::1]'; do
+  if docker compose exec -T caddy wget -q -T 3 -O /dev/null "http://$a:2019/config/" < /dev/null 2> /dev/null; then r=répond; else r="ne répond pas"; fi
+  adm="$adm${adm:+, }$a $r"
+done
+echo "        interface d'administration de Caddy dans son conteneur : $adm"
 
 echo "1. Avant la mise à jour, fenêtre fermée"
 controle avant_fermee 0
@@ -362,7 +374,7 @@ verifier "après « fin » : fragment enlevé du volume de Caddy" sh -c '! docke
 maintenance m_debut2 0 debut
 contient m_debut2 "Fenêtre de maintenance : OUVERTE ET PROTÉGÉE."
 echo "   Point 8 : gardien arrêté, puis redémarrage de Caddy avant la mise à jour (ancienne configuration, sans le fragment)"
-kill -s KILL -- "-$(gardien)"; sleep 1
+tuer_gardien
 controle gardien_arrete 1 FENETRE=ouverte
 contient gardien_arrete "fenêtre ouverte mais NON PROTÉGÉE contre un redémarrage de Caddy (fragment : oui ; gardien : arrêté)"
 maintenance m_sans_gardien 1 etat
@@ -381,7 +393,7 @@ maintenance m_apres_redemarrage 0 etat
 contient m_apres_redemarrage "Fenêtre de maintenance : OUVERTE ET PROTÉGÉE."
 controle ouverte_apres_redemarrage 0 FENETRE=ouverte
 contient ouverte_apres_redemarrage "OK        fenêtre de maintenance ouverte et protégée"
-kill -s KILL -- "-$(gardien)"; sleep 1
+tuer_gardien
 docker compose restart caddy > /dev/null 2>&1; attendre_site 200
 controle sans_gardien_redemarre 1 FENETRE=ouverte
 contient sans_gardien_redemarre "BLOQUANT  fenêtre de maintenance attendue, mais le site est OUVERT (9 adresses répondent normalement)"
@@ -460,6 +472,25 @@ docker compose start caddy > /dev/null 2>&1; attendre_site 200
 maintenance m_usage 2 autre
 contient m_usage "Usage : maintenance.sh debut | etat | fin"
 
+echo "5. « localhost » ne mène pas à l'interface d'administration de Caddy (cas trouvé sur GitHub, où il désignait ::1)"
+# Caddy écoute sur 127.0.0.1:2019, mais « localhost » désigne 127.0.0.2 dans son conteneur : le wget du conteneur,
+# qui n'essaie qu'une adresse, n'atteint plus l'interface par « localhost ».
+printf '127.0.0.2\tlocalhost\n' > "$tmp/hosts-caddy"
+printf 'services:\n  caddy:\n    environment:\n      CADDY_ADMIN: "127.0.0.1:2019"\n    volumes:\n      - "%s:/etc/hosts:ro"\n' "$tmp/hosts-caddy" > "$tmp/admin.yml"
+export COMPOSE_FILE="$COMPOSE_FILE:$tmp/admin.yml"
+docker compose up -d caddy > /dev/null 2>&1; attendre_site 200
+verifier "dans le conteneur de Caddy, « localhost » ne mène pas à l'interface d'administration" \
+  sh -c '! docker compose exec -T caddy wget -q -T 3 -O /dev/null http://localhost:2019/config/ < /dev/null 2> /dev/null'
+maintenance m_admin_etat 0 etat
+contient m_admin_etat "Fenêtre de maintenance : FERMÉE."
+controle admin_fermee 0 ATTENDU="$NOUVEAU" EMPREINTE="$EMP"
+contient admin_fermee "OK        fenêtre de maintenance fermée"
+maintenance m_admin_debut 0 debut
+contient m_admin_debut "Fenêtre de maintenance : OUVERTE ET PROTÉGÉE."
+controle admin_ouverte 0 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
+contient admin_ouverte "OK        fenêtre de maintenance ouverte et protégée"
+maintenance m_admin_fin 0 fin
+contient m_admin_fin "Le site est de nouveau ouvert."
 echo
 echo "Bilan : $ok vérifications réussies, $ko en échec."
 [ "$ko" = 0 ]

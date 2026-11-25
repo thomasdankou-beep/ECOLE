@@ -252,7 +252,11 @@ else
   else VERDICT=anomalie; fi
   # Adresses des écoles non contrôlées : ni « ouverte » ni « fermée » (le point BLOQUANT est déjà noté).
   [ "$liste_lue" = oui ] || case "$VERDICT" in ouverte | fermee) VERDICT=incomplete ;; esac
-  cfg=$(dc exec -T caddy wget -q -T 5 -O - http://localhost:2019/config/ </dev/null 2>/dev/null)
+  # Interface d'administration de Caddy : 127.0.0.1, puis [::1], puis localhost (le wget du conteneur n'essaie qu'une adresse,
+  # et « localhost » peut y désigner ::1 alors que Caddy n'écoute que sur 127.0.0.1).
+  cfg=$(for a in 127.0.0.1 '[::1]' localhost; do
+    r=$(dc exec -T caddy wget -q -T 5 -O - "http://$a:2019/config/" </dev/null 2>/dev/null) && { printf '%s\n' "$r"; exit 0; }
+  done; exit 1)
   case "$?:$cfg" in
     0:*'"apps"'*X-Cahiora-Maintenance* | 0:*X-Cahiora-Maintenance*'"apps"'*) chargee=maintenance ;;
     0:*'"apps"'*) chargee=habituelle ;;
