@@ -47,7 +47,13 @@ const gp = (method: 'get' | 'post' | 'patch', url: string, cookie?: string, body
   if (cookie) r.set('Cookie', cookie);
   return r.send(body ?? {});
 };
-const code = (secret: string) => authenticator.generate(secret);
+/** Code du moment de l'application d'authentification, jamais à moins de 3 secondes de la fin de sa période : l'API n'accepte
+ *  que le code de la période en cours, et un code tiré juste avant la fin arriverait dans la suivante. */
+async function code(secret: string) {
+  const left = 30_000 - (Date.now() % 30_000);
+  if (left < 3000) await new Promise((r) => setTimeout(r, left + 200));
+  return authenticator.generate(secret);
+}
 /** Numéro de la session portée par un cookie de la console. */
 const sidOf = (cookie: string) => (new JwtService().decode(cookie.split('=')[1]) as { sid: string }).sid;
 /** Comme si 30 secondes étaient passées : le code suivant de l'application est accepté (un code ne sert qu'une fois). */
@@ -74,7 +80,7 @@ async function firstLogin(identifier: string, temporaryPassword: string): Promis
   expect(cookieOf(p)).toBe('');
   const s = await gp('post', '/auth/first-login/2fa/setup', undefined, { token: p.body.token });
   expect(s.status).toBe(201);
-  const e = await gp('post', '/auth/first-login/2fa/enable', undefined, { token: p.body.token, setupToken: s.body.setupToken, code: code(s.body.secret) });
+  const e = await gp('post', '/auth/first-login/2fa/enable', undefined, { token: p.body.token, setupToken: s.body.setupToken, code: await code(s.body.secret) });
   expect(e.status).toBe(201);
   return { identifier, password: PASSWORD, secret: s.body.secret, cookie: cookieOf(e), codes: e.body.recoveryCodes };
 }
@@ -85,7 +91,7 @@ async function signIn(a: Account) {
   const l = await gp('post', '/auth/login', undefined, { identifier: a.identifier, password: a.password });
   expect(l.status).toBe(201);
   expect(l.body.step).toBe('code');
-  const c = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: code(a.secret) });
+  const c = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: await code(a.secret) });
   expect(c.status).toBe(201);
   a.cookie = cookieOf(c);
   return a.cookie;
@@ -176,7 +182,7 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
   it('le cookie de session est protégé et réservé à la console', async () => {
     await nextWindow(accounts.general.id);
     const l = await gp('post', '/auth/login', undefined, { identifier: accounts.general.identifier, password: PASSWORD });
-    const c = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: code(accounts.general.secret) });
+    const c = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: await code(accounts.general.secret) });
     const raw = (c.headers['set-cookie'] as unknown as string[]).find((x) => x.startsWith('erp_gt='))!;
     expect(raw).toMatch(/HttpOnly/i);
     expect(raw).toMatch(/SameSite=Strict/i);
@@ -201,14 +207,16 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
     expect(cookieOf(wrong)).toBe('');
     expect((await admin.groupAccount.findUniqueOrThrow({ where: { id: a.id } })).failedLogins).toBe(1);
     // Bon code : session ; le même code rejoué aussitôt est refusé.
-    const ok = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: code(a.secret) });
+    const k = await code(a.secret);
+    const ok = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: k });
     expect(ok.status).toBe(201);
-    const again = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: code(a.secret) });
+    const again = await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: k });
     expect(again.status).toBe(401);
     // Deux envois simultanés du même code : une seule session.
     await unlock(a.id);
     const l2 = await gp('post', '/auth/login', undefined, { identifier: a.identifier, password: a.password });
-    const twice = await Promise.all([1, 2].map(() => gp('post', '/auth/code', undefined, { challenge: l2.body.challenge, code: code(a.secret) })));
+    const k2 = await code(a.secret);
+    const twice = await Promise.all([1, 2].map(() => gp('post', '/auth/code', undefined, { challenge: l2.body.challenge, code: k2 })));
     expect(twice.map((r) => r.status).sort()).toEqual([201, 401]);
     a.cookie = cookieOf(twice.find((r) => r.status === 201)!);
     await unlock(a.id);
@@ -226,7 +234,7 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
     expect(row.lockedUntil!.getTime()).toBeGreaterThan(Date.now() + 14 * 60_000);
     // Bloqué : le bon mot de passe et le bon code ne passent plus ; sa session ouverte est fermée.
     await nextWindow(f.id);
-    expect((await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: code(f.secret) })).status).toBe(401);
+    expect((await gp('post', '/auth/code', undefined, { challenge: l.body.challenge, code: await code(f.secret) })).status).toBe(401);
     expect((await gp('post', '/auth/login', undefined, { identifier: f.identifier, password: f.password })).status).toBe(401);
     expect((await gp('get', '/auth/me', f.cookie)).status).toBe(401);
     const actions = (await journal(ids.groupA)).filter((x) => x.actorId === f.id).map((x) => x.action);
@@ -263,7 +271,7 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
     expect(s.status).toBe(201);
     // Le jeton d'un autre compte ne sert à rien.
     expect((await gp('post', '/auth/2fa/setup', accounts.general.cookie, { reconfigureToken: r.body.reconfigureToken })).status).toBe(403);
-    const e = await gp('post', '/auth/2fa/enable', f.cookie, { setupToken: s.body.setupToken, code: code(s.body.secret) });
+    const e = await gp('post', '/auth/2fa/enable', f.cookie, { setupToken: s.body.setupToken, code: await code(s.body.secret) });
     expect(e.status).toBe(201);
     expect(e.body.recoveryCodes).toHaveLength(10);
     // L'ancienne application et les anciens codes ne servent plus.
@@ -272,7 +280,7 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
     f.codes = e.body.recoveryCodes;
     await unlock(f.id);
     const l3 = await gp('post', '/auth/login', undefined, { identifier: f.identifier, password: f.password });
-    expect((await gp('post', '/auth/code', undefined, { challenge: l3.body.challenge, code: code(oldSecret) })).status).toBe(401);
+    expect((await gp('post', '/auth/code', undefined, { challenge: l3.body.challenge, code: await code(oldSecret) })).status).toBe(401);
     expect((await gp('post', '/auth/recovery', undefined, { challenge: l3.body.challenge, code: oldCodes[1] })).status).toBe(401);
     expect((await gp('post', '/auth/recovery', undefined, { challenge: l3.body.challenge, code: f.codes[0] })).status).toBe(201);
     await unlock(f.id);
@@ -284,7 +292,7 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
     await nextWindow(f.id);
     expect((await gp('post', '/auth/recovery-codes', f.cookie, { code: '000000' })).status).toBe(403);
     await unlock(f.id);
-    const regen = await gp('post', '/auth/recovery-codes', f.cookie, { code: code(f.secret) });
+    const regen = await gp('post', '/auth/recovery-codes', f.cookie, { code: await code(f.secret) });
     expect(regen.status).toBe(201);
     expect(await admin.groupRecoveryCode.count({ where: { accountId: f.id, usedAt: null } })).toBe(10);
     expect(await admin.groupRecoveryCode.count({ where: { accountId: f.id } })).toBe(10);
@@ -306,7 +314,7 @@ describe('Lot G2 · connexion : double authentification obligatoire (T-08)', () 
     // Le jeton suivant fonctionne ; la double authentification est de nouveau obligatoire.
     const s = await gp('post', '/auth/first-login/2fa/setup', undefined, { token: pw.body.token });
     expect(s.status).toBe(201);
-    const e = await gp('post', '/auth/first-login/2fa/enable', undefined, { token: pw.body.token, setupToken: s.body.setupToken, code: code(s.body.secret) });
+    const e = await gp('post', '/auth/first-login/2fa/enable', undefined, { token: pw.body.token, setupToken: s.body.setupToken, code: await code(s.body.secret) });
     expect(e.status).toBe(201);
     accounts.pedago = { ...p, password: 'Autre-Mot-De-Passe-2026', secret: s.body.secret, cookie: cookieOf(e), codes: e.body.recoveryCodes };
     // Mots de passe trop faibles refusés à la première connexion.
@@ -452,7 +460,7 @@ describe('Lot G2 · comptes gérés par le responsable général', () => {
     expect((await gp('post', '/accounts', a.cookie, { ...body, code: '000000' })).status).toBe(403);
     expect((await admin.groupAccount.findUniqueOrThrow({ where: { id: a.id } })).failedLogins).toBe(1);
     await nextWindow(a.id);
-    const r = await gp('post', '/accounts', a.cookie, { ...body, code: code(a.secret) });
+    const r = await gp('post', '/accounts', a.cookie, { ...body, code: await code(a.secret) });
     expect(r.status).toBe(201);
     expect(r.headers['cache-control']).toContain('no-store');
     expect(r.body.account).toMatchObject({ role: 'GENERAL', pendingFirstLogin: true, groupId: ids.groupA });
@@ -484,7 +492,7 @@ describe('Lot G2 · comptes gérés par le responsable général', () => {
     await platformAccount('generalB', ids.groupB, 'GENERAL', 'Bernard');
     expect((await gp('patch', `/accounts/${accounts.generalB.id}`, a.cookie, { active: false })).status).toBe(404);
     await nextWindow(a.id);
-    expect((await gp('post', `/accounts/${accounts.generalB.id}/reset`, a.cookie, { code: code(a.secret) })).status).toBe(404);
+    expect((await gp('post', `/accounts/${accounts.generalB.id}/reset`, a.cookie, { code: await code(a.secret) })).status).toBe(404);
     expect((await gp('get', '/auth/me', accounts.generalB.cookie)).status).toBe(200);
     await unlock(a.id);
   });
@@ -514,7 +522,7 @@ describe('Lot G2 · comptes gérés par le responsable général', () => {
     await unlock(a.id);
     expect((await gp('post', `/accounts/${p.id}/reset`, a.cookie, { code: '000000' })).status).toBe(403);
     await unlock(a.id);
-    const r = await gp('post', `/accounts/${p.id}/reset`, a.cookie, { code: code(a.secret) });
+    const r = await gp('post', `/accounts/${p.id}/reset`, a.cookie, { code: await code(a.secret) });
     expect(r.status).toBe(201);
     expect(r.body.account).toMatchObject({ pendingFirstLogin: true, totpEnabled: false });
     expect((await gp('get', '/auth/me', p.cookie)).status).toBe(401);
