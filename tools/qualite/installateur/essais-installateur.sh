@@ -5,7 +5,8 @@
 #   - une erreur de récupération du code (modification locale en conflit, dépôt injoignable) ARRÊTE la mise à jour
 #     avant toute reconstruction (décision D3 du 16 novembre 2026) ;
 #   - un retour arrière (version fixée par « git checkout <commit> ») garde cette version et reconstruit ;
-#   - l'étape « créer votre compte Super Admin » n'est proposée que s'il n'existe encore aucun compte.
+#   - l'étape « créer votre compte Super Admin » n'est proposée que s'il n'existe encore aucun compte ;
+#   - les images sont construites avec le commit installé (CAHIORA_COMMIT), que controle-production.sh vérifie ensuite.
 # Rien n'est installé ni démarré : aucun appel réseau, aucun Docker réel.
 #
 # Usage : bash tools/qualite/installateur/essais-installateur.sh [chemin de installer-serveur.sh]
@@ -22,6 +23,8 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $*" >> "$JOURNAL"
+# Commit que l'installateur donne aux images de l'API et du site (contrôlé après la mise à jour par controle-production.sh).
+case "$*" in "compose up -d --build"*) echo "commit des images : ${CAHIORA_COMMIT:-absent}" >> "$JOURNAL" ;; esac
 case "$*" in
   *"SELECT count(*) FROM platform_admins"*) echo "${FAUX_ADMINS:-0}" ;;
   "compose exec -T postgres psql"*) cat > /dev/null ;;
@@ -97,6 +100,7 @@ lancer 2
 verifier "terminé sans erreur" test "$code" = 0
 verifier "code récupéré (v2)" est_en "$v2"
 verifier "services reconstruits" contient "compose up -d --build" "$JOURNAL"
+verifier "images marquées du commit installé (v2)" contient "commit des images : $v2" "$JOURNAL"
 verifier "site annoncé en ligne" contient "SITE EN LIGNE" "$tmp/sortie"
 verifier "pas d'étape Super Admin quand 2 comptes existent" sans "créer votre compte Super Admin" "$tmp/sortie"
 
@@ -126,6 +130,7 @@ lancer 2
 verifier "terminé sans erreur" test "$code" = 0
 verifier "la version choisie (v1) est gardée" est_en "$v1"
 verifier "services reconstruits sur cette version" contient "compose up -d --build" "$JOURNAL"
+verifier "images marquées du commit fixé (v1)" contient "commit des images : $v1" "$JOURNAL"
 verifier "le retour arrière est annoncé" contient "Version fixée" "$tmp/sortie"
 verifier "la commande pour reprendre les mises à jour est donnée" contient "git checkout principale" "$tmp/sortie"
 git -C "$tmp/serveur" checkout -q principale

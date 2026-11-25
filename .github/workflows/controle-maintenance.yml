@@ -1,0 +1,45 @@
+# Essais de controle-production.sh et de maintenance.sh (demande de Dankou du 24 novembre 2026) sur un banc Docker :
+# PostgreSQL 16 avec les vraies migrations, Redis, la vraie image de Caddy et le Caddyfile du code, données fictives.
+# Rien n'est envoyé vers le serveur de production.
+name: Contrôle et maintenance
+
+on:
+  push:
+    branches: ['claude/**', main, develop, 'feature/**', 'fix/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controle-maintenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  banc:
+    name: Contrôle de la production et fenêtre de maintenance (banc Docker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # Historique complet : le banc part de la version en ligne (fcb84eb) puis passe au commit essayé.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Essais des deux scripts (points 1 à 9)
+        env:
+          SORTIES: ${{ runner.temp }}/sorties-controle
+        run: bash tools/qualite/controle/essais-controle.sh
+
+      - name: Sortie de chaque lancement en cas d'échec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sorties-controle
+          path: ${{ runner.temp }}/sorties-controle
+          retention-days: 7

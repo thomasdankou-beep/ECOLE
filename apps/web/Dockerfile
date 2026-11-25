@@ -20,4 +20,8 @@ COPY --from=build /repo/apps/web apps/web
 WORKDIR /repo/apps/web
 USER node
 EXPOSE 3000
+# Commit d'où vient cette image (installer-serveur.sh le donne) : controle-production.sh vérifie, après une mise à jour,
+# que la version en marche est bien le commit attendu (demande de Dankou du 24 novembre 2026). « inconnu » sinon.
+ARG CAHIORA_COMMIT=inconnu
+ENV CAHIORA_COMMIT=$CAHIORA_COMMIT
 CMD ["npx", "next", "start", "-p", "3000"]

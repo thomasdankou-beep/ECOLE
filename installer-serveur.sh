@@ -97,7 +97,11 @@ if [ -n "$domaine" ]; then
   echo "Site configuré en HTTPS sur $domaine (chaque école sur <identifiant>.$domaine)."
 fi
 
-echo "Construction et démarrage des services (10 à 15 minutes la première fois)..."
+# Commit inscrit dans les images de l'API et du site : après la mise à jour, controle-production.sh vérifie que la version
+# réellement en marche est ce commit, et le commit attendu (demande de Dankou du 24 novembre 2026).
+CAHIORA_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo inconnu)
+export CAHIORA_COMMIT
+echo "Construction et démarrage des services (10 à 15 minutes la première fois), commit $CAHIORA_COMMIT..."
 docker compose up -d postgres
 ./infra/postgres/role-plateforme.sh
 ./infra/postgres/roles-groupes.sh

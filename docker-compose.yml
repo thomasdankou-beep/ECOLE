@@ -33,7 +33,12 @@ services:
 
   api:
     <<: *journaux
-    build: { context: ., dockerfile: apps/api/Dockerfile }
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      # Commit inscrit dans l'image (installer-serveur.sh l'exporte) ; controle-production.sh le compare au commit attendu.
+      args:
+        CAHIORA_COMMIT: ${CAHIORA_COMMIT:-inconnu}
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
@@ -101,6 +106,7 @@ services:
         API_URL: http://api:4000
         NEXT_PUBLIC_TENANT: ${TENANT_SLUG-saint-kisito}
         NEXT_PUBLIC_DEMO: ${SHOW_DEMO_ACCOUNTS:-true}
+        CAHIORA_COMMIT: ${CAHIORA_COMMIT:-inconnu}
     restart: unless-stopped
     depends_on: [api]
 
