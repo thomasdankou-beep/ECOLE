@@ -1,9 +1,9 @@
 import { cahioraMessage as accessMessage } from './access';
 import { cahioraMessage as documentMessage } from './documents';
 import {
-  activeMeans, availableCredit, CANCEL_REFUSED, cancellationPlan, documentPayment, impute, losesPayment, matchesStatus, meansCode, meansError, meansOn, MeansVersion,
-  normalizedReference, OpenDocument, paymentError, PAYMENTS_LOCKED, paymentsUnlocked, receiptNumber, RECEIPT_MENTION, refundDecisionError, refundRequestError,
-  restoresAccess, transferError,
+  activeMeans, availableCredit, CANCEL_REFUSED, cancellationPlan, documentPayment, duplicateError, impute, losesPayment, matchesStatus, meansCode, meansError, meansOn,
+  MeansVersion, NewPayment, normalizedReference, OpenDocument, paymentError, PaymentTrace, PAYMENTS_LOCKED, paymentsUnlocked, receiptNumber, RECEIPT_MENTION,
+  refundDecisionError, refundRequestError, restoresAccess, SIMILAR_PAYMENT_DAYS, transferError,
 } from './payments-rules';
 
 /**
@@ -228,5 +228,89 @@ describe('Messages de la base rendus à l’écran', () => {
     expect(accessMessage(raised)).toBe('Un moyen de paiement porte déjà ce nom : modifiez-le plutôt');
     expect(documentMessage(raised)).toBe('un moyen de paiement porte déjà ce nom : modifiez-le plutôt');
     expect(accessMessage(new Error('Raw query failed. Code: `23505`. Message: `ERROR: duplicate key`'))).toBeNull();
+  });
+});
+
+describe('Ajustements G5d2-5 : doubles saisies après l’annulation d’un paiement', () => {
+  const SHA = (n: number) => n.toString(16).padStart(64, '0');
+  const trace = (over: Partial<PaymentTrace>): PaymentTrace => ({
+    id: 'p1', receiptNumber: 'PROV-REC-000001', tenantId: 'A', amount: 100_000, meansCode: 'MOMO', paidOn: '2027-08-10', transactionKey: 'TX-1',
+    proofSha256: SHA(1), cancelled: false, reenteredBy: null, ...over,
+  });
+  const MOTIF = 'Montant corrigé après la saisie annulée';
+  const next = (over: Partial<NewPayment> = {}): NewPayment => ({
+    tenantId: 'A', amount: 100_000, meansCode: 'MOMO', paidOn: '2027-08-10', transactionRef: 'tx-1', proofSha256: SHA(2), ...over,
+  });
+
+  it('une référence d’un paiement validé ne revient jamais (déjà vrai en G5d-2), même avec un motif', () => {
+    expect(duplicateError(next({ similarReason: 'Autre versement' }), [trace({})])).toEqual({
+      message: 'Cette référence de transaction est déjà enregistrée (reçu PROV-REC-000001) : un même paiement ne s’enregistre qu’une fois', needsReason: false,
+    });
+  });
+
+  it('la référence d’un paiement annulé ne revient que dans sa ressaisie, désignée', () => {
+    const cancelled = trace({ cancelled: true });
+    expect(duplicateError(next(), [cancelled])?.message).toBe(
+      'Cette référence est celle du paiement annulé du reçu PROV-REC-000001 : enregistrez la ressaisie de ce paiement en le désignant',
+    );
+    expect(duplicateError(next({ replacesPaymentId: 'p1', similarReason: MOTIF }), [cancelled])).toBeNull();
+  });
+
+  it('DS-7 A (24 novembre 2026) : toute ressaisie est justifiée par son motif', () => {
+    const cancelled = trace({ cancelled: true });
+    expect(duplicateError(next({ replacesPaymentId: 'p1' }), [cancelled])).toEqual({
+      message: 'Ressaisie d’un paiement annulé : donnez le motif de la ressaisie (5 à 300 caractères)', needsReason: true,
+    });
+    expect(duplicateError(next({ replacesPaymentId: 'p1', similarReason: 'non' }), [cancelled])?.message).toBe('Motif de la ressaisie : 5 à 300 caractères');
+    expect(duplicateError(next({ replacesPaymentId: 'p1', similarReason: MOTIF }), [cancelled])).toBeNull();
+  });
+
+  it('une ressaisie ne se fait qu’une fois, et seulement d’un paiement annulé', () => {
+    expect(duplicateError(next({ transactionRef: 'TX-9', replacesPaymentId: 'p1' }), [trace({ transactionKey: 'TX-0' })])?.message)
+      .toBe('Seul un paiement dont la saisie est annulée se ressaisit (reçu PROV-REC-000001)');
+    expect(duplicateError(next({ transactionRef: 'TX-9', replacesPaymentId: 'p1' }), [trace({ transactionKey: 'TX-0', cancelled: true, reenteredBy: 'PROV-REC-000002' })])?.message)
+      .toBe('Ce paiement annulé a déjà été ressaisi (reçu PROV-REC-000002) : une ressaisie ne se fait qu’une fois');
+    expect(duplicateError(next({ replacesPaymentId: 'inconnu' }), [])?.message).toBe('Paiement annulé à ressaisir introuvable');
+  });
+
+  it('établissement choisi par erreur : la ressaisie peut aller à un autre établissement', () => {
+    expect(duplicateError(next({ tenantId: 'B', replacesPaymentId: 'p1', proofSha256: SHA(1), similarReason: MOTIF }), [trace({ cancelled: true })])).toBeNull();
+  });
+
+  it('un même justificatif exige un motif, sauf pour la ressaisie du paiement qu’il justifiait', () => {
+    const other = trace({ transactionKey: 'TX-0', tenantId: 'Z', proofSha256: SHA(2) });
+    expect(duplicateError(next(), [other])).toEqual({
+      message: 'Ce justificatif est déjà joint au paiement du reçu PROV-REC-000001 : un même versement ne s’enregistre qu’une fois ; s’il justifie aussi un autre versement, donnez-en le motif',
+      needsReason: true,
+    });
+    expect(duplicateError(next({ similarReason: 'Relevé bancaire de deux virements' }), [other])).toBeNull();
+    expect(duplicateError(next({ replacesPaymentId: 'p1', similarReason: MOTIF }), [{ ...other, cancelled: true }])).toBeNull();
+  });
+
+  it('paiement semblable (même établissement, montant et moyen, à 3 jours près) : un motif est exigé', () => {
+    expect(SIMILAR_PAYMENT_DAYS).toBe(3);
+    const near = trace({ transactionKey: 'TX-0', proofSha256: SHA(3), paidOn: '2027-08-07' });
+    expect(duplicateError(next(), [near])).toEqual({
+      message: 'Paiement semblable déjà enregistré (reçu PROV-REC-000001 du 7 août 2027, même montant et même moyen) : s’il s’agit d’un autre versement, donnez-en le motif',
+      needsReason: true,
+    });
+    expect(duplicateError(next({ similarReason: 'Deuxième tranche, versée à part' }), [near])).toBeNull();
+    expect(duplicateError(next({ similarReason: 'oui' }), [near])?.message).toBe('Motif d’un autre versement : 5 à 300 caractères');
+  });
+
+  it('pas semblable : à plus de 3 jours, autre montant, autre moyen ou autre établissement', () => {
+    const base = { transactionKey: 'TX-0', proofSha256: SHA(3) };
+    expect(duplicateError(next(), [trace({ ...base, paidOn: '2027-08-06' })])).toBeNull();
+    expect(duplicateError(next(), [trace({ ...base, amount: 99_000 })])).toBeNull();
+    expect(duplicateError(next(), [trace({ ...base, meansCode: 'VIREMENT' })])).toBeNull();
+    expect(duplicateError(next(), [trace({ ...base, tenantId: 'B' })])).toBeNull();
+  });
+
+  it('un paiement annulé sans ressaisie reste semblable ; une fois ressaisi, il ne l’est plus', () => {
+    const cancelled = trace({ transactionKey: 'TX-0', proofSha256: SHA(3), cancelled: true });
+    expect(duplicateError(next(), [cancelled])?.message).toContain('saisie annulée sans ressaisie');
+    expect(duplicateError(next(), [{ ...cancelled, reenteredBy: 'PROV-REC-000002' }])).toBeNull();
+    // La ressaisie elle-même n'est pas « semblable » au paiement qu'elle remplace.
+    expect(duplicateError(next({ replacesPaymentId: 'p1', similarReason: MOTIF }), [cancelled])).toBeNull();
   });
 });

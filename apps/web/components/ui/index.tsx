@@ -142,9 +142,43 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
   );
 }
 
+/**
+ * Onglets en pastilles. Vérifiés le 24 novembre 2026 sur ordinateur, tablette et téléphone : à partir de la tablette, ils
+ * passent à la ligne et restent tous visibles ; au téléphone, ils défilent de côté, un fondu signale ceux qui dépassent et
+ * l'onglet choisi est ramené dans la vue (sans faire défiler la page).
+ */
 export function Chips<T extends string>({ value, onChange, options, label }: { value: T; onChange: (v: T) => void; options: { value: T; label: string }[]; label: string }) {
+  const ref = React.useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = React.useState({ left: false, right: false });
+  const measure = React.useCallback(() => {
+    const box = ref.current;
+    if (!box) return;
+    const next = { left: box.scrollLeft > 1, right: box.scrollLeft + box.clientWidth < box.scrollWidth - 1 };
+    setEdges((e) => (e.left === next.left && e.right === next.right ? e : next));
+  }, []);
+  React.useEffect(() => {
+    measure();
+    if (typeof ResizeObserver === 'undefined' || !ref.current) return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, [measure, options.length]);
+  React.useEffect(() => {
+    const box = ref.current;
+    const chip = box?.querySelector<HTMLElement>('[aria-pressed="true"]');
+    if (!box || !chip || box.scrollWidth <= box.clientWidth) return;
+    const b = box.getBoundingClientRect();
+    const c = chip.getBoundingClientRect();
+    if (c.left < b.left) box.scrollLeft -= b.left - c.left + 24;
+    else if (c.right > b.right) box.scrollLeft += c.right - b.right + 24;
+    measure();
+  }, [value, measure]);
+  const mask = edges.left || edges.right
+    ? `linear-gradient(to right, ${edges.left ? 'transparent, #000 24px' : '#000, #000'}, ${edges.right ? '#000 calc(100% - 24px), transparent' : '#000'})`
+    : undefined;
   return (
-    <div role="group" aria-label={label} className="flex gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none]">
+    <div ref={ref} role="group" aria-label={label} onScroll={measure} style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined}
+      className="flex gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none] md:flex-wrap md:overflow-visible">
       {options.map((o) => (
         <button
           key={o.value}
@@ -163,6 +197,16 @@ export function Chips<T extends string>({ value, onChange, options, label }: { v
 export function ErrorNote({ error }: { error: unknown }) {
   if (!error) return null;
   return <p role="alert" className="rounded-lg bg-bad-soft px-3 py-2 text-sm font-bold text-bad">{error instanceof Error ? error.message : String(error)}</p>;
+}
+
+/**
+ * Ce qui manque encore avant de valider un formulaire, sous son bouton désactivé (24 novembre 2026 : le bouton de
+ * validation reste désactivé tant que les informations obligatoires ne sont pas renseignées). Rien quand tout est là.
+ */
+export function Missing({ items }: { items: (string | false | null | undefined)[] }) {
+  const left = items.filter((x): x is string => !!x);
+  if (!left.length) return null;
+  return <p className="text-xs text-muted" aria-live="polite" data-testid="a-completer">À compléter : {left.join(', ')}.</p>;
 }
 
 // ---------------------------------------------------------------- Dialogue

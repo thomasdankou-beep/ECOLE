@@ -2,8 +2,11 @@
  * Service worker minimal : met en cache l'enveloppe de l'application et les images
  * pour un démarrage rapide sur réseau lent. Les données de l'API ne sont jamais mises en cache
  * (le mode hors ligne complet est prévu en V1.1, décision D6).
+ * 24 novembre 2026 : seules les réponses réussies (2xx) sont gardées. Une erreur (site en maintenance, mise à jour
+ * en cours) n'est jamais mise en cache à la place d'un fichier ; le nouveau nom du cache efface aussi, une fois,
+ * tout ce que l'ancienne version avait pu garder.
  */
-const CACHE = 'skg-v1';
+const CACHE = 'skg-v2';
 const SHELL = ['/', '/connexion', '/logo.png', '/icon-192.png'];
 
 self.addEventListener('install', (e) => {
@@ -18,7 +21,10 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
   if (url.pathname.startsWith('/_next/static/') || url.pathname.startsWith('/img/') || /\.(png|jpg|webp|svg|woff2)$/.test(url.pathname)) {
-    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return r; })));
+    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => {
+      if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }
+      return r;
+    })));
     return;
   }
   if (e.request.mode === 'navigate') {

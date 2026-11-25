@@ -2,15 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FileText, Paperclip, Plus } from 'lucide-react';
-import { Badge, Button, Card, Chips, Dialog, DialogContent, ErrorNote, Field, Input, Select, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Chips, Dialog, DialogContent, ErrorNote, Field, Input, Missing, Select, Textarea } from '@/components/ui';
 import { pf } from '@/lib/platform';
-import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { CodeField, frDate, money, need, ready, useSubmit } from './facturation-outils';
 
 /**
  * Factures et documents (lot G5c) : documents provisoires de l'abonnement et des prestations, jamais une facture fiscale
  * (lot G5f) ; prochain document de chaque client, ou la décision qu'il attend ; exclusions qui touchent un document émis,
  * décidées par le Super Admin (D-G5-13 B), avec l'avoir provisoire qui suit ; devis et proformas de prestations du
  * catalogue (lot G5g). Chaque opération demande un code actuel de l'application d'authentification. Aucun paiement ici.
+ * Ajustements du 20 novembre 2026 : échéance explicite ou « à fixer » pour chaque document à payer (G5c-1), objectif de
+ * 7 jours ouvrés pour décider une exclusion, avec alerte et sans acceptation d'office (G5c-7), lien entre chaque avoir,
+ * l'exclusion et le document d'origine (G5c-9).
+ * Lecture 1 du 24 novembre 2026 (soir) : passé le délai de 30 jours, le Super Admin peut rouvrir exceptionnellement la
+ * demande pour une inscription (dérogation motivée, confirmée par son code, motif au journal de la plateforme seulement).
  */
 
 type Kind = 'SUBSCRIPTION' | 'CREDIT_NOTE' | 'SERVICE_QUOTE' | 'SERVICE_PROFORMA';
@@ -35,8 +40,31 @@ type Exclusion = {
   yearLabel: string; matricule: string; className: string | null; cancelReason: string | null; justification: string; fileUrl: string | null; requestedByName: string;
   requestedAt: string; decidedByName: string | null; decidedAt: string | null; decisionNote: string | null; documentDate: string | null; requestDeadline: string | null;
   preview: Preview | null;
+  /** G5b-2 (24 novembre 2026) : contestation d'un élève parti avant le comptage (date du départ), sinon exclusion. */
+  contest: boolean; departureDate: string | null; enrollmentStatus: string | null; kindLabel: string;
+  /** G5c-9 : premier document qui a demandé l'élève, et l'avoir émis à la validation. */
+  origin: { id: string; reference: string; issueDate: string } | null;
+  creditNote: { id: string; reference: string; total: number } | null;
+  /** G5c-7 : objectif de traitement, en jours ouvrés ; `late` tant que la demande attend au-delà. */
+  target: { workingDays: number; until: string; late: boolean };
+  /** Lecture 1 (24 novembre 2026, soir) : demande faite après le délai, sous une dérogation exceptionnelle. */
+  derogation: { id: string; grantedAt: string } | null;
 };
-type Exclusions = { mention: string; waiting: number; exclusions: Exclusion[] };
+type Exclusions = { mention: string; waiting: number; late: number; targetNote: string; exclusions: Exclusion[] };
+/** Lecture 1 : dérogation au délai de 30 jours, pour une inscription ; le motif ne quitte jamais la console. */
+type Derogation = {
+  id: string; tenant: { id: string; name: string }; matricule: string; yearLabel: string; documentDate: string | null; until: string; reason: string;
+  grantedByName: string; grantedAt: string; state: 'OPEN' | 'USED' | 'EXPIRED';
+  request: { id: string; status: Exclusion['status']; contest: boolean; requestedAt: string } | null;
+};
+type Derogations = { note: string; derogations: Derogation[] };
+/** Exclusion inscrite dans l'avoir qu'elle a produit (G5c-9). */
+type CreditExclusion = {
+  correctionId: string; matricule: string | null; countKind: string | null; countDate: string | null; requestedAt: string; decidedAt: string | null;
+  originDocumentId: string; originReference: string; originIssueDate: string | null;
+  /** G5b-2 (24 novembre 2026) : date d'un départ contesté et accepté. */
+  departureDate?: string | null;
+};
 type Line = {
   id: string; position: number; tenant: { id: string; name: string }; label: string; amount: number; countKind: string | null; referenceDate: string | null; pupils: number | null;
   pupilsChange: number | null; pricePerPupil: number | null; minimum: number | null; minimumApplied: boolean | null; fullYear: number | null; shareMonths: number | null;
@@ -46,31 +74,41 @@ type Line = {
 type Detail = Omit<Doc, 'establishments' | 'tenantIds' | 'title' | 'relatedDocumentId'> & {
   data: Record<string, unknown> | null; createdByKind: string; related: { id: string; reference: string; kind: Kind } | null;
   relatedBy: { id: string; reference: string; kind: Kind; total: number }[]; lines: Line[];
+  /** G5c-9 : exclusions dont ce document est le document d'origine, avec l'avoir de chacune. */
+  exclusionOrigins: {
+    correctionId: string; tenantId: string; linkedAt: string; matricule: string | null; decidedAt: string | null; creditNote: { id: string; reference: string; total: number } | null;
+    departureDate: string | null;
+  }[];
 };
-type Establishment = { id: string; name: string; currency: string; group: string };
+type Establishment = { id: string; name: string; currency: string; group: string; commercialStatus: 'TEST' | 'CLIENT' };
 type Price = { id: string; name: string; amount: number | null; catalogAmount: number | null; currency: string; basis: string; label: string };
-type Open = { kind: 'decide'; x: Exclusion } | { kind: 'detail'; id: string } | { kind: 'new' };
+type Open = { kind: 'decide'; x: Exclusion } | { kind: 'detail'; id: string } | { kind: 'new' } | { kind: 'derogation' };
 
 const NOT_OFFERED = ['NOT_IN_CATALOG', 'INACTIVE', 'MISSING'];
 const KIND_TONE: Record<Kind, 'info' | 'good' | 'warn' | 'accent'> = { SUBSCRIPTION: 'info', CREDIT_NOTE: 'good', SERVICE_QUOTE: 'accent', SERVICE_PROFORMA: 'warn' };
 const PLAN_TONE = { READY: 'good', CLOSED: 'warn', NOTHING: 'info' } as const;
 const STATUS: Record<Exclusion['status'], [string, 'warn' | 'good' | 'bad']> = { PENDING: ['À décider', 'warn'], VALIDATED: ['Validée', 'good'], REFUSED: ['Refusée', 'bad'] };
+const DEROGATION_STATE: Record<Derogation['state'], [string, 'good' | 'info' | 'warn']> = { OPEN: ['Ouverte', 'good'], USED: ['Utilisée', 'info'], EXPIRED: ['Expirée, non utilisée', 'warn'] };
 const dateTime = (d: string) => new Date(d).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' });
 const pupils = (n: number) => `${n} élève${n > 1 ? 's' : ''}`;
 const share = (y: Preview['year']) => (y?.share ? `, part ${y.share.months}/${y.share.of}` : '');
+/** G5c-1 : un document à payer sans échéance (complément ou proforma) attend le délai de ses conditions. */
+const dueToBeFixed = (x: Pick<Doc, 'kind' | 'total' | 'dueDate'>) => (x.kind === 'SUBSCRIPTION' || x.kind === 'SERVICE_PROFORMA') && x.total > 0 && !x.dueDate;
 
 export function Documents() {
   const [list, setList] = useState<List | null>(null);
   const [ex, setEx] = useState<Exclusions | null>(null);
+  const [dg, setDg] = useState<Derogations | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [open, setOpen] = useState<Open | null>(null);
   const load = useCallback(() => {
     pf<List>('GET', '/billing/documents').then(setList).catch(setError);
     pf<Exclusions>('GET', '/billing/exclusions').then(setEx).catch(setError);
+    pf<Derogations>('GET', '/billing/derogations').then(setDg).catch(setError);
   }, []);
   useEffect(load, [load]);
   if (error) return <ErrorNote error={error} />;
-  if (!list || !ex) return null;
+  if (!list || !ex || !dg) return null;
   const done = () => { setOpen(null); load(); };
   const pending = ex.exclusions.filter((x) => x.status === 'PENDING');
   const decided = ex.exclusions.filter((x) => x.status !== 'PENDING');
@@ -89,18 +127,29 @@ export function Documents() {
 
       <Card className="grid gap-3">
         <div>
-          <h3 className="font-bold">Exclusions à décider {pending.length > 0 && <Badge tone="warn">{pending.length}</Badge>}</h3>
-          <p className="text-sm text-muted">Une inscription annulée pour erreur de saisie, déjà demandée par un document émis : Cahiora décide (D-G5-13 B). Validée, elle donne un avoir provisoire si le montant de l’année baisse ; au minimum annuel, rien ne change. Jamais le nom de l’élève ici.</p>
+          <h3 className="font-bold">Exclusions et contestations à décider {pending.length > 0 && <Badge tone="warn">{pending.length}</Badge>} {ex.late > 0 && <Badge tone="bad">{ex.late} en retard</Badge>}</h3>
+          <p className="text-sm text-muted">Une inscription annulée pour erreur de saisie, ou un élève parti avant le jour du comptage qui le compte (contestation de la direction), déjà demandé par un document émis : Cahiora décide (D-G5-13 B). Validée, la demande donne un avoir provisoire si le montant de l’année baisse ; au minimum annuel, rien ne change. Jamais le nom de l’élève ici.</p>
+          <p className="mt-1 text-sm">{ex.targetNote} Passé ce délai, une alerte s’affiche dans la vue d’ensemble.</p>
         </div>
         {pending.length === 0 ? <p className="text-sm text-muted">Aucune demande en attente.</p> : (
-          <ul className="grid gap-2" aria-label="Exclusions à décider">
+          <ul className="grid gap-2" aria-label="Exclusions et contestations à décider">
             {pending.map((x) => (
               <li key={x.id} className="grid gap-1 rounded-lg border border-line p-3 text-sm">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <span className="min-w-0"><b>{x.tenant.name}</b><span className="block text-muted">Inscription {x.matricule}{x.className ? ` · ${x.className}` : ''}</span></span>
-                  <Badge tone="warn">À décider</Badge>
+                  <span className="flex flex-wrap gap-1"><Badge tone={x.contest ? 'brand' : 'info'}>{x.contest ? 'Contestation de départ' : 'Exclusion'}</Badge>{x.derogation && <Badge tone="accent">Hors délai, sous dérogation</Badge>}{x.target.late && <Badge tone="bad">Objectif dépassé</Badge>}<Badge tone="warn">À décider</Badge></span>
                 </div>
                 <span>{x.countLabel} du {frDate(x.referenceDate)} · document du {frDate(x.documentDate)} · demandée le {dateTime(x.requestedAt)} par {x.requestedByName}</span>
+                {x.derogation && <span>Demandée après le délai de 30 jours, sous la dérogation exceptionnelle accordée le {dateTime(x.derogation.grantedAt)} (motif dans « Dérogations exceptionnelles » ci-dessous).</span>}
+                {x.contest && <span>Départ le <b>{frDate(x.departureDate)}</b>{x.enrollmentStatus === 'TRANSFERRED' ? ' (transfert)' : ''}, avant le jour du comptage qui compte l’élève : il n’aurait pas dû être compté.</span>}
+                <span className={x.target.late ? 'font-bold text-bad' : 'text-muted'}>
+                  À décider au plus tard le {frDate(x.target.until)} (objectif de {x.target.workingDays} jours ouvrés){x.target.late ? ' : objectif dépassé, aucune acceptation d’office' : ''}
+                </span>
+                {x.origin && (
+                  <span className="text-xs text-muted">
+                    Document d’origine : <button type="button" className="font-mono font-bold text-brand underline" onClick={() => setOpen({ kind: 'detail', id: x.origin!.id })}>{x.origin.reference}</button> du {frDate(x.origin.issueDate)}
+                  </span>
+                )}
                 <PreviewText p={x.preview} currency={x.currency} />
                 <div className="pt-1"><Button size="sm" onClick={() => setOpen({ kind: 'decide', x })} aria-label={`Décider : inscription ${x.matricule}, ${x.tenant.name}`}>Décider</Button></div>
               </li>
@@ -113,12 +162,42 @@ export function Documents() {
             <ul className="mt-2 grid gap-2">
               {decided.map((x) => (
                 <li key={x.id} className="grid gap-0.5 rounded-lg bg-sunk p-2">
-                  <span className="flex flex-wrap items-center justify-between gap-2"><b>{x.tenant.name} · {x.matricule}</b><Badge tone={STATUS[x.status][1]}>{STATUS[x.status][0]}</Badge></span>
+                  <span className="flex flex-wrap items-center justify-between gap-2"><b>{x.tenant.name} · {x.matricule}{x.contest ? ` · contestation (départ le ${frDate(x.departureDate)})` : ''}{x.derogation ? ' · hors délai, sous dérogation' : ''}</b><Badge tone={STATUS[x.status][1]}>{STATUS[x.status][0]}</Badge></span>
                   <span className="text-xs text-muted">Le {x.decidedAt ? dateTime(x.decidedAt) : '—'} par {x.decidedByName}{x.decisionNote ? ` : « ${x.decisionNote} »` : ''}</span>
+                  {(x.origin || x.creditNote) && (
+                    <span className="flex flex-wrap gap-x-3 text-xs" aria-label={`Traçabilité de l’exclusion ${x.matricule}`}>
+                      {x.origin && <span>Document d’origine : <button type="button" className="font-mono font-bold text-brand underline" onClick={() => setOpen({ kind: 'detail', id: x.origin!.id })}>{x.origin.reference}</button></span>}
+                      {x.creditNote
+                        ? <span>Avoir : <button type="button" className="font-mono font-bold text-brand underline" onClick={() => setOpen({ kind: 'detail', id: x.creditNote!.id })}>{x.creditNote.reference}</button> (− {money(x.creditNote.total, x.currency)})</span>
+                        : x.status === 'VALIDATED' && <span className="text-muted">Aucun avoir (montant de l’année inchangé)</span>}
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
           </details>
+        )}
+      </Card>
+
+      <Card className="grid gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h3 className="font-bold">Dérogations exceptionnelles au délai de 30 jours {dg.derogations.some((d) => d.state === 'OPEN') && <Badge tone="good">{dg.derogations.filter((d) => d.state === 'OPEN').length} ouverte{dg.derogations.filter((d) => d.state === 'OPEN').length > 1 ? 's' : ''}</Badge>}</h3>
+            <p className="text-sm text-muted">{dg.note}</p>
+          </div>
+          <Button variant="outline" onClick={() => setOpen({ kind: 'derogation' })}><Plus className="size-4" /> Accorder une dérogation</Button>
+        </div>
+        {dg.derogations.length === 0 ? <p className="text-sm text-muted">Aucune dérogation accordée.</p> : (
+          <ul className="grid gap-2" aria-label="Dérogations au délai de 30 jours">
+            {dg.derogations.map((d) => (
+              <li key={d.id} className="grid gap-0.5 rounded-lg bg-sunk p-2 text-sm">
+                <span className="flex flex-wrap items-start justify-between gap-2"><b className="min-w-0">{d.tenant.name} · inscription {d.matricule} · année {d.yearLabel}</b><Badge tone={DEROGATION_STATE[d.state][1]}>{DEROGATION_STATE[d.state][0]}</Badge></span>
+                <span>Document du {frDate(d.documentDate)} · délai rouvert jusqu’au <b>{frDate(d.until)}</b> inclus</span>
+                <span className="text-xs text-muted">Accordée le {dateTime(d.grantedAt)} par {d.grantedByName} : « {d.reason} »</span>
+                {d.request && <span className="text-xs">{d.request.contest ? 'Contestation' : 'Exclusion'} demandée le {dateTime(d.request.requestedAt)} : <b>{STATUS[d.request.status][0].toLowerCase()}</b></span>}
+              </li>
+            ))}
+          </ul>
         )}
       </Card>
 
@@ -159,7 +238,7 @@ export function Documents() {
             {list.documents.map((x) => (
               <li key={x.id} className="grid gap-1 rounded-lg border border-line p-3 text-sm md:grid-cols-[minmax(0,1.4fr)_minmax(0,1.6fr)_auto_auto] md:items-center md:gap-3">
                 <span className="min-w-0"><Badge tone={KIND_TONE[x.kind]}>{x.label}</Badge><span className="mt-1 block font-mono text-xs">{x.reference}</span></span>
-                <span className="min-w-0"><b>{x.group.name}</b><span className="block text-xs text-muted">Le {frDate(x.issueDate)}{x.dueDate ? ` · échéance le ${frDate(x.dueDate)}` : ''}{x.yearLabel ? ` · année ${x.yearLabel}` : ''}</span></span>
+                <span className="min-w-0"><b>{x.group.name}</b><span className="block text-xs text-muted">Le {frDate(x.issueDate)}{x.dueDate ? ` · échéance le ${frDate(x.dueDate)}` : dueToBeFixed(x) ? ' · échéance à fixer' : ''}{x.yearLabel ? ` · année ${x.yearLabel}` : ''}</span></span>
                 <b className="md:text-right">{x.kind === 'CREDIT_NOTE' ? '− ' : ''}{money(x.total, x.currency)}</b>
                 <Button size="sm" variant="outline" onClick={() => setOpen({ kind: 'detail', id: x.id })} aria-label={`Voir ${x.label} ${x.reference}`}><FileText className="size-4" /> Voir</Button>
               </li>
@@ -172,6 +251,7 @@ export function Documents() {
         {open?.kind === 'decide' && <DecideDialog x={open.x} done={done} />}
         {open?.kind === 'detail' && <DetailDialog id={open.id} />}
         {open?.kind === 'new' && <ServiceDocumentDialog docs={list.documents} done={done} />}
+        {open?.kind === 'derogation' && <DerogationDialog docs={list.documents} done={done} />}
       </Dialog>
     </div>
   );
@@ -201,9 +281,12 @@ function DecideDialog({ x, done }: { x: Exclusion; done: () => void }) {
     return submit(() => pf('POST', `/billing/exclusions/${x.id}/decision`, { tenantId: x.tenant.id, decision, note: note.trim() || undefined, code }));
   };
   return (
-    <DialogContent title={`Exclusion : inscription ${x.matricule}`} description={`${x.tenant.name} · ${x.countLabel} du ${frDate(x.referenceDate)}, déjà demandée par le document du ${frDate(x.documentDate)}.`}>
+    <DialogContent title={`${x.contest ? 'Contestation de départ' : 'Exclusion'} : inscription ${x.matricule}`} description={`${x.tenant.name} · ${x.countLabel} du ${frDate(x.referenceDate)}, déjà demandée par le document du ${frDate(x.documentDate)}.`}>
       <div className="grid gap-3 text-sm">
-        <p className="rounded-lg bg-sunk p-2">Annulation : « {x.cancelReason ?? '—'} »<br />Justification : « {x.justification} »</p>
+        <p className="rounded-lg bg-sunk p-2">
+          {x.contest ? <>Départ le <b>{frDate(x.departureDate)}</b>, avant le jour du comptage qui compte l’élève{x.enrollmentStatus === 'TRANSFERRED' ? ' (transfert)' : ''}.</> : <>Annulation : « {x.cancelReason ?? '—'} »</>}
+          <br />Justification : « {x.justification} »
+        </p>
         {x.fileUrl && <a className="inline-flex items-center gap-1 font-bold text-brand underline" href={x.fileUrl} target="_blank" rel="noreferrer"><Paperclip className="size-4" /> Voir le justificatif</a>}
         <PreviewText p={x.preview} currency={x.currency} />
         <Field label="Motif de la décision" hint="Obligatoire pour un refus ; la direction le lit.">
@@ -212,9 +295,10 @@ function DecideDialog({ x, done }: { x: Exclusion; done: () => void }) {
         <CodeField value={code} onChange={setCode} />
         <ErrorNote error={local ?? error} />
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => send('VALIDATED')} loading={busy} disabled={code.length !== 6}>Valider l’exclusion</Button>
-          <Button variant="outline" onClick={() => send('REFUSED')} disabled={busy || code.length !== 6}>Refuser</Button>
+          <Button onClick={() => send('VALIDATED')} loading={busy} disabled={code.length !== 6}>{x.contest ? 'Accepter la contestation' : 'Valider l’exclusion'}</Button>
+          <Button variant="outline" onClick={() => send('REFUSED')} disabled={busy || code.length !== 6 || note.trim().length < 5}>Refuser</Button>
         </div>
+        <Missing items={[need.code(code), note.trim().length < 5 && 'pour refuser, le motif de la décision (5 caractères au moins)']} />
         <p className="text-xs text-muted">Décision définitive, datée et inscrite dans les journaux ; l’avoir éventuel est émis dans la même opération. Aucun remboursement automatique.</p>
       </div>
     </DialogContent>
@@ -229,11 +313,28 @@ function DetailDialog({ id }: { id: string }) {
   if (!d) return <DialogContent title="Document"><p className="text-sm text-muted">Chargement…</p></DialogContent>;
   const data = d.data ?? {};
   const info = (k: string) => (typeof data[k] === 'string' ? (data[k] as string) : null);
+  const exclusion = (data.exclusion ?? null) as CreditExclusion | null;
   return (
     <DialogContent title={`${d.label} ${d.reference}`} description={`${d.group.name} · émis le ${frDate(d.issueDate)} par ${d.createdByName}`}>
       <div className="grid gap-3 text-sm">
         <p className="rounded-lg bg-warn-soft p-2 font-bold">{info('mention')}</p>
-        {d.related && <p>Document lié : {d.related.reference}</p>}
+        {d.related && <p>{d.kind === 'CREDIT_NOTE' ? 'Document corrigé' : 'Document lié'} : {d.related.reference}</p>}
+        {exclusion && (
+          <p className="rounded-lg bg-sunk p-2" aria-label="Exclusion de cet avoir">
+            {exclusion.departureDate ? 'Contestation acceptée pour' : 'Exclusion de'} l’inscription <b>{exclusion.matricule ?? '—'}</b>{exclusion.departureDate ? ` (départ le ${frDate(exclusion.departureDate)}, avant le comptage)` : ''}, demandée le {dateTime(exclusion.requestedAt)}{exclusion.decidedAt ? `, validée le ${dateTime(exclusion.decidedAt)}` : ''}.
+            <span className="block">Document d’origine : <b className="font-mono">{exclusion.originReference}</b>{exclusion.originIssueDate ? ` du ${frDate(exclusion.originIssueDate)}` : ''}.</span>
+          </p>
+        )}
+        {d.exclusionOrigins.length > 0 && (
+          <div className="grid gap-1 rounded-lg bg-sunk p-2" aria-label="Exclusions venues de ce document">
+            <b>Document d’origine de {d.exclusionOrigins.length} exclusion{d.exclusionOrigins.length > 1 ? 's' : ''} validée{d.exclusionOrigins.length > 1 ? 's' : ''}</b>
+            {d.exclusionOrigins.map((o) => (
+              <span key={o.correctionId} className="text-xs">
+                Inscription {o.matricule ?? '—'}{o.departureDate ? ` (contestation : départ le ${frDate(o.departureDate)})` : ''}{o.decidedAt ? `, validée le ${dateTime(o.decidedAt)}` : ''} : {o.creditNote ? `avoir ${o.creditNote.reference} (− ${money(o.creditNote.total, d.currency)})` : 'aucun avoir (montant de l’année inchangé)'}
+              </span>
+            ))}
+          </div>
+        )}
         {d.relatedBy.length > 0 && <p>Repris par : {d.relatedBy.map((r) => `${r.reference} (${money(r.total, d.currency)})`).join(', ')}</p>}
         <ul className="grid gap-2" aria-label="Lignes du document">
           {d.lines.map((l) => (
@@ -253,6 +354,7 @@ function DetailDialog({ id }: { id: string }) {
         {d.dueDate && <p>Échéance : {frDate(d.dueDate)}</p>}
         {info('validity') && <p className="text-warn">{info('validity')}</p>}
         {info('due') && <p className="text-warn">{info('due')}</p>}
+        {info('dueNote') && <p className="text-warn">{info('dueNote')}</p>}
       </div>
     </DialogContent>
   );
@@ -271,7 +373,12 @@ function ServiceDocumentDialog({ docs, done }: { docs: Doc[]; done: () => void }
   const [loadError, setLoadError] = useState<unknown>(null);
   const { busy, error, submit } = useSubmit(done, kind === 'SERVICE_QUOTE' ? 'Devis provisoire émis' : 'Proforma émise');
   useEffect(() => {
-    pf<{ establishments: Establishment[] }>('GET', '/billing/services').then((c) => { setEstablishments(c.establishments); setTenantId(c.establishments[0]?.id ?? ''); }).catch(setLoadError);
+    pf<{ establishments: Establishment[] }>('GET', '/billing/services').then((c) => {
+      // Un établissement de test ne reçoit ni devis ni proforma (l'API et la base le refusent aussi).
+      const clients = c.establishments.filter((t) => t.commercialStatus === 'CLIENT');
+      setEstablishments(clients);
+      setTenantId(clients[0]?.id ?? '');
+    }).catch(setLoadError);
   }, []);
   useEffect(() => {
     if (!tenantId) return;
@@ -297,10 +404,18 @@ function ServiceDocumentDialog({ docs, done }: { docs: Doc[]; done: () => void }
   });
   const total = items.reduce((s, i) => s + i.n * (Number.isFinite(i.price) ? i.price : 0), 0);
   const fromQuote = kind === 'SERVICE_PROFORMA' && !!quoteId;
+  const missing = [need.value(tenantId, 'l’établissement'), !fromQuote && items.length === 0 && 'au moins une prestation (quantité)', need.code(code)];
   const send = () => submit(() => pf('POST', '/billing/service-documents', fromQuote
     ? { kind, tenantId, quoteId, code }
     : { kind, tenantId, code, items: items.map((i) => ({ serviceId: i.p.id, quantity: i.n, ...(i.p.basis === 'QUOTE' ? { unitPrice: i.price } : {}) })) }));
   if (loadError) return <DialogContent title="Devis ou proforma de prestations"><ErrorNote error={loadError} /></DialogContent>;
+  if (establishments && establishments.length === 0) {
+    return (
+      <DialogContent title="Devis ou proforma de prestations">
+        <p className="rounded-lg bg-sunk p-3 text-sm">Aucun client réel : un devis ou une proforma ne s’émet que pour un établissement passé en client réel (rubrique Abonnements). Les établissements de test n’en reçoivent jamais.</p>
+      </DialogContent>
+    );
+  }
   return (
     <DialogContent title="Devis ou proforma de prestations" description="Prix du catalogue de ce jour pour l’établissement ; une prestation sur devis se chiffre dans un devis, que sa proforma reprend tel quel.">
       <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); void send(); }}>
@@ -332,10 +447,76 @@ function ServiceDocumentDialog({ docs, done }: { docs: Doc[]; done: () => void }
           )
         )}
         {!fromQuote && <p className="flex justify-between gap-2 font-bold"><span>Total</span><span>{money(total, currency)}</span></p>}
-        <p className="text-xs text-muted">{kind === 'SERVICE_QUOTE' ? 'Durée de validité d’un devis : INFORMATION MANQUANTE, aucune date n’est inscrite.' : 'Échéance d’une proforma : INFORMATION MANQUANTE, aucune date n’est inscrite.'} Document provisoire, sans valeur fiscale.</p>
+        <p className="text-xs text-muted">{kind === 'SERVICE_QUOTE' ? 'Durée de validité d’un devis : INFORMATION MANQUANTE, aucune date n’est inscrite.' : 'Échéance d’une proforma : sa date plus le délai des paramètres tarifaires, s’il est activé ; sinon « Échéance à fixer ».'} Document provisoire, sans valeur fiscale.</p>
         <CodeField value={code} onChange={setCode} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy} disabled={code.length !== 6 || (!fromQuote && items.length === 0)}>{kind === 'SERVICE_QUOTE' ? 'Émettre le devis' : 'Émettre la proforma'}</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>{kind === 'SERVICE_QUOTE' ? 'Émettre le devis' : 'Émettre la proforma'}</Button>
+        <Missing items={missing} />
+      </form>
+    </DialogContent>
+  );
+}
+
+/**
+ * Lecture 1 (Dankou, 24 novembre 2026, soir) : dérogation exceptionnelle au délai de 30 jours, pour une inscription d'un
+ * client réel. La base contrôle tout (inscription annulée ou élève parti, document émis, délai passé, aucune demande en
+ * attente ni autre dérogation ouverte) ; le motif reste au journal de la plateforme.
+ */
+function DerogationDialog({ docs, done }: { docs: Doc[]; done: () => void }) {
+  const [establishments, setEstablishments] = useState<Establishment[] | null>(null);
+  const [tenantId, setTenantId] = useState('');
+  const [yearLabel, setYearLabel] = useState('');
+  const [matricule, setMatricule] = useState('');
+  const [reason, setReason] = useState('');
+  const [code, setCode] = useState('');
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const { busy, error, submit } = useSubmit(done, 'Dérogation accordée');
+  useEffect(() => {
+    pf<{ establishments: Establishment[] }>('GET', '/billing/services').then((c) => {
+      // Un établissement de test n'a jamais de document de Cahiora : aucune dérogation à lui accorder.
+      const clients = c.establishments.filter((t) => t.commercialStatus === 'CLIENT');
+      setEstablishments(clients);
+      setTenantId(clients[0]?.id ?? '');
+    }).catch(setLoadError);
+  }, []);
+  useEffect(() => {
+    // Année proposée : celle du dernier document d'abonnement de l'établissement (modifiable).
+    const last = docs.find((d) => d.kind === 'SUBSCRIPTION' && d.tenantIds.includes(tenantId) && d.yearLabel);
+    setYearLabel(last?.yearLabel ?? '');
+  }, [docs, tenantId]);
+  const missing = [
+    need.value(tenantId, 'l’établissement'), need.text(yearLabel, 'l’année scolaire', 4), need.value(matricule.trim(), 'le matricule de l’inscription'),
+    need.text(reason, 'le motif de la dérogation'), need.code(code),
+  ];
+  const send = () => submit(() => pf('POST', '/billing/derogations', { tenantId, yearLabel: yearLabel.trim(), matricule: matricule.trim(), reason: reason.trim(), code }));
+  if (loadError) return <DialogContent title="Accorder une dérogation"><ErrorNote error={loadError} /></DialogContent>;
+  if (establishments && establishments.length === 0) {
+    return (
+      <DialogContent title="Accorder une dérogation">
+        <p className="rounded-lg bg-sunk p-3 text-sm">Aucun client réel : le délai de 30 jours ne court qu’après un document de Cahiora, et un établissement de test n’en reçoit jamais.</p>
+      </DialogContent>
+    );
+  }
+  return (
+    <DialogContent title="Accorder une dérogation" description="Exceptionnelle : rouvre pour 30 jours, et pour une seule demande, le délai d’une exclusion ou d’une contestation de cette inscription.">
+      <form className="grid gap-3" onSubmit={(e) => { e.preventDefault(); void send(); }}>
+        <Field label="Établissement">
+          <Select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>{(establishments ?? []).map((t) => <option key={t.id} value={t.id}>{t.name} ({t.group})</option>)}</Select>
+        </Field>
+        <Field label="Année scolaire" hint="Celle du document qui a demandé l’élève, par exemple 2026-2027.">
+          <Input value={yearLabel} onChange={(e) => setYearLabel(e.target.value)} maxLength={20} />
+        </Field>
+        <Field label="Matricule de l’inscription" hint="Jamais le nom de l’élève : la direction le lit dans ses effectifs facturables.">
+          <Input value={matricule} onChange={(e) => setMatricule(e.target.value)} maxLength={60} autoComplete="off" />
+        </Field>
+        <Field label="Motif de la dérogation" hint="5 à 300 caractères. Journal de la plateforme seulement : jamais montré à l’école ni au groupe.">
+          <Textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={300} />
+        </Field>
+        <p className="text-xs text-muted">La direction est prévenue (sans le motif) et fait sa demande dans ses effectifs facturables ; vous la décidez ensuite comme toute autre. Aucun avoir, aucun remboursement n’est émis par la dérogation elle-même.</p>
+        <CodeField value={code} onChange={setCode} />
+        <ErrorNote error={error} />
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Accorder la dérogation</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );

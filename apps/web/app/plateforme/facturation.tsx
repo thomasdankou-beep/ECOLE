@@ -1,12 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bell, CalendarDays, History, Play, Plus, Users } from 'lucide-react';
-import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
+import { BadgeCheck, Bell, CalendarDays, FlaskConical, History, Play, Plus, Users } from 'lucide-react';
+import { Badge, Button, Card, Chips, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Missing, Select, Stat, Table, Textarea, useToast } from '@/components/ui';
 import { pf } from '@/lib/platform';
 import { Acces } from './acces';
 import { Documents } from './documents';
-import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { CodeField, frDate, money, need, ready, useSubmit } from './facturation-outils';
 import { AvoirsCredits, moneyRows, Paiements, Rapports } from './paiements';
 import { Prestations } from './prestations';
 
@@ -18,6 +18,8 @@ import { Prestations } from './prestations';
  * régularisation et prolongations (lot G5d-1, ./acces.tsx) ; paiements, avoirs et crédits, rapports financiers (lot
  * G5d-2, ./paiements.tsx, verrou du serveur fermé par défaut). Les autres rubriques arrivent avec les lots G5e à G5h.
  * Chaque opération financière demande un code actuel de l'application d'authentification.
+ * Statut commercial (ajustements du 20 novembre 2026) : un établissement de test n'est jamais facturé ni limité ; seul le
+ * Super Admin le passe en client réel, tant qu'aucun abonnement ni document n'existe pour lui.
  */
 
 type Status = 'TRIAL' | 'PILOT' | 'AWAITING_ACCEPTANCE' | 'AWAITING_PAYMENT' | 'ACTIVE' | 'LIMITED';
@@ -37,17 +39,23 @@ type PupilCount = {
   id: string; yearLabel: string; kind: string; kindLabel: string; referenceDate: string; stage: 'PROVISIONAL' | 'FROZEN'; stageLabel: string; pupils: number; cumulative: number;
   toCheck: number; excluded: number; listHash: string; knownAt: string; reviewUntil: string | null; reviewOpen: boolean; frozen: boolean;
 };
+type Commercial = 'TEST' | 'CLIENT';
 type Establishment = {
   id: string; slug: string; name: string; status: 'ACTIVE' | 'SUSPENDED'; country: string; currency: string; timezone: string; today: string; createdOn: string; demo: boolean;
   group: { id: string; name: string }; subscription: Sub | null; calendars: Calendar[]; counts: PupilCount[];
+  /** Statut commercial : « Établissement de test » (jamais facturé ni limité) ou « Client réel » ; figé dès qu'un abonnement ou un document existe. */
+  commercialStatus: Commercial; commercialStatusLabel: string; commercialStatusAt: string | null; commercialStatusNote: string | null; canChangeCommercialStatus: boolean;
 };
 type Overview = {
-  counts: { establishments: number; none: number } & Record<Status, number>;
+  /** `none` et les états d'abonnement ne comptent que les clients réels ; les établissements de test sont comptés à part. */
+  counts: { establishments: number; none: number; testEstablishments: number; clientEstablishments: number } & Record<Status, number>;
   soon: { tenantId: string; tenantName: string; group: string; kind: 'TRIAL' | 'PILOT'; lastDay: string; daysLeft: number }[];
   unreadAlerts: number;
   /** Par monnaie (lot G5d-2) ; null tant que le lot qui les apporte n'est pas là (amountsFrom). */
   amounts: Record<string, { currency: string; amount: number }[] | null>;
   amountsFrom: Record<string, string>;
+  /** 24 novembre 2026 : indicateurs réels, clients réels seulement. */
+  amountsScope: string;
 };
 type Alert = { id: string; tenantName: string | null; kind: string; message: string; dueDate: string | null; readAt: string | null; createdAt: string };
 type Param = { key: string; currency: string | null; label: string; unit: 'money' | 'hours' | 'days' | 'months' | 'percent'; usedFrom: string; provisional?: string; value: number | null; since: string | null; next: { value: number; effectiveFrom: string } | null };
@@ -55,6 +63,8 @@ type Params = {
   today: string; currencies: string[];
   definitions: { key: string; label: string; unit: Param['unit']; min: number; max: number; usedFrom: string; provisional?: string }[];
   current: Param[];
+  /** Délais proposés par Cahiora (G5c-1), sans aucun effet tant qu'aucune valeur n'est saisie. */
+  proposals: { key: string; label: string; unit: Param['unit']; usedFrom: string; provisional?: string; proposed: number }[];
   history: { id: string; key: string; label: string; currency: string | null; value: number; effectiveFrom: string; reason: string; createdByName: string; createdAt: string }[];
 };
 type Terms = { id: string; version: number; title: string; body: string; effectiveFrom: string; createdByName: string; createdAt: string };
@@ -77,6 +87,24 @@ function paramValue(unit: Param['unit'], value: number | null, currency: string 
 const STATUS_TONE: Record<Status, 'info' | 'good' | 'warn' | 'bad' | 'accent'> = {
   TRIAL: 'info', PILOT: 'accent', AWAITING_ACCEPTANCE: 'warn', AWAITING_PAYMENT: 'warn', ACTIVE: 'good', LIMITED: 'bad',
 };
+/**
+ * Confirmation cochée pour passer un établissement en client réel : même texte que CLIENT_ATTESTATION dans l'API
+ * (apps/api/src/modules/billing/billing.ts), qui l'inscrit dans les journaux.
+ */
+const CLIENT_ATTESTATION =
+  'Je confirme que cet établissement est un client commercial réel de Cahiora : il pourra recevoir un essai, un pilote, des documents provisoires et des demandes de paiement.';
+const COMMERCIAL_FILTER: { value: '' | Commercial; label: string }[] = [
+  { value: '', label: 'Tous les statuts' }, { value: 'TEST', label: 'Établissements de test' }, { value: 'CLIENT', label: 'Clients réels' },
+];
+/**
+ * Statut commercial, bien distinct de l'état de l'abonnement (24 novembre 2026) : « Établissement de test » en contour
+ * pointillé orange avec une fiole, « Client réel » en plein avec une coche.
+ */
+function CommercialBadge({ e, className = '' }: { e: Pick<Establishment, 'commercialStatus' | 'commercialStatusLabel'>; className?: string }) {
+  return e.commercialStatus === 'TEST'
+    ? <Badge tone="accent" className={`border border-dashed border-orange ${className}`} title="Jamais facturé ni limité"><FlaskConical className="size-3.5" aria-hidden /> Établissement de test</Badge>
+    : <Badge className={`bg-brand text-brand-ink ${className}`}><BadgeCheck className="size-3.5" aria-hidden /> {e.commercialStatusLabel}</Badge>;
+}
 const STATUS_FILTER: { value: string; label: string }[] = [
   { value: '', label: 'Tous les états' }, { value: 'none', label: 'Sans abonnement' }, { value: 'TRIAL', label: 'Essai gratuit' }, { value: 'PILOT', label: 'École pilote' },
   { value: 'AWAITING_ACCEPTANCE', label: 'Conditions à accepter' }, { value: 'AWAITING_PAYMENT', label: 'En attente de paiement' }, { value: 'ACTIVE', label: 'Abonnement actif' },
@@ -139,7 +167,7 @@ function Ensemble() {
   return (
     <div className="grid gap-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Stat label="Établissements" value={c.establishments} detail={`${c.none} sans abonnement`} />
+        <Stat label="Établissements" value={c.establishments} detail={`${c.testEstablishments} de test · ${c.clientEstablishments} client${c.clientEstablishments > 1 ? 's' : ''} réel${c.clientEstablishments > 1 ? 's' : ''}`} />
         <Stat label="En essai" value={c.TRIAL} />
         <Stat label="Écoles pilotes" value={c.PILOT} />
         <Stat label="Abonnés actifs" value={c.ACTIVE} detail="Document de la fin de la gratuité payé" />
@@ -148,9 +176,16 @@ function Ensemble() {
         <Stat label="Accès limité" value={c.LIMITED} detail="Abonnement non régularisé (lot G5d-1)" tone={c.LIMITED ? 'bad' : undefined} />
         <Stat label="Alertes non lues" value={o.unreadAlerts} tone={o.unreadAlerts ? 'warn' : undefined} />
       </div>
+      <p className="rounded-lg bg-sunk p-3 text-sm" aria-label="Établissements de test">
+        {c.testEstablishments
+          ? `${c.testEstablishments === 1 ? 'L’établissement de test n’est' : `Les ${c.testEstablishments} établissements de test ne sont`} jamais facturé${c.testEstablishments > 1 ? 's' : ''} ni limité${c.testEstablishments > 1 ? 's' : ''} : ${c.testEstablishments === 1 ? 'il ne compte' : 'ils ne comptent'} que dans le total des établissements. `
+          : 'Aucun établissement de test. '}
+        Clients réels sans abonnement : {c.none}.
+      </p>
       <Card className="grid gap-2">
         <h3 className="font-bold">Montants</h3>
         <p className="text-sm text-muted">Facturé et encaissé ne se confondent jamais : chaque montant est donné par monnaie, documents provisoires d’un côté, paiements validés par Cahiora de l’autre. Le détail est dans Rapports financiers.</p>
+        <p className="text-sm font-bold" data-testid="portee-indicateurs">{o.amountsScope}</p>
         <ul className="grid gap-1 text-sm sm:grid-cols-2" aria-label="Montants">
           {([['billed', 'Facturé'], ['credited', 'Avoirs'], ['collected', 'Encaissé'], ['refunded', 'Remboursé'], ['unpaid', 'Impayés'], ['groupPending', 'Documents de groupe en attente'], ['clientCredits', 'Crédits des clients'], ['servicesRevenue', 'Prestations'], ['commissionsDue', 'Commissions dues'], ['commissionsPaid', 'Commissions payées']] as const).map(([k, label]) => {
             const rows = o.amounts[k];
@@ -226,18 +261,27 @@ function Freedom({ s }: { s: Sub }) {
 function Abonnements() {
   const { list, error, load } = useEstablishments();
   const [group, setGroup] = useState('');
+  const [commercial, setCommercial] = useState<'' | Commercial>('');
   const [status, setStatus] = useState('');
-  const [dialog, setDialog] = useState<{ kind: 'trial' | 'pilot' | 'pilotEnd' | 'history'; e: Establishment } | null>(null);
+  const [dialog, setDialog] = useState<{ kind: 'trial' | 'pilot' | 'pilotEnd' | 'history' | 'commercial'; e: Establishment } | null>(null);
   const groups = useMemo(() => [...new Map((list ?? []).map((e) => [e.group.id, e.group.name])).entries()].sort((a, b) => a[1].localeCompare(b[1])), [list]);
   if (error) return <ErrorNote error={error} />;
   if (!list) return null;
-  const shown = list.filter((e) => (!group || e.group.id === group) && (!status || (status === 'none' ? !e.subscription : e.subscription?.status === status)));
+  const shown = list.filter((e) => (!group || e.group.id === group) && (!commercial || e.commercialStatus === commercial)
+    && (!status || (status === 'none' ? !e.subscription : e.subscription?.status === status)));
+  const testNote = list.find((e) => e.commercialStatusNote)?.commercialStatusNote;
   return (
     <div className="grid gap-3">
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-3">
         <Field label="Groupe"><Select value={group} onChange={(e) => setGroup(e.target.value)}><option value="">Tous les groupes</option>{groups.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</Select></Field>
+        <Field label="Statut commercial"><Select value={commercial} onChange={(e) => setCommercial(e.target.value as '' | Commercial)}>{COMMERCIAL_FILTER.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}</Select></Field>
         <Field label="État"><Select value={status} onChange={(e) => setStatus(e.target.value)}>{STATUS_FILTER.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}</Select></Field>
       </div>
+      {testNote && (
+        <p className="rounded-lg bg-sunk p-3 text-sm">
+          {testNote} Le statut se change seulement tant qu’aucun abonnement ni document n’existe pour l’établissement, avec un motif et votre code.
+        </p>
+      )}
       {shown.length === 0 ? <Empty title="Aucun établissement">Aucun établissement ne correspond à ces filtres.</Empty> : (
         <Card className="overflow-x-auto p-0">
           <Table>
@@ -245,15 +289,26 @@ function Abonnements() {
             <tbody>
               {shown.map((e) => (
                 <tr key={e.id}>
-                  <td className="font-bold">{e.name}{e.demo && <Badge tone="info" className="ml-2">Démo</Badge>}<span className="block text-xs font-normal text-muted">{e.slug} · {e.currency}</span></td>
+                  <td className="font-bold">{e.name}<CommercialBadge e={e} className="ml-2" />{e.demo && <Badge tone="info" className="ml-2">Démo</Badge>}<span className="block text-xs font-normal text-muted">{e.slug} · {e.currency}</span></td>
                   <td className="text-sm">{e.group.name}</td>
-                  <td>{e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}</td>
+                  <td>
+                    {e.commercialStatus === 'TEST' ? (
+                      e.subscription ? (
+                        <span className="flex flex-col items-start gap-1"><Badge tone="info">{e.subscription.statusLabel}</Badge><span className="text-xs text-muted">Abonnement de test figé : jamais facturé ni limité</span></span>
+                      ) : <span className="text-sm text-muted">Jamais facturé ni limité</span>
+                    ) : e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}
+                  </td>
                   <td className="text-sm">{e.subscription ? <Freedom s={e.subscription} /> : <span className="text-muted">—</span>}</td>
                   <td>
                     <div className="flex flex-wrap justify-end gap-1">
-                      {!e.subscription && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'trial', e })}>Ouvrir l’essai</Button>}
-                      {(!e.subscription || e.subscription.status === 'TRIAL') && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'pilot', e })}>École pilote</Button>}
-                      {e.subscription?.status === 'PILOT' && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'pilotEnd', e })}>Fin du pilote</Button>}
+                      {e.canChangeCommercialStatus && (
+                        <Button size="sm" variant={e.commercialStatus === 'TEST' ? 'outline' : 'ghost'} onClick={() => setDialog({ kind: 'commercial', e })}>
+                          {e.commercialStatus === 'TEST' ? 'Passer en client réel' : 'Repasser en test'}
+                        </Button>
+                      )}
+                      {e.commercialStatus === 'CLIENT' && !e.subscription && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'trial', e })}>Ouvrir l’essai</Button>}
+                      {e.commercialStatus === 'CLIENT' && (!e.subscription || e.subscription.status === 'TRIAL') && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'pilot', e })}>École pilote</Button>}
+                      {e.commercialStatus === 'CLIENT' && e.subscription?.status === 'PILOT' && <Button size="sm" variant="outline" onClick={() => setDialog({ kind: 'pilotEnd', e })}>Fin du pilote</Button>}
                       {e.subscription && <Button size="icon" variant="ghost" aria-label={`Historique de l’abonnement de ${e.name}`} onClick={() => setDialog({ kind: 'history', e })}><History className="size-4" /></Button>}
                     </div>
                   </td>
@@ -268,14 +323,56 @@ function Abonnements() {
         {dialog?.kind === 'pilot' && <PilotDialog e={dialog.e} done={() => { setDialog(null); load(); }} />}
         {dialog?.kind === 'pilotEnd' && <PilotEndDialog e={dialog.e} done={() => { setDialog(null); load(); }} />}
         {dialog?.kind === 'history' && <HistoryDialog e={dialog.e} />}
+        {dialog?.kind === 'commercial' && <CommercialStatusDialog e={dialog.e} done={() => { setDialog(null); load(); }} />}
       </Dialog>
     </div>
+  );
+}
+
+/**
+ * Statut commercial d'un établissement (ajustements du 20 novembre 2026) : vers « client réel » avec la confirmation
+ * cochée, un motif et le code ; retour « test » seulement tant qu'aucun abonnement ni document n'existe.
+ */
+function CommercialStatusDialog({ e, done }: { e: Establishment; done: () => void }) {
+  const to: Commercial = e.commercialStatus === 'TEST' ? 'CLIENT' : 'TEST';
+  // Case de confirmation toujours décochée à l'ouverture ; bouton désactivé tant que le motif, la case ou le code manque
+  // (24 novembre 2026).
+  const [f, setF] = useState({ reason: '', confirmed: false, code: '' });
+  const { busy, error, submit } = useSubmit(done, to === 'CLIENT' ? `${e.name} est maintenant un client réel` : `${e.name} est de nouveau un établissement de test`);
+  const missing = [need.text(f.reason, 'le motif'), to === 'CLIENT' && !f.confirmed && 'la case de confirmation', need.code(f.code)];
+  return (
+    <DialogContent
+      title={to === 'CLIENT' ? `Passer en client réel : ${e.name}` : `Repasser en établissement de test : ${e.name}`}
+      description={to === 'CLIENT'
+        ? 'Seul un client commercial réel de Cahiora passe en « client réel » : il pourra recevoir un essai gratuit, une période pilote, des documents provisoires et des demandes de paiement. Le statut ne change plus dès qu’un abonnement ou un document existe.'
+        : 'Un établissement de test n’est jamais facturé ni limité. Ce retour est possible tant qu’aucun abonnement ni document n’existe pour lui.'}>
+      <form className="grid gap-3" onSubmit={(ev) => {
+        ev.preventDefault();
+        submit(() => pf('POST', `/billing/establishments/${e.id}/commercial-status`, { status: to, reason: f.reason, ...(to === 'CLIENT' ? { confirmed: f.confirmed } : {}), code: f.code }));
+      }}>
+        <Field label="Motif">
+          <Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required
+            placeholder={to === 'CLIENT' ? 'Par exemple : accord de la direction pour un abonnement, et sa date' : 'Par exemple : établissement créé pour des essais'} />
+        </Field>
+        {to === 'CLIENT' && (
+          <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-lg border border-line p-3 text-sm">
+            <input type="checkbox" className="mt-1 size-5 flex-none accent-[var(--brand)]" checked={f.confirmed} onChange={(x) => setF({ ...f, confirmed: x.target.checked })} required />
+            <span>{CLIENT_ATTESTATION}</span>
+          </label>
+        )}
+        <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
+        <ErrorNote error={error} />
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>{to === 'CLIENT' ? 'Passer en client réel' : 'Repasser en test'}</Button>
+        <Missing items={missing} />
+      </form>
+    </DialogContent>
   );
 }
 
 function TrialDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [f, setF] = useState({ startDate: e.today, reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, `Essai gratuit ouvert pour ${e.name}`);
+  const missing = [need.value(f.startDate, 'le premier jour de l’essai'), need.code(f.code)];
   return (
     <DialogContent title={`Ouvrir l’essai gratuit : ${e.name}`} description="La durée est celle du paramètre en vigueur (14 jours) ; le jour d’ouverture compte comme le jour 1.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/establishments/${e.id}/trial`, { startDate: f.startDate, reason: f.reason || undefined, code: f.code })); }}>
@@ -283,7 +380,8 @@ function TrialDialog({ e, done }: { e: Establishment; done: () => void }) {
         <Field label="Motif (facultatif)"><Input value={f.reason} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Ouvrir l’essai</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Ouvrir l’essai</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -293,6 +391,7 @@ function PilotDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [f, setF] = useState({ startDate: '', months: '', reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, `${e.name} est école pilote partenaire`);
   const preview = pilotEndPreview(f.startDate, Number(f.months) || 3);
+  const missing = [need.value(f.startDate, 'la date d’activation effective du pilote'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`École pilote partenaire CAHIORA : ${e.name}`} description="Gratuité à partir de l’activation effective du pilote, que vous saisissez. Rien n’est facturé pour la période pilote, ni rétroactivement après elle.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/establishments/${e.id}/pilot`, { startDate: f.startDate, months: f.months ? Number(f.months) : undefined, reason: f.reason, code: f.code })); }}>
@@ -302,7 +401,8 @@ function PilotDialog({ e, done }: { e: Establishment; done: () => void }) {
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required placeholder="Par exemple : accord écrit avec la direction, et sa date" /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Activer le pilote</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Activer le pilote</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -311,6 +411,7 @@ function PilotDialog({ e, done }: { e: Establishment; done: () => void }) {
 function PilotEndDialog({ e, done }: { e: Establishment; done: () => void }) {
   const [f, setF] = useState({ pilotEnd: e.subscription?.pilotEnd ?? '', reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, 'Fin du pilote enregistrée');
+  const missing = [need.value(f.pilotEnd, 'le dernier jour gratuit'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`Fin de la gratuité du pilote : ${e.name}`} description={`Fin actuelle : ${frDate(e.subscription?.pilotEnd)}. Jamais dans le passé ; les alertes suivent la nouvelle date.`}>
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/establishments/${e.id}/pilot-end`, f)); }}>
@@ -318,7 +419,8 @@ function PilotEndDialog({ e, done }: { e: Establishment; done: () => void }) {
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -388,9 +490,10 @@ function Etablissements() {
             {g.items.map((e) => (
               <li key={e.id} className="grid gap-1 rounded-lg bg-sunk p-3 text-sm">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span><b>{e.name}</b> <span className="text-muted">· {e.currency} · {e.timezone}</span> {e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}</span>
+                  <span><b>{e.name}</b> <span className="text-muted">· {e.currency} · {e.timezone}</span> <CommercialBadge e={e} /> {e.commercialStatus === 'TEST' ? null : e.subscription ? <Badge tone={STATUS_TONE[e.subscription.status]}>{e.subscription.statusLabel}</Badge> : <Badge tone="warn">Aucun abonnement</Badge>}</span>
                   <div className="flex flex-wrap gap-1">
-                    <Button size="sm" variant="outline" onClick={() => setCounts(e)} aria-label={`Comptages des élèves de ${e.name}`}><Users className="size-4" /> Comptages</Button>
+                    {/* Un établissement de test n'est jamais compté : le bouton ne sert qu'aux clients réels (ou à un ancien comptage). */}
+                    {(e.commercialStatus === 'CLIENT' || e.counts.length > 0) && <Button size="sm" variant="outline" onClick={() => setCounts(e)} aria-label={`Comptages des élèves de ${e.name}`}><Users className="size-4" /> Comptages</Button>}
                     <Button size="sm" variant="outline" onClick={() => setOpen(e)} aria-label={`Calendrier de facturation de ${e.name}`}><CalendarDays className="size-4" /> Calendrier</Button>
                   </div>
                 </div>
@@ -439,7 +542,7 @@ function CountsDialog({ e }: { e: Establishment }) {
                 <b>{c.kindLabel} du {frDate(c.referenceDate)}</b>
                 <Badge tone={c.stage === 'FROZEN' ? 'good' : 'warn'}>{c.stageLabel}</Badge>
               </div>
-              <span>Année {c.yearLabel} · <b>{pupilsText(c.pupils)}</b> comptés · cumul de l’année : {c.cumulative} · à vérifier : {c.toCheck} · exclus : {c.excluded}</span>
+              <span>Année {c.yearLabel} · <b>{pupilsText(c.pupils)}</b> comptés : <b>{c.pupils - c.toCheck}</b> confirmés facturables{c.toCheck ? <>, <b className="text-warn">{c.toCheck} « À vérifier »</b> comptés sous réserve</> : ''} · cumul de l’année : {c.cumulative} · exclus : {c.excluded}</span>
               {c.reviewOpen && <span className="text-warn">Vérification par la direction jusqu’au {frDate(c.reviewUntil)} inclus.</span>}
               {c.stage === 'PROVISIONAL' && c.frozen && <span className="text-muted">Remplacé par le comptage définitif de la même date.</span>}
               <span className="text-xs text-muted">Historique lu le {new Date(c.knownAt).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })} · empreinte de la liste {c.listHash.slice(0, 12)}…</span>
@@ -509,6 +612,9 @@ function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
   const notApplicable = proposal && !proposal.applies ? proposal.message : null;
   /** Propositions des nouvelles dates pas encore reçues : on attend avant d'enregistrer. */
   const waiting = f.formula !== 'MANUEL' && IS_DAY.test(f.startDate) && IS_DAY.test(f.endDate) && !current;
+  const missing = [need.value(f.yearLabel.trim(), 'l’année scolaire'), need.value(f.startDate, 'le début de l’année'), need.value(f.endDate, 'la fin de l’année'),
+    need.value(f.initialCountDate, 'le comptage initial'), need.value(f.firstRegularizationDate, 'la première régularisation'),
+    need.value(f.finalRegularizationDate, 'la régularisation finale'), need.text(f.reason, 'le motif'), need.code(f.code)];
 
   /** Reprend la dernière version de cette année telle quelle ; sinon les dates de l'année scolaire de l'école, recalculées. */
   const pickYear = (yearLabel: string) => {
@@ -583,7 +689,8 @@ function CalendarDialog({ e, done }: { e: Establishment; done: () => void }) {
           <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required placeholder="Par exemple : calendrier communiqué par la direction" /></Field>
           <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
           <ErrorNote error={error} />
-          <Button type="submit" loading={busy} disabled={!!notApplicable || waiting}>Enregistrer cette version</Button>
+          <Button type="submit" loading={busy} disabled={!!notApplicable || waiting || !ready(missing)}>Enregistrer cette version</Button>
+          <Missing items={missing} />
           {versions.length > 0 && (
             <div className="grid gap-1 text-xs">
               <p className="font-bold">Versions enregistrées</p>
@@ -638,6 +745,23 @@ function Parametres({ open }: { open: (s: Section) => void }) {
         </Table>
         <p className="px-4 pb-4 text-xs text-muted">Prix des SMS : lot G5e (INFORMATION MANQUANTE). Dates de régularisation : calendrier de chaque établissement.</p>
       </Card>
+      {p.proposals.length > 0 && (
+        <Card className="grid gap-2">
+          <h3 className="font-bold">Délais d’échéance proposés, non activés</h3>
+          <p className="text-sm text-muted">
+            Chaque document qui porte un montant à payer a une échéance explicite. Tant qu’aucune valeur n’est saisie pour ces délais, un document complémentaire ou une proforma porte « Échéance à fixer » ;
+            une échéance ne limite jamais l’accès (décision D-G5-18 en attente). Pour activer un délai, après la validation des conditions commerciales, saisissez une nouvelle valeur.
+          </p>
+          <ul className="grid gap-1 text-sm" aria-label="Délais proposés">
+            {p.proposals.map((x) => (
+              <li key={x.key} className="flex flex-wrap items-center justify-between gap-2 rounded bg-sunk px-3 py-1.5">
+                <span>{x.label}</span>
+                <span className="flex flex-wrap items-center gap-2"><b>{paramValue(x.unit, x.proposed, null)}</b><Badge tone="warn">Proposé, non activé{x.provisional ? ` (${x.provisional})` : ''}</Badge></span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
       <Card className="grid gap-2">
         <h3 className="font-bold">Tarification et prestations</h3>
         <p className="text-sm text-muted">Les prix des prestations complémentaires (formation, paramétrage, intervention sur site), leurs remises, tarifs particuliers et gratuités se règlent dans la rubrique « Prestations complémentaires ».</p>
@@ -676,8 +800,10 @@ function Parametres({ open }: { open: (s: Section) => void }) {
 function ParamDialog({ p, done }: { p: Params; done: () => void }) {
   const [f, setF] = useState({ key: p.definitions[0].key, currency: 'XOF', value: '', effectiveFrom: p.today, reason: '', code: '' });
   const def = p.definitions.find((d) => d.key === f.key)!;
+  const proposal = p.proposals.find((x) => x.key === f.key);
   const { busy, error, submit } = useSubmit(done, 'Nouvelle valeur enregistrée');
   const toInt = () => (def.unit === 'percent' ? Math.round(Number(f.value.replace(',', '.')) * 100) : Number(f.value));
+  const missing = [need.value(f.value.trim(), 'la valeur'), need.value(f.effectiveFrom, 'la date d’effet'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title="Nouvelle valeur d’un paramètre" description="Elle s’applique à partir de sa date d’effet, jamais avant ; l’ancienne valeur reste dans l’historique.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', '/billing/parameters', { key: f.key, currency: def.unit === 'money' ? f.currency : null, value: toInt(), effectiveFrom: f.effectiveFrom, reason: f.reason, code: f.code })); }}>
@@ -685,14 +811,16 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
           <Select value={f.key} onChange={(x) => setF({ ...f, key: x.target.value })}>{p.definitions.map((d) => <option key={d.key} value={d.key}>{d.label}</option>)}</Select>
         </Field>
         {def.unit === 'money' && <Field label="Monnaie"><Select value={f.currency} onChange={(x) => setF({ ...f, currency: x.target.value })}>{p.currencies.map((c) => <option key={c} value={c}>{c}</option>)}</Select></Field>}
-        <Field label={def.unit === 'money' ? 'Montant' : def.unit === 'percent' ? 'Pourcentage' : def.unit === 'hours' ? 'Nombre d’heures' : def.unit === 'days' ? 'Nombre de jours' : 'Nombre de mois'} hint={def.unit === 'percent' ? 'Par exemple 15 pour 15 %.' : undefined}>
+        <Field label={def.unit === 'money' ? 'Montant' : def.unit === 'percent' ? 'Pourcentage' : def.unit === 'hours' ? 'Nombre d’heures' : def.unit === 'days' ? 'Nombre de jours' : 'Nombre de mois'}
+          hint={def.unit === 'percent' ? 'Par exemple 15 pour 15 %.' : proposal ? `Proposé par Cahiora : ${paramValue(proposal.unit, proposal.proposed, null)}, non activé. Saisir une valeur l’active à sa date d’effet.` : undefined}>
           <Input inputMode="decimal" value={f.value} onChange={(x) => setF({ ...f, value: x.target.value })} required />
         </Field>
         <Field label="Date d’effet" hint="Aujourd’hui au plus tôt."><Input type="date" min={p.today} value={f.effectiveFrom} onChange={(x) => setF({ ...f, effectiveFrom: x.target.value })} required /></Field>
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -701,6 +829,8 @@ function ParamDialog({ p, done }: { p: Params; done: () => void }) {
 function TermsDialog({ today, done }: { today: string; done: () => void }) {
   const [f, setF] = useState({ title: '', body: '', effectiveFrom: today, definitive: false, code: '' });
   const { busy, error, submit } = useSubmit(done, 'Conditions commerciales publiées');
+  const missing = [need.text(f.title, 'le titre', 3), need.text(f.body, 'le texte des conditions', 20), need.value(f.effectiveFrom, 'la date d’effet'),
+    !f.definitive && 'la case de confirmation', need.code(f.code)];
   return (
     <DialogContent title="Publier une version des conditions commerciales" description="Le texte vient de vous : Cahiora ne le rédige pas à votre place. La direction l’accepte au nom de l’établissement, comme un contrat réel, à la fin de son essai ou de son pilote : ne publiez jamais un texte d’essai.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', '/billing/terms', f)); }}>
@@ -714,7 +844,8 @@ function TermsDialog({ today, done }: { today: string; done: () => void }) {
         </label>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Publier</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Publier</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );

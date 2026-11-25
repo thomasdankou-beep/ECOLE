@@ -5,7 +5,10 @@
 #   - une erreur de récupération du code (modification locale en conflit, dépôt injoignable) ARRÊTE la mise à jour
 #     avant toute reconstruction (décision D3 du 16 novembre 2026) ;
 #   - un retour arrière (version fixée par « git checkout <commit> ») garde cette version et reconstruit ;
-#   - l'étape « créer votre compte Super Admin » n'est proposée que s'il n'existe encore aucun compte.
+#   - l'étape « créer votre compte Super Admin » n'est proposée que s'il n'existe encore aucun compte ;
+#   - les images sont construites avec le commit installé (CAHIORA_COMMIT), que controle-production.sh vérifie ensuite ;
+#   - une API ou un site resté sur son ancienne image après « docker compose up -d --build » (vu avec Docker Compose
+#     2.38.2) est recréé, lui seul ; si la recréation ne suffit pas, la mise à jour s'arrête en ÉCHEC.
 # Rien n'est installé ni démarré : aucun appel réseau, aucun Docker réel.
 #
 # Usage : bash tools/qualite/installateur/essais-installateur.sh [chemin de installer-serveur.sh]
@@ -22,9 +25,25 @@ mkdir -p "$tmp/bin"
 cat > "$tmp/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 echo "docker $*" >> "$JOURNAL"
+# Commit que l'installateur donne aux images de l'API et du site (contrôlé après la mise à jour par controle-production.sh).
+case "$*" in "compose up -d --build"*) echo "commit des images : ${CAHIORA_COMMIT:-absent}" >> "$JOURNAL" ;; esac
+# Conteneurs simulés de l'API et du site : le commit inscrit dans chacun est gardé dans $ETAT/<service>.
+dernier="${!#}"
 case "$*" in
   *"SELECT count(*) FROM platform_admins"*) echo "${FAUX_ADMINS:-0}" ;;
   "compose exec -T postgres psql"*) cat > /dev/null ;;
+  "compose up -d --build")
+    echo "${CAHIORA_COMMIT:-}" > "$ETAT/web"
+    # FAUX_API_ANCIENNE=1 : comme Docker Compose 2.38.2 sur GitHub, l'API garde son ancienne image.
+    if [ "${FAUX_API_ANCIENNE:-}" != 1 ]; then echo "${CAHIORA_COMMIT:-}" > "$ETAT/api"; fi ;;
+  "compose ps -a -q "*) echo "conteneur-$dernier" ;;
+  "inspect "*)
+    s=${dernier#conteneur-}
+    echo "PATH=/usr/local/bin:/usr/bin"
+    if [ -s "$ETAT/$s" ]; then echo "CAHIORA_COMMIT=$(cat "$ETAT/$s")"; fi ;;
+  "compose up -d --no-deps --force-recreate "*)
+    # FAUX_RECREATION_VAINE=1 : la recréation ne change rien (image elle-même construite depuis un autre commit).
+    if [ "${FAUX_RECREATION_VAINE:-}" != 1 ]; then echo "${CAHIORA_COMMIT:-}" > "$ETAT/$dernier"; fi ;;
 esac
 exit 0
 EOF
@@ -55,15 +74,17 @@ cat > "$tmp/bin/id" <<'EOF'
 if [ "${1:-}" = "-u" ]; then echo 0; else exec /usr/bin/id "$@"; fi
 EOF
 chmod +x "$tmp/bin/"*
-export PATH="$tmp/bin:$PATH" JOURNAL="$tmp/journal"
+export PATH="$tmp/bin:$PATH" JOURNAL="$tmp/journal" ETAT="$tmp/conteneurs"
+mkdir -p "$ETAT"
 
 # Dépôt d'origine minimal : l'installateur à essayer et ce qu'il appelle.
 src="$tmp/source"
-mkdir -p "$src/infra/postgres"
+mkdir -p "$src/infra/postgres" "$src/infra/docker"
 cp "$installateur" "$src/installer-serveur.sh"
 cp "$racine/.env.docker.example" "$src/"
 cp "$racine/infra/postgres/role-plateforme.sh" "$racine/infra/postgres/roles-groupes.sh" "$src/infra/postgres/"
-chmod +x "$src/installer-serveur.sh" "$src/infra/postgres/"*.sh
+cp "$racine/infra/docker/conteneurs-a-jour.sh" "$src/infra/docker/"
+chmod +x "$src/installer-serveur.sh" "$src/infra/postgres/"*.sh "$src/infra/docker/"*.sh
 printf '.env\n' > "$src/.gitignore"
 echo 1 > "$src/VERSION"
 git -C "$src" init -q -b principale
@@ -79,10 +100,11 @@ verifier() { # verifier <attendu> <commande...> : « ok » si la commande réuss
   local attendu="$1"; shift
   if "$@"; then echo "  ok : $attendu"; else echo "  ÉCHEC : $attendu"; echecs=$((echecs + 1)); fi
 }
-lancer() { # lancer <nombre de comptes Super Admin> : lance l'installateur du serveur simulé
+lancer() { # lancer <nombre de comptes Super Admin> [VARIABLE=valeur...] : lance l'installateur du serveur simulé
+  local admins="$1"; shift
   : > "$JOURNAL"
   set +e
-  FAUX_ADMINS="$1" "$tmp/serveur/installer-serveur.sh" > "$tmp/sortie" 2>&1
+  env "$@" FAUX_ADMINS="$admins" "$tmp/serveur/installer-serveur.sh" > "$tmp/sortie" 2>&1
   code=$?
   set -e
 }
@@ -97,6 +119,9 @@ lancer 2
 verifier "terminé sans erreur" test "$code" = 0
 verifier "code récupéré (v2)" est_en "$v2"
 verifier "services reconstruits" contient "compose up -d --build" "$JOURNAL"
+verifier "images marquées du commit installé (v2)" contient "commit des images : $v2" "$JOURNAL"
+verifier "commit de l'API et du site en marche vérifié après la construction" contient "docker inspect" "$JOURNAL"
+verifier "aucun conteneur recréé en plus : l'API et le site sont déjà sur v2" sans "--force-recreate" "$JOURNAL"
 verifier "site annoncé en ligne" contient "SITE EN LIGNE" "$tmp/sortie"
 verifier "pas d'étape Super Admin quand 2 comptes existent" sans "créer votre compte Super Admin" "$tmp/sortie"
 
@@ -126,6 +151,7 @@ lancer 2
 verifier "terminé sans erreur" test "$code" = 0
 verifier "la version choisie (v1) est gardée" est_en "$v1"
 verifier "services reconstruits sur cette version" contient "compose up -d --build" "$JOURNAL"
+verifier "images marquées du commit fixé (v1)" contient "commit des images : $v1" "$JOURNAL"
 verifier "le retour arrière est annoncé" contient "Version fixée" "$tmp/sortie"
 verifier "la commande pour reprendre les mises à jour est donnée" contient "git checkout principale" "$tmp/sortie"
 git -C "$tmp/serveur" checkout -q principale
@@ -134,6 +160,26 @@ echo "5. Premier lancement : aucun compte Super Admin"
 lancer 0
 verifier "terminé sans erreur" test "$code" = 0
 verifier "l'étape Super Admin est proposée" contient "créer votre compte Super Admin" "$tmp/sortie"
+
+echo "6. Docker Compose laisse l'API sur son ancienne image après la construction (vu avec Compose 2.38.2)"
+v4=$(nouvelle_version 4)
+lancer 2 FAUX_API_ANCIENNE=1
+verifier "terminé sans erreur" test "$code" = 0
+verifier "code récupéré (v4)" est_en "$v4"
+verifier "l'écart est annoncé" contient "L'API tourne sur une image construite depuis « $v3 », et non depuis le commit $v4" "$tmp/sortie"
+verifier "l'API, elle seule, est recréée" contient "docker compose up -d --no-deps --force-recreate api" "$JOURNAL"
+verifier "le site, déjà à jour, n'est pas recréé" sans "--force-recreate web" "$JOURNAL"
+verifier "l'API tourne ensuite sur v4" contient "L'API tourne maintenant sur le commit $v4." "$tmp/sortie"
+verifier "site annoncé en ligne" contient "SITE EN LIGNE" "$tmp/sortie"
+
+echo "7. La recréation ne suffit pas : la mise à jour s'arrête en ÉCHEC"
+v5=$(nouvelle_version 5)
+lancer 2 FAUX_API_ANCIENNE=1 FAUX_RECREATION_VAINE=1
+verifier "arrêt avec une erreur" test "$code" != 0
+verifier "message d'échec clair" contient "ÉCHEC : l'API tourne toujours sur « $v4 » au lieu du commit $v5." "$tmp/sortie"
+verifier "arrêt annoncé" contient "ÉCHEC : l'API ou le site ne tourne pas sur le commit installé $v5" "$tmp/sortie"
+verifier "site non annoncé en ligne" sans "SITE EN LIGNE" "$tmp/sortie"
+verifier "le site n'est pas attendu (arrêt avant)" sans "localhost" "$JOURNAL"
 
 echo ""
 if [ "$echecs" = 0 ]; then echo "Tous les essais de l'installateur sont réussis."; else echo "$echecs vérification(s) en échec."; exit 1; fi

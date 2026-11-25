@@ -5,7 +5,14 @@ import { Prisma } from '@prisma/client';
  * provisoires et ce qui est réellement encaissé ne se confondent jamais. Tout est compté par monnaie, jamais additionné
  * d'une monnaie à l'autre. Lus par le rôle de la plateforme (lecture seule et fonctions de la base) ; aucun calcul
  * n'écrit quoi que ce soit.
+ * Précisions du 24 novembre 2026 : ce sont des indicateurs réels, des clients réels seulement. Un établissement de test
+ * n'y entre jamais (chiffre d'affaires facturé ou encaissé, avoirs, remboursements, créances, crédits), même avec des
+ * documents ou des paiements fictifs d'avant son passage « de test » ; un document qui compte un établissement de test
+ * en est écarté entièrement.
  */
+
+/** Portée des indicateurs réels, lue dans la console (24 novembre 2026). */
+export const REAL_INDICATORS_NOTE = 'Clients réels seulement : les établissements de test n’entrent dans aucun montant, aucune créance ni aucune liste de ces indicateurs.';
 
 /** Un montant dans une monnaie. */
 export type MoneyRow = { currency: string; amount: number };
@@ -49,21 +56,24 @@ export async function financialTotals(db: Db, f: TotalsFilter = {}): Promise<Fin
     FROM billing_documents d JOIN billing_document_lines l ON l."documentId" = d.id
     WHERE d.kind IN ('SUBSCRIPTION', 'CREDIT_NOTE') AND (${from}::date IS NULL OR d."issueDate" >= ${from}::date) AND (${to}::date IS NULL OR d."issueDate" <= ${to}::date)
       AND (${tenants}::uuid[] IS NULL OR l.tenant_id = ANY(${tenants}::uuid[]))
+      AND NOT EXISTS (SELECT 1 FROM billing_document_lines x JOIN tenants xt ON xt.id = x.tenant_id WHERE x."documentId" = d.id AND xt."commercialStatus" = 'TEST')
     GROUP BY 1, 2`;
   const collected = await db.$queryRaw<{ currency: string; amount: number }[]>`
     SELECT p.currency, sum(p.amount)::integer AS amount FROM billing_payments p
     WHERE p."cancelledAt" IS NULL AND (${from}::date IS NULL OR p."paidOn" >= ${from}::date) AND (${to}::date IS NULL OR p."paidOn" <= ${to}::date)
       AND (${tenants}::uuid[] IS NULL OR p.tenant_id = ANY(${tenants}::uuid[]))
+      AND EXISTS (SELECT 1 FROM tenants ct WHERE ct.id = p.tenant_id AND ct."commercialStatus" = 'CLIENT')
     GROUP BY 1`;
   const refunded = await db.$queryRaw<{ currency: string; amount: number }[]>`
     SELECT r.currency, sum(r.amount)::integer AS amount FROM billing_refunds r
     WHERE r.status = 'REFUNDED' AND (${from}::date IS NULL OR r."refundedOn" >= ${from}::date) AND (${to}::date IS NULL OR r."refundedOn" <= ${to}::date)
       AND (${tenants}::uuid[] IS NULL OR r.tenant_id = ANY(${tenants}::uuid[]))
+      AND EXISTS (SELECT 1 FROM tenants ct WHERE ct.id = r.tenant_id AND ct."commercialStatus" = 'CLIENT')
     GROUP BY 1`;
   const unpaid = await db.$queryRaw<{ currency: string; amount: number }[]>`
     SELECT t.currency, sum(p.balance)::integer AS amount
     FROM tenants t CROSS JOIN LATERAL billing_payable_documents(t.id) p
-    WHERE (${tenants}::uuid[] IS NULL OR t.id = ANY(${tenants}::uuid[]))
+    WHERE t."commercialStatus" = 'CLIENT' AND (${tenants}::uuid[] IS NULL OR t.id = ANY(${tenants}::uuid[]))
       AND (${from}::date IS NULL OR p.issue_date >= ${from}::date) AND (${to}::date IS NULL OR p.issue_date <= ${to}::date)
     GROUP BY 1`;
   const groupPending = await db.$queryRaw<{ currency: string; amount: number }[]>`
@@ -71,12 +81,13 @@ export async function financialTotals(db: Db, f: TotalsFilter = {}): Promise<Fin
     FROM billing_documents d
     WHERE d.kind = 'SUBSCRIPTION' AND d.total > 0
       AND (SELECT count(DISTINCT l.tenant_id) FROM billing_document_lines l WHERE l."documentId" = d.id) > 1
+      AND NOT EXISTS (SELECT 1 FROM billing_document_lines x JOIN tenants xt ON xt.id = x.tenant_id WHERE x."documentId" = d.id AND xt."commercialStatus" = 'TEST')
       AND (${tenants}::uuid[] IS NULL OR EXISTS (SELECT 1 FROM billing_document_lines l WHERE l."documentId" = d.id AND l.tenant_id = ANY(${tenants}::uuid[])))
       AND (${from}::date IS NULL OR d."issueDate" >= ${from}::date) AND (${to}::date IS NULL OR d."issueDate" <= ${to}::date)
     GROUP BY 1`;
   const credits = await db.$queryRaw<{ currency: string; amount: number }[]>`
     SELECT t.currency, sum(greatest(0, billing_credit_balance(t.id) - billing_credit_reserved(t.id)))::integer AS amount
-    FROM tenants t WHERE (${tenants}::uuid[] IS NULL OR t.id = ANY(${tenants}::uuid[]))
+    FROM tenants t WHERE t."commercialStatus" = 'CLIENT' AND (${tenants}::uuid[] IS NULL OR t.id = ANY(${tenants}::uuid[]))
     GROUP BY 1`;
   return {
     billed: rows(billing.filter((r) => r.kind === 'SUBSCRIPTION')),

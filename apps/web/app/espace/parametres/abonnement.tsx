@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { CalendarClock, CheckCircle2, FileText, Printer, Send, Wallet } from 'lucide-react';
+import { CalendarClock, CheckCircle2, FileText, FlaskConical, Printer, Send, Wallet } from 'lucide-react';
 import { Loader, Section } from '@/components/espace/bits';
 import { Badge, Button, Empty, ErrorNote, Field, Input, Textarea, useToast } from '@/components/ui';
 import { accessChanged, accessCounter, LIMITED_KEEPS, LIMITED_WILL_KEEP, type AccessPhase } from '@/lib/access';
@@ -18,11 +18,18 @@ import { useApi } from '@/lib/use-api';
  * paiement activés et demande de régularisation à Cahiora. Lot G5d-2 : état du paiement de chaque document, reçus
  * provisoires à imprimer (sans valeur fiscale), crédit de l'établissement et demande de remboursement ; les moyens de
  * paiement n'apparaissent qu'une fois activés par Cahiora. Aucun paiement en ligne ici : Cahiora enregistre ce qu'il reçoit.
+ * Ajustements du 20 novembre 2026 : un établissement de test le lit en tête de page (rien ne lui est facturé ni limité) ;
+ * un document à payer sans échéance porte « Échéance à fixer » (G5c-1) ; une demande de remboursement reste possible
+ * pendant l'accès limité, dès que Cahiora ouvre les remboursements (G5d2-7).
+ * Précisions du 24 novembre 2026 : un établissement de test lit une seule carte simple, sans les rubriques commerciales
+ * qui ne le concernent pas (tarif, calendrier, documents, paiements, historique).
  */
 
 type Status = 'TRIAL' | 'PILOT' | 'AWAITING_ACCEPTANCE' | 'AWAITING_PAYMENT' | 'ACTIVE' | 'LIMITED';
 type Data = {
   today: string; currency: string;
+  /** Établissement de test (ajustements du 20 novembre 2026) : jamais facturé ni limité ; testNotice le dit à la direction. */
+  commercialStatus: 'TEST' | 'CLIENT'; testNotice: string | null;
   tariff: { pricePerPupil: number | null; minimum: number | null };
   subscription: {
     status: Status; statusLabel: string; statusSince: string; trialStart: string | null; trialEnd: string | null; trialDays: number | null;
@@ -61,6 +68,8 @@ type Regularization = {
   paid: number | null; balance: number | null;
   /** Échéance la plus proche des documents à payer (celle du premier document, lot G5c) ; dueDatePending : un document à payer n'en a pas encore. */
   dueDate: string | null; dueDatePending: boolean;
+  /** G5c-1 : ce que dit un document à payer sans échéance (délai proposé, en attente des conditions commerciales). */
+  dueDateNote: string | null;
   /** Documents d'abonnement et avoirs pris en compte, dans l'ordre d'émission ; un avoir est en négatif. */
   lines: { kind: 'SUBSCRIPTION' | 'CREDIT_NOTE'; label: string; reference: string; yearLabel: string | null; issueDate: string; dueDate: string | null; amount: number; relatedReference: string | null; payment: DocPayment | null }[];
   /** Moyens activés par Cahiora pour l'établissement, avec leurs coordonnées ; aucun tant que le verrou du serveur est fermé. */
@@ -101,7 +110,7 @@ export function Abonnement({ openCounts }: { openCounts?: () => void }) {
   const q = useApi<Data>('/settings/subscription');
   return (
     <Loader {...q}>
-      {(d) => (
+      {(d) => d.commercialStatus === 'TEST' ? <EtablissementDeTest d={d} /> : (
         <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
           <div className="grid content-start gap-4">
             <Etat d={d} />
@@ -118,6 +127,29 @@ export function Abonnement({ openCounts }: { openCounts?: () => void }) {
         </div>
       )}
     </Loader>
+  );
+}
+
+/**
+ * Établissement de test (24 novembre 2026) : une seule carte simple. Rien ne court, rien n'est facturé ni limité ; les
+ * rubriques commerciales (tarif, calendrier, documents, paiements, historique) ne le concernent pas et restent masquées.
+ */
+function EtablissementDeTest({ d }: { d: Data }) {
+  const yes = (text: string) => (
+    <li className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-5 flex-none text-good" aria-hidden /> <span>{text}</span></li>
+  );
+  return (
+    <Section title="Votre abonnement Cahiora" action={<Badge tone="accent" className="border border-dashed border-orange"><FlaskConical className="size-3.5" aria-hidden /> Établissement de test</Badge>}>
+      <div className="grid max-w-2xl gap-3 text-[15px]">
+        <p className="font-bold" role="status" data-testid="etablissement-de-test">{d.testNotice}</p>
+        <ul className="grid gap-2" aria-label="Établissement de test : ce que cela veut dire">
+          {yes('Accès complet à Cahiora, jamais limité.')}
+          {yes('Aucun essai, aucun abonnement, aucun document ni paiement de Cahiora.')}
+          {yes('Vos données scolaires ne sont pas touchées : élèves, notes, bulletins, paiements des familles.')}
+        </ul>
+        <p className="text-sm text-muted">Seul Cahiora peut faire passer votre établissement en client réel. Cette page montrera alors votre abonnement : période gratuite, conditions commerciales et documents.</p>
+      </div>
+    </Section>
   );
 }
 
@@ -311,9 +343,9 @@ function Regulariser({ d, reload }: { d: Data; reload: () => void }) {
               {r.dueDate ? (
                 <>
                   <b>{frDate(r.dueDate)}</b>{r.dueDate < d.today ? <span className="text-sm text-bad"> (passée)</span> : null}
-                  {r.dueDatePending && <span className="block text-xs text-muted">Celle du premier document. Les documents suivants n’ont pas encore d’échéance : Cahiora la fixera.</span>}
+                  {r.dueDatePending && <span className="block text-xs text-muted">Celle du premier document. D’autres documents à payer n’ont pas encore d’échéance : {r.dueDateNote ? r.dueDateNote.charAt(0).toLowerCase() + r.dueDateNote.slice(1) : 'Cahiora la fixera'}.</span>}
                 </>
-              ) : <span className="text-sm">{r.dueDatePending ? 'À fixer par Cahiora' : 'Pas encore fixée'}</span>}
+              ) : <span className="text-sm">{r.dueDatePending ? (r.dueDateNote ?? 'À fixer par Cahiora') : 'Pas encore fixée'}</span>}
             </Item>
             <Item label="État du paiement"><span className="text-sm">{r.payment}</span></Item>
             <Item label="Moyens de paiement">
@@ -469,7 +501,7 @@ function PaiementsCahiora({ d, reload }: { d: Data; reload: () => void }) {
                   <ErrorNote error={error} />
                   <Button onClick={ask} loading={busy} disabled={!f.amount} className="justify-self-start"><Send className="size-4" /> Demander le remboursement</Button>
                 </div>
-              ) : <p className="text-sm text-muted">{r.refundNote ?? (r.refundOpen ? 'Seule la direction de tout l’établissement demande un remboursement.' : credit.available > 0 ? 'Le remboursement n’est pas ouvert pendant l’accès limité.' : 'Aucun crédit disponible à rembourser.')}</p>}
+              ) : <p className="text-sm text-muted">{r.refundNote ?? (r.refundOpen ? 'Seule la direction de tout l’établissement demande un remboursement.' : 'Aucun crédit disponible à rembourser.')}</p>}
             </>
           )}
           {r.refunds.length > 0 && (
@@ -578,7 +610,9 @@ function DocumentItem({ doc, related }: { doc: Doc; related: Doc | null }) {
         <span className="min-w-0"><Badge tone={KIND_TONE[doc.kind]}>{doc.label}</Badge><span className="mt-1 block font-mono text-xs">{doc.reference}</span></span>
         <b className="text-base">{sign}{money(doc.total, doc.currency)}</b>
       </div>
-      <span className="text-muted">Le {frDate(doc.issueDate)}{doc.dueDate ? ` · échéance le ${frDate(doc.dueDate)}` : ''}{doc.yearLabel ? ` · année ${doc.yearLabel}` : ''}</span>
+      <span className="text-muted">
+        Le {frDate(doc.issueDate)}{doc.dueDate ? ` · échéance le ${frDate(doc.dueDate)}` : (doc.kind === 'SUBSCRIPTION' || doc.kind === 'SERVICE_PROFORMA') && doc.total > 0 ? ' · échéance à fixer' : ''}{doc.yearLabel ? ` · année ${doc.yearLabel}` : ''}
+      </span>
       {related && <span>{doc.kind === 'CREDIT_NOTE' ? 'Sur' : 'Reprend'} {related.label.toLowerCase()} {related.reference}</span>}
       <details>
         <summary className="inline-flex cursor-pointer items-center gap-1 font-bold text-brand"><FileText className="size-4" /> Détail</summary>
@@ -598,6 +632,7 @@ function DocumentItem({ doc, related }: { doc: Doc; related: Doc | null }) {
         </ul>
         {note('validity') && <p className="mt-2 text-warn">{note('validity')}</p>}
         {note('due') && <p className="mt-2 text-warn">{note('due')}</p>}
+        {note('dueNote') && <p className="mt-2 text-warn">{note('dueNote')}</p>}
       </details>
     </li>
   );

@@ -1,6 +1,6 @@
 import {
-  AmountDecisions, billableCounts, billingLine, Closed, DECISIONS, exclusionDeadline, exclusionOpen, firstPaidDayAfter, firstYearShare,
-  groupDocument, isClosed, Line, simulateYear, Tariff, YearStep, yearAmount, yearTariff,
+  addWorkingDays, AmountDecisions, billableCounts, billingLine, Closed, DECISIONS, DUE_TO_BE_FIXED, EXCLUSION_TARGET_WORKING_DAYS, exclusionDeadline, exclusionLate,
+  exclusionOpen, exclusionTarget, firstPaidDayAfter, firstYearShare, groupDocument, isClosed, laterDueDate, Line, simulateYear, Tariff, YearStep, yearAmount, yearTariff,
 } from './amounts-rules';
 import { addDays, trialEndDay } from './billing-rules';
 
@@ -300,5 +300,52 @@ describe('Montants G5c : document d’un groupe', () => {
     const doc = groupDocument([{ establishment: 'A', line: line('2026-11-30', 50_000) }, { establishment: 'B', line: line('2026-11-30', 60_000) }]);
     expect(doc).toMatchObject({ date: '2026-11-30', total: 110_000 });
     expect(() => groupDocument([])).toThrow('au moins un établissement');
+  });
+});
+
+describe('Ajustements G5c-1 : échéance de chaque document à payer (délais proposés, pas activés)', () => {
+  it('rien à payer : aucune échéance', () => {
+    expect(laterDueDate('2027-04-01', 0, 30)).toEqual({ dueDate: null, rule: 'NOTHING_DUE' });
+  });
+
+  it('délai sans version en vigueur : « échéance à fixer », jamais une date inventée', () => {
+    expect(laterDueDate('2027-04-01', 25_000, null)).toEqual({ dueDate: null, rule: 'TO_BE_FIXED' });
+    expect(DUE_TO_BE_FIXED).toContain('en attente de la validation des conditions commerciales');
+  });
+
+  it('délai en vigueur : la date du document plus ce délai', () => {
+    expect(laterDueDate('2027-04-01', 25_000, 30)).toEqual({ dueDate: '2027-05-01', rule: 'PARAMETER' });
+    expect(laterDueDate('2027-01-20', 15_000, 15)).toEqual({ dueDate: '2027-02-04', rule: 'PARAMETER' });
+  });
+
+  it('délai invalide ou date invalide : refus', () => {
+    expect(() => laterDueDate('2027-04-01', 25_000, 0)).toThrow('1 au moins');
+    expect(() => laterDueDate('2027-04-01', 25_000, 1.5)).toThrow('nombre entier');
+    expect(() => laterDueDate('01/04/2027', 25_000, 30)).toThrow();
+  });
+});
+
+describe('Ajustements G5c-7 : objectif de 7 jours ouvrés pour une demande d’exclusion', () => {
+  it('jours ouvrés : du lundi au vendredi (jours fériés : INFORMATION MANQUANTE, non retirés)', () => {
+    expect(EXCLUSION_TARGET_WORKING_DAYS).toBe(7);
+    // Vendredi 20 novembre 2026 + 7 jours ouvrés : mardi 1er décembre.
+    expect(addWorkingDays('2026-11-20', 7)).toBe('2026-12-01');
+    // Samedi + 1 jour ouvré : lundi.
+    expect(addWorkingDays('2026-11-21', 1)).toBe('2026-11-23');
+    expect(addWorkingDays('2026-11-23', 0)).toBe('2026-11-23');
+  });
+
+  it('l’objectif part de la demande, ou du document émis après elle (la demande revient alors à Cahiora)', () => {
+    expect(exclusionTarget('2026-11-20', null)).toBe('2026-12-01');
+    expect(exclusionTarget('2026-11-20', '2026-11-10')).toBe('2026-12-01');
+    // Document du mercredi 25 novembre : vendredi 4 décembre.
+    expect(exclusionTarget('2026-11-20', '2026-11-25')).toBe('2026-12-04');
+  });
+
+  it('en retard seulement si la demande attend encore après le dernier jour ; jamais acceptée d’office', () => {
+    expect(exclusionLate('PENDING', '2026-12-01', '2026-12-01')).toBe(false);
+    expect(exclusionLate('PENDING', '2026-12-01', '2026-12-02')).toBe(true);
+    expect(exclusionLate('VALIDATED', '2026-12-01', '2026-12-09')).toBe(false);
+    expect(exclusionLate('REFUSED', '2026-12-01', '2026-12-09')).toBe(false);
   });
 });

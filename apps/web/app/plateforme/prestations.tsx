@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { History, Plus } from 'lucide-react';
-import { Badge, Button, Card, Dialog, DialogContent, ErrorNote, Field, Input, Select, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Dialog, DialogContent, ErrorNote, Field, Input, Missing, Select, Textarea } from '@/components/ui';
 import { pf } from '@/lib/platform';
-import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { CodeField, frDate, money, need, ready, useSubmit } from './facturation-outils';
 
 /**
  * Prestations complémentaires (lot G5g), la « Tarification et prestations » du cahier des charges : catalogue en
@@ -204,6 +204,7 @@ function PriceCheck({ c }: { c: Catalog }) {
 function CreateDialog({ c, done }: { c: Catalog; done: () => void }) {
   const [f, setF] = useState({ name: '', description: '', pricing: 'FIXED' as Pricing, price: '', currency: 'XOF', effectiveFrom: c.today, reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, 'Prestation ajoutée au catalogue');
+  const missing = [need.text(f.name, 'le nom', 3), need.value(f.effectiveFrom, 'la date d’effet'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title="Nouvelle prestation" description="Elle entre au catalogue à sa date d’effet. Aucune prestation n’est imposée à un établissement.">
       <form className="grid gap-3" onSubmit={(ev) => {
@@ -226,7 +227,8 @@ function CreateDialog({ c, done }: { c: Catalog; done: () => void }) {
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Ajouter au catalogue</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Ajouter au catalogue</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -235,6 +237,7 @@ function CreateDialog({ c, done }: { c: Catalog; done: () => void }) {
 function VersionDialog({ c, s, done }: { c: Catalog; s: Service; done: () => void }) {
   const [f, setF] = useState({ name: s.last.name, description: s.last.description ?? '', pricing: s.last.pricing, active: s.last.active, effectiveFrom: c.today, reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, 'Nouvelle version enregistrée');
+  const missing = [need.text(f.name, 'le nom', 3), need.value(f.effectiveFrom, 'la date d’effet'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`Modifier : ${s.last.name}`} description="Nom, description, mode de prix ou activation. La nouvelle version s’applique à partir de sa date d’effet ; l’ancienne reste dans l’historique.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/services/${s.id}/versions`, { ...f, description: f.description || null })); }}>
@@ -249,7 +252,8 @@ function VersionDialog({ c, s, done }: { c: Catalog; s: Service; done: () => voi
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer cette version</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer cette version</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -258,6 +262,7 @@ function VersionDialog({ c, s, done }: { c: Catalog; s: Service; done: () => voi
 function PriceDialog({ c, s, done }: { c: Catalog; s: Service; done: () => void }) {
   const [f, setF] = useState({ currency: s.prices[0]?.currency ?? 'XOF', value: '', effectiveFrom: c.today, reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, 'Nouveau prix enregistré');
+  const missing = [need.value(f.value.trim(), 'le prix'), need.value(f.effectiveFrom, 'la date d’effet'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`Nouveau prix : ${s.last.name}`} description="Pour tous les établissements, à partir de sa date d’effet, jamais avant. Le prix précédent reste dans l’historique.">
       <form className="grid gap-3" onSubmit={(ev) => {
@@ -272,7 +277,8 @@ function PriceDialog({ c, s, done }: { c: Catalog; s: Service; done: () => void 
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer le prix</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer le prix</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -286,6 +292,8 @@ function RuleDialog({ c, s, done }: { c: Catalog; s: Service; done: () => void }
   const needsTenant = f.kind === 'SPECIAL_PRICE';
   const isMoney = f.kind === 'SPECIAL_PRICE' || f.kind === 'DISCOUNT_AMOUNT';
   const currency = tenant ? tenant.currency : f.currency;
+  const missing = [needsTenant && need.value(f.tenantId, 'l’établissement'), f.kind !== 'FREE' && need.value(f.value.trim(), 'la valeur'),
+    need.value(f.effectiveFrom, 'la date d’effet'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`Remise, tarif particulier ou gratuité : ${s.last.name}`} description="Une seule règle s’applique à la fois, jamais de cumul. Elle commence au plus tôt aujourd’hui et peut s’arrêter plus tard ; rien ne s’efface.">
       <form className="grid gap-3" onSubmit={(ev) => {
@@ -320,7 +328,8 @@ function RuleDialog({ c, s, done }: { c: Catalog; s: Service; done: () => void }
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer la règle</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer la règle</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -330,6 +339,7 @@ function EndDialog({ c, r, done }: { c: Catalog; r: Rule & { service: string }; 
   const notStarted = r.effectiveFrom > c.today;
   const [f, setF] = useState({ cancel: notStarted, lastDay: notStarted ? r.effectiveFrom : c.today, reason: '', code: '' });
   const { busy, error, submit } = useSubmit(done, f.cancel ? 'Règle annulée' : 'Règle arrêtée');
+  const missing = [!f.cancel && need.value(f.lastDay, 'le dernier jour d’application'), need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={`Arrêter : ${r.text}`} description={`${r.service}, ${r.scope}. La règle s’applique encore jusqu’au dernier jour choisi ; l’arrêt est définitif et reste dans l’historique.`}>
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', `/billing/services/rates/${r.id}/end`, { lastDay: f.cancel ? eve(r.effectiveFrom) : f.lastDay, reason: f.reason, code: f.code })); }}>
@@ -345,7 +355,8 @@ function EndDialog({ c, r, done }: { c: Catalog; r: Rule & { service: string }; 
         <Field label="Motif"><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" variant="outline" loading={busy}>{f.cancel ? 'Annuler la règle' : 'Arrêter la règle'}</Button>
+        <Button type="submit" variant="outline" loading={busy} disabled={!ready(missing)}>{f.cancel ? 'Annuler la règle' : 'Arrêter la règle'}</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );

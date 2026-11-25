@@ -16,7 +16,9 @@ const { authenticator } = require('otplib');
  *   le code (essai 11 du cahier), ouvre le justificatif et imprime le reçu provisoire ;
  * - la direction lit le moyen et ses instructions, l'état de chaque document et le reçu provisoire, qu'elle imprime ;
  * - le Super Admin saisit un paiement excédentaire erroné, l'annule par une contre-écriture motivée, le refait (essai 12) :
- *   le surplus devient un crédit et l'accès complet revient (choix 2 A) ; rapport financier de l'établissement ;
+ *   le surplus devient un crédit et l'accès complet revient (choix 2 A) ; rapport financier de l'établissement. La
+ *   ressaisie désigne la saisie annulée, une seule fois (ajustement G5d2-5 du 20 novembre 2026) : sans elle, la même
+ *   référence est refusée ; chaque paiement a son propre justificatif ;
  * - la direction lit l'accès rendu, le reçu annulé, son crédit, et en demande le remboursement (essai 14) ;
  * - le Super Admin rembourse avec sa preuve, puis désactive le moyen fictif par une nouvelle version ;
  * - la direction lit le remboursement.
@@ -31,7 +33,28 @@ const PW = 'Paiements-Direction-E2E-2026';
 const TZ = 'Africa/Douala';
 const CUR = 'XAF';
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
-const preuve = (name: string) => ({ name, mimeType: 'image/png', buffer: PNG });
+/** CRC-32 d'un bloc PNG (type et données). */
+const crc32 = (b: Buffer) => {
+  let c = ~0;
+  for (const x of b) {
+    c ^= x;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return ~c >>> 0;
+};
+let preuves = 0;
+/**
+ * Justificatif fictif, différent à chaque appel (un bloc de texte en plus) : un même justificatif joint à deux paiements
+ * exige le motif d'un autre versement (ajustement G5d2-5).
+ */
+const preuve = (name: string) => {
+  const data = Buffer.concat([Buffer.from('tEXt'), Buffer.from(`Comment\0preuve fictive ${Date.now()} ${++preuves}`)]);
+  const chunk = Buffer.alloc(data.length + 8);
+  chunk.writeUInt32BE(data.length - 4, 0);
+  data.copy(chunk, 4);
+  chunk.writeUInt32BE(crc32(data), data.length + 4);
+  return { name, mimeType: 'image/png', buffer: Buffer.concat([PNG.subarray(0, PNG.length - 12), chunk, PNG.subarray(PNG.length - 12)]) };
+};
 const INSTRUCTIONS = 'Coordonnées fictives des tests de navigateur : aucun compte réel. Indiquez la référence du document.';
 const NOTE = 'Commentaire interne fictif (test de navigateur)';
 const MOTIF_ANNULATION = 'Montant mal saisi : 85 000 au lieu de 55 000 (test de navigateur)';
@@ -89,7 +112,10 @@ test.beforeAll(async ({}, info) => {
   // Établissement fictif du Cameroun (XAF), seul dans son groupe, à sa propre adresse locale.
   const slug = `e2e-g5d2-${suffix}-${stamp}`;
   const t = await db.tenant.create({
-    data: { slug, name: `École fictive paiements ${suffix} ${stamp}`, country: 'CM', currency: CUR, timezone: TZ, domain: `${slug}.localhost`, group: { create: { name: `Groupe fictif paiements ${suffix} ${stamp}` } } },
+    data: {
+      commercialStatus: 'CLIENT', slug, name: `École fictive paiements ${suffix} ${stamp}`, country: 'CM', currency: CUR, timezone: TZ, domain: `${slug}.localhost`,
+      group: { create: { name: `Groupe fictif paiements ${suffix} ${stamp}` } },
+    },
   });
   Object.assign(E, { id: t.id, name: t.name, domain: t.domain, groupId: t.groupId, direction: `+22901900086${suffix}1`, comptable: `+22901900086${suffix}2` });
   const hash = await argon2.hash(PW, { type: argon2.argon2id });
@@ -196,8 +222,11 @@ const toast = (page: Page) => page.locator('div.fixed[aria-live="polite"]');
 const ligneEcole = (page: Page) => page.getByRole('list', { name: 'Établissements et documents à payer' }).locator(':scope > li', { hasText: E.name });
 const paiementsEcole = (page: Page) => page.getByRole('table', { name: 'Paiements enregistrés' }).locator('tbody tr', { hasText: E.name });
 
-/** Saisie d'un paiement reçu dans la console, avec son justificatif et le code. */
-async function enregistrer(page: Page, o: { montant: string; reference: string; attendu: string; apercu: string; note?: string; capture?: string }) {
+/**
+ * Saisie d'un paiement reçu dans la console, avec son justificatif et le code ; `ressaisie` : reçu de la saisie annulée
+ * que ce paiement remplace, refusé d'abord sans elle quand la référence est la sienne (ajustement G5d2-5).
+ */
+async function enregistrer(page: Page, o: { montant: string; reference: string; attendu: string; apercu: string; note?: string; capture?: string; ressaisie?: string }) {
   await ligneEcole(page).getByRole('button', { name: `Enregistrer un paiement de ${E.name}` }).click();
   const dlg = page.getByRole('dialog');
   await expect(dlg.getByLabel('Document concerné')).toHaveValue(await documentId(DOC.fin));
@@ -210,6 +239,18 @@ async function enregistrer(page: Page, o: { montant: string; reference: string; 
   await dlg.getByLabel('Justificatif du paiement').setInputFiles(preuve('preuve-fictive.png'));
   if (o.note) await dlg.getByLabel('Commentaire interne (facultatif)').fill(o.note);
   await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  if (o.ressaisie) {
+    const choix = dlg.getByLabel('Ressaisie d’un paiement annulé');
+    await expect(choix).toHaveValue('');
+    await dlg.getByRole('button', { name: 'Enregistrer le paiement' }).click();
+    await expect(dlg.getByText(`Cette référence est celle du paiement annulé du reçu ${o.ressaisie} : enregistrez la ressaisie de ce paiement en le désignant`)).toBeVisible();
+    await choix.selectOption((await choix.locator('option', { hasText: o.ressaisie }).getAttribute('value'))!);
+    // DS-7 A (24 novembre 2026) : toute ressaisie est justifiée par son motif ; le bouton attend ce motif.
+    await expect(dlg.getByRole('button', { name: 'Enregistrer le paiement' })).toBeDisabled();
+    await expect(dlg.getByTestId('a-completer')).toHaveText('À compléter : le motif de la ressaisie (5 caractères au moins).');
+    await dlg.getByLabel('Motif de la ressaisie').fill('Montant corrigé après la saisie annulée (test de navigateur)');
+    await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  }
   await tientEnLargeur(page);
   if (o.capture) await shot(page, o.capture);
   await dlg.getByRole('button', { name: 'Enregistrer le paiement' }).click();
@@ -225,7 +266,7 @@ async function documentId(reference: string) {
 async function recuDe(page: Page, reference: string) {
   const row = paiementsEcole(page).filter({ hasText: reference });
   await expect(row).toHaveCount(1);
-  const n = (await row.locator('td').first().textContent())!.trim();
+  const n = (await row.locator('td').first().locator('span').first().textContent())!.trim();
   expect(n).toMatch(/^PROV-REC-\d{6,}$/);
   return n;
 }
@@ -396,16 +437,28 @@ test('Super Admin : paiement excédentaire erroné annulé par une contre-écrit
   await page.keyboard.press('Escape');
   await expect(dlg).toBeHidden();
 
-  // Essai 12 : le bon montant, avec la même référence (celle d'une saisie annulée sert au paiement corrigé). Le
-  // paiement va au document concerné, puis au complément, puis devient un crédit ; l'accès complet revient (choix 2 A).
-  await enregistrer(page, { montant: '55000', reference: REF2, attendu: '40 000 FCFA', apercu: 'Surplus de 15 000 FCFA : aux autres documents à payer, puis en crédit de l’établissement.', capture: 'g5d2-9-paiement-excedentaire' });
-  RECU.corrige = (await paiementsEcole(page).filter({ hasText: REF2 }).filter({ hasText: 'Validé' }).locator('td').first().textContent())!.trim();
+  // Ajustement G5d2-5 : la saisie annulée attend sa ressaisie, qui la désigne.
+  const aRessaisir = page.getByRole('list', { name: 'Saisies annulées pas encore ressaisies' });
+  await page.getByText('Saisies annulées pas encore ressaisies', { exact: false }).click();
+  await expect(aRessaisir.locator(':scope > li', { hasText: RECU.errone })).toContainText(REF2);
+
+  // Essai 12 : le bon montant, avec la même référence (celle d'une saisie annulée sert au paiement corrigé, qui la
+  // désigne). Le paiement va au document concerné, puis au complément, puis devient un crédit ; l'accès complet revient (choix 2 A).
+  await enregistrer(page, {
+    montant: '55000', reference: REF2, attendu: '40 000 FCFA', apercu: 'Surplus de 15 000 FCFA : aux autres documents à payer, puis en crédit de l’établissement.',
+    capture: 'g5d2-9-paiement-excedentaire', ressaisie: RECU.errone,
+  });
+  const corrige = paiementsEcole(page).filter({ hasText: REF2 }).filter({ hasText: 'Validé' });
+  RECU.corrige = (await corrige.locator('td').first().locator('span').first().textContent())!.trim();
   expect(RECU.corrige).not.toBe(RECU.errone);
+  await expect(corrige).toContainText(`ressaisie de ${RECU.errone}`);
+  await expect(paiementsEcole(page).filter({ hasText: 'Annulé (contre-écriture)' }).filter({ hasText: RECU.errone })).toContainText(`ressaisi par ${RECU.corrige}`);
+  await expect(page.getByRole('list', { name: 'Saisies annulées pas encore ressaisies' }).locator(':scope > li', { hasText: RECU.errone })).toHaveCount(0);
   await expect(ligne).toContainText('Abonnement actif');
   await expect(ligne).toContainText(`Document de la fin de la gratuité : ${DOC.fin}, entièrement payé.`);
   await expect(ligne).toContainText('Crédit disponible : 5 000 FCFA.');
   await expect(ligne.locator('tr', { hasText: DOC.complement })).toContainText('Payé');
-  await expect(paiementsEcole(page).filter({ hasText: RECU.corrige })).toContainText('dont 5 000 FCFA en crédit');
+  await expect(paiementsEcole(page).filter({ hasText: RECU.corrige }).filter({ hasText: 'Validé' })).toContainText('dont 5 000 FCFA en crédit');
   await tientEnLargeur(page);
   await shot(page, 'g5d2-10-acces-rendu');
   const s = await db.subscription.findUniqueOrThrow({ where: { tenantId: E.id } });

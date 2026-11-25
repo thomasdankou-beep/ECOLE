@@ -96,7 +96,7 @@ async function login(slug: string, phone: string) {
 async function newSchool(s: School, key: string, full: boolean) {
   const t = await admin.tenant.create({
     data: {
-      slug: `g5b-${key}-${stamp}`, name: `École fictive G5b ${key.toUpperCase()} ${stamp}`, timezone: TZ, createdAt: morning(d(-60)),
+      commercialStatus: 'CLIENT', slug: `g5b-${key}-${stamp}`, name: `École fictive G5b ${key.toUpperCase()} ${stamp}`, timezone: TZ, createdAt: morning(d(-60)),
       group: { create: { name: `Groupe fictif G5b ${key.toUpperCase()} ${stamp}` } },
     },
   });
@@ -226,8 +226,14 @@ describe('Lot G5b · comptages des élèves facturables (données fictives)', ()
     });
     expect(cal.status).toBe(201);
     const counts = app.get(CountsService);
-    // Pendant l'essai, et le dernier jour gratuit lui-même : rien.
+    // Pendant l'essai, et le dernier jour gratuit lui-même : aucun comptage. Ajustement G5b-2 : un rappel à la direction,
+    // une seule fois, tant qu'il reste des élèves « À vérifier » (départ sans date connue) avant la fin de la gratuité.
+    expect(mine((await counts.runDue(at(trialEnd))).done, K)).toEqual([`count-check-free-end:${trialEnd}:${K.name}`]);
     expect(mine((await counts.runDue(at(trialEnd))).done, K)).toEqual([]);
+    const reminders = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_check_reminder' } }));
+    expect(reminders.length).toBe(1);
+    expect(reminders[0].body).toContain('3 élèves « À vérifier » ont un départ enregistré sans date connue');
+    expect(reminders[0].body).toContain('Sans réponse, ils restent comptés');
     // Fin de l'essai constatée par la tâche de l'abonnement (lot G5a), puis le comptage.
     const jobs = app.get(BillingJobsService);
     expect(mine((await jobs.runDue(at(addDays(trialEnd, 1)))).done, K)).toEqual([`trial-end:${K.name}`]);
@@ -292,7 +298,9 @@ describe('Lot G5b · comptages des élèves facturables (données fictives)', ()
     expect(one.body.items).toHaveLength(7);
     const u2 = one.body.items.find((i: { enrollmentId: string }) => i.enrollmentId === E.u2_dateDirection.enrollmentId);
     expect(u2).toMatchObject({ matricule: E.u2_dateDirection.matricule, className: '6e A', siteName: 'Site fictif Nord', basis: 'DEPARTURE_UNKNOWN', canDate: true, canExclude: false });
-    expect(u2.basisLabel).toMatch(/sans date : compté/);
+    // Ajustement G5b-2 : « À vérifier », compté ; la direction peut aussi confirmer la date introuvable.
+    expect(u2.basisLabel).toMatch(/^À vérifier : .*sans date connue, compté$/);
+    expect(u2).toMatchObject({ toCheck: true, canConfirm: true });
     // La notification de la direction pointe vers la vérification.
     const notes = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_recorded' } }));
     expect(notes).toHaveLength(1);
@@ -388,7 +396,13 @@ describe('Lot G5b · comptages des élèves facturables (données fictives)', ()
 
   it('fin de la vérification : comptage figé une seule fois, même lancé deux fois en même temps ; corrections fermées ; cumul et empreinte', async () => {
     const counts = app.get(CountsService);
+    // Ajustement G5b-2 : le dernier jour de la vérification (2 jours avant au plus), un rappel, une seule fois, s'il reste des
+    // élèves « À vérifier ».
+    expect(mine((await counts.runDue(at(reviewUntil))).done, K)).toEqual([`count-check-review:${R}:${K.name}`]);
     expect(mine((await counts.runDue(at(reviewUntil))).done, K)).toEqual([]);
+    const reminder = await inTenant(K.id, (tx) => tx.notification.findFirstOrThrow({ where: { userId: K.directionId, kind: 'billing.count_check_reminder', title: { contains: 'comptage du' } } }));
+    expect(reminder.body).toContain('1 élève « À vérifier » a un départ enregistré sans date connue');
+    expect(reminder.body).toContain('Sans réponse, il reste compté au comptage figé');
     const twin = [0, 1].map(() => new CountsService(app.get(PrismaService), app.get(PlatformDb), app.get(FilesService), app.get(AuditService)));
     const both = await Promise.all(twin.map((s) => s.runDue(at(addDays(reviewUntil, 1)))));
     expect(both.flatMap((r) => mine(r.done, K))).toEqual([`count-frozen:FIRST_REGULARIZATION:${R}:${K.name}`]);
@@ -419,6 +433,14 @@ describe('Lot G5b · comptages des élèves facturables (données fictives)', ()
     const notes = await inTenant(K.id, (tx) => tx.notification.findMany({ where: { userId: K.directionId, kind: 'billing.count_frozen' }, orderBy: { createdAt: 'asc' } }));
     expect(notes.map((x) => x.title)).toHaveLength(2);
     expect(notes[1].body).toMatch(/La vérification est terminée/);
+    // Ajustement G5b-2 : figé avec des élèves « À vérifier », comptés ; la direction le lit et le Super Admin reçoit une
+    // alerte (des nombres et le nom de l'établissement, jamais un élève).
+    expect(notes[1].body).toContain('1 élève « À vérifier » y reste compté');
+    const alerts = await admin.platformAlert.findMany({ where: { tenantId: K.id, kind: 'COUNT_TO_CHECK' }, orderBy: { createdAt: 'asc' } });
+    expect(alerts.map((a) => a.message)).toEqual([
+      expect.stringContaining('avec 3 élèves « À vérifier »'), expect.stringContaining('avec 1 élève « À vérifier »'),
+    ]);
+    expect(alerts.some((a) => a.message.includes(E.u3_sansDate.matricule) || a.message.includes(E.u3_sansDate.lastName))).toBe(false);
   });
 
   it('Super Admin : les nombres de chaque comptage, jamais un nom ni un matricule ; journaux de la plateforme, du groupe et de l’école', async () => {
@@ -448,8 +470,9 @@ describe('Lot G5b · comptages des élèves facturables (données fictives)', ()
     expect(actions(await inTenant(K.id, (tx) => tx.auditLog.findMany({ where: { action: { startsWith: 'billing.count' } } })))).toEqual(expected);
     const groupText = JSON.stringify(await admin.groupAuditLog.findMany({ where: { groupId: K.groupId } }));
     for (const e of Object.values(E)) expect(groupText).not.toContain(e.matricule);
-    // Les comptages ordinaires ne font pas d'alerte à la plateforme.
-    expect(await admin.platformAlert.count({ where: { tenantId: K.id, kind: { startsWith: 'COUNT' } } })).toBe(0);
+    // Les comptages ordinaires ne font pas d'alerte à la plateforme ; seuls ceux figés avec des élèves « À vérifier » en
+    // font une (ajustement G5b-2, voir plus haut).
+    expect(await admin.platformAlert.count({ where: { tenantId: K.id, kind: { startsWith: 'COUNT', not: 'COUNT_TO_CHECK' } } })).toBe(0);
   });
 
   it('année scolaire absente à la fin de l’essai : comptage en attente, une alerte et une notification une seule fois, puis fait dès que l’année existe', async () => {
@@ -504,5 +527,46 @@ describe('Lot G5b · comptages des élèves facturables (données fictives)', ()
     await expect(platform.$queryRawUnsafe('SELECT count(*) FROM billing_count_items')).rejects.toThrow(/permission denied/);
     await expect(platform.$queryRawUnsafe('SELECT count(*) FROM count_corrections')).rejects.toThrow(/permission denied/);
     await expect(platform.$queryRawUnsafe('SELECT * FROM current_tenant_billing_counts()')).rejects.toThrow(/permission denied/);
+  });
+  it('ajustement G5b-2 : hors de tout comptage, la direction fixe la date d’un départ ou confirme qu’elle est introuvable ; rien n’est retiré sans elle', async () => {
+    const checks = async () => (await as(K.direction).get('/settings/billing-counts/checks')).body;
+    const before = await checks();
+    const y = before.years.find((x: { academicYearId: string }) => x.academicYearId === year.id);
+    expect(y).toMatchObject({ yearLabel: year.label, date: T, toCheck: 1 });
+    expect(y.pupils.map((p: { enrollmentId: string }) => p.enrollmentId)).toEqual([E.u3_sansDate.enrollmentId]);
+    expect(y.pupils[0]).toMatchObject({ basis: 'DEPARTURE_UNKNOWN', toCheck: true, canConfirm: true, canDate: true, auditDay: null, matricule: E.u3_sansDate.matricule });
+    expect(before.note).toMatch(/Aucun élève n’est retiré sans votre décision/);
+
+    const post = (body: Record<string, unknown>, who = K.direction) => as(who).post('/settings/billing-counts/checks', body);
+    const confirm = { kind: 'DEPARTURE_CONFIRMED', enrollmentId: E.u3_sansDate.enrollmentId, justification: 'Registre consulté, aucune date (fictif)' };
+    expect(message(await post({ ...confirm, departureDate: d(-4) }))).toMatch(/ne porte pas de date de départ/);
+    expect(message(await post({ ...confirm, enrollmentId: E.a1_actif.enrollmentId }))).toMatch(/pas de départ enregistré avant l’historique/);
+    expect(message(await post({ ...confirm, justification: 'non' }))).toMatch(/Justification/);
+    expect((await post(confirm, K.secretariat!)).status).toBe(403);
+    expect((await post(confirm, K.siteDirection!)).status).toBe(403);
+    const ok = await post(confirm);
+    expect(ok.status).toBe(201);
+    expect(ok.body).toMatchObject({ status: 'VALIDATED' });
+    expect(message(await post(confirm))).toMatch(/déjà fixée ou confirmée introuvable/);
+
+    // Toujours compté, plus « À vérifier » ; sa date reste modifiable si la direction la retrouve.
+    const after = (await checks()).years.find((x: { academicYearId: string }) => x.academicYearId === year.id);
+    expect(after.toCheck).toBe(0);
+    expect(after.pupils[0]).toMatchObject({ enrollmentId: E.u3_sansDate.enrollmentId, basis: 'DEPARTURE_CONFIRMED', toCheck: false, canConfirm: false, canDate: true });
+    const k = await inTenant(K.id, (tx) => tx.countCorrection.findUniqueOrThrow({ where: { id: ok.body.id } }));
+    expect(k).toMatchObject({ kind: 'DEPARTURE_CONFIRMED', countId: null, departureDate: null, status: 'VALIDATED', decidedByKind: 'school' });
+    const log = await inTenant(K.id, (tx) => tx.auditLog.findFirstOrThrow({ where: { action: 'billing.count_departure_confirmed', entityId: ok.body.id } }));
+    expect(log.data).toMatchObject({ countId: null, outsideCount: true, enrollmentId: E.u3_sansDate.enrollmentId });
+    const pf = await admin.platformAuditLog.findFirstOrThrow({ where: { action: 'billing.count_departure_confirmed', tenantId: K.id } });
+    expect(pf.data).toMatchObject({ outsideCount: true, countKind: null });
+
+    // La date retrouvée l'emporte : jamais dans le futur, ni avant l'arrivée ; l'élève sort alors de la liste.
+    const date = (departureDate: string) => post({ kind: 'DEPARTURE_DATE', enrollmentId: E.u3_sansDate.enrollmentId, departureDate, justification: 'Date retrouvée dans le registre (fictif)' });
+    expect(message(await date(d(1)))).toMatch(/futur/);
+    expect(message(await date(addDays(year.start, -200)))).toMatch(/précède l’arrivée/);
+    expect((await date(d(-1))).status).toBe(201);
+    const last = (await checks()).years.find((x: { academicYearId: string }) => x.academicYearId === year.id);
+    expect(last).toMatchObject({ toCheck: 0, pupils: [] });
+    expect(await inTenant(K.id, (tx) => tx.countCorrection.count({ where: { countId: null } }))).toBe(2);
   });
 });

@@ -7,9 +7,10 @@ import { connexion } from './connexion';
 const { authenticator } = require('otplib');
 
 /**
- * Lot G5a, dans un vrai navigateur, au bureau et au téléphone : « Commercial et facturation » du Super Admin (essai,
- * calendrier, paramètres, conditions, journal) et « Abonnement Cahiora » de la direction (lecture et acceptation des
- * conditions). Base de test seulement ; établissement, conditions et comptes fictifs ; aucun paiement, aucun SMS.
+ * Lot G5a, dans un vrai navigateur, au bureau et au téléphone : « Commercial et facturation » du Super Admin (statut
+ * commercial, essai, calendrier, paramètres, conditions, journal) et « Abonnement Cahiora » de la direction (lecture et
+ * acceptation des conditions). Base de test seulement ; établissement, conditions et comptes fictifs ; aucun paiement,
+ * aucun SMS. L'école de démonstration y joue un client réel (préparation des tests de navigateur).
  */
 const url = process.env.DATABASE_ADMIN_URL ?? 'postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test';
 if (!/\/erp_test(\?|$)/.test(url)) throw new Error('Base refusée : erp_test seulement');
@@ -31,7 +32,7 @@ test.beforeAll(async ({}, info) => {
   const sa = { name: `Super Admin facturation ${suffix}`, passwordHash: await argon2.hash(SA_PW, { type: argon2.argon2id }), active: true, mustChangePassword: false, mustSetupTwoFactor: false, failedLogins: 0, lockedUntil: null, totpEnabled: false, totpSecret: null, totpLastStep: null };
   const admin = await db.platformAdmin.upsert({ where: { email: saEmail }, update: sa, create: { email: saEmail, ...sa } });
   await db.platformRecoveryCode.deleteMany({ where: { adminId: admin.id } });
-  // Un établissement fictif sans abonnement, seul dans son groupe.
+  // Un établissement fictif sans abonnement, seul dans son groupe : établissement de test, comme toute école créée.
   const t = await db.tenant.create({ data: { slug: `e2e-g5a-${suffix}-${stamp}`, name: `École fictive facturation ${suffix} ${stamp}`, group: { create: { name: `Groupe fictif facturation ${suffix} ${stamp}` } } } });
   ecole = t.name;
   // École de démonstration : fin d'essai simulée (on ne peut pas attendre 14 jours dans un test). Base de test seulement.
@@ -95,6 +96,9 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
     await expect(page.getByRole('group', { name: 'Commercial et facturation' }).getByRole('button', { name: nom, exact: true })).toBeVisible();
   }
   await expect(page.getByText('Facturé et encaissé ne se confondent jamais', { exact: false })).toBeVisible();
+  // Établissements de test (ajustements du 20 novembre 2026) : comptés à part, jamais facturés ni limités.
+  await expect(page.getByLabel('Établissements de test', { exact: true })).toContainText('ni limité');
+  await expect(page.getByLabel('Établissements de test', { exact: true })).toContainText('Clients réels sans abonnement :');
   await shot(page, '1-vue-ensemble');
 
   // Paramètres tarifaires : valeurs du cahier des charges, alertes du pilote provisoires ; conditions fictives publiées.
@@ -103,27 +107,68 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   await expect(prix).toContainText('500 FCFA');
   await expect(page.locator('tr', { hasText: 'Minimum annuel par établissement' })).toContainText('40 000 FCFA');
   await expect(page.locator('tr', { hasText: 'Première alerte avant la fin d’un pilote' })).toContainText('Provisoire (D-G5-38)');
+  // G5c-1 : délais d'échéance proposés (30 et 15 jours), sans effet tant qu'aucune valeur n'est saisie.
+  const proposes = page.getByRole('list', { name: 'Délais proposés' });
+  await expect(proposes.locator('li', { hasText: 'document complémentaire' })).toContainText('30 jours');
+  await expect(proposes.locator('li', { hasText: 'proforma' })).toContainText('15 jours');
+  await expect(proposes.getByText('Proposé, non activé (G5c-1)')).toHaveCount(2);
   await page.getByRole('button', { name: 'Publier une version' }).click();
   const publier = page.getByRole('dialog');
   await publier.getByLabel('Titre').fill(titre);
   await publier.getByLabel('Texte des conditions').fill('Texte fictif publié par les tests de navigateur du lot G5a. Ce ne sont pas les conditions commerciales de Cahiora.');
-  // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est envoyé.
+  // Réserve de Dankou du 20 novembre 2026 : sans l'attestation du texte définitif et validé, rien n'est envoyé ; le
+  // bouton reste désactivé tant qu'elle manque (24 novembre 2026).
   const attestation = publier.getByLabel(/Je confirme que ce texte est la version définitive des conditions commerciales de Cahiora/);
   await expect(attestation).not.toBeChecked();
   await publier.getByLabel('Code de votre application d’authentification').fill(await code(page));
-  await publier.getByRole('button', { name: 'Publier' }).click();
-  await expect(publier).toBeVisible();
+  await expect(publier.getByRole('button', { name: 'Publier' })).toBeDisabled();
+  await expect(publier.getByTestId('a-completer')).toHaveText('À compléter : la case de confirmation.');
   expect(await attestation.evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true);
   await attestation.check();
+  await expect(publier.getByTestId('a-completer')).toHaveCount(0);
   await publier.getByLabel('Code de votre application d’authentification').fill(await code(page));
   await publier.getByRole('button', { name: 'Publier' }).click();
   await expect(publier).toBeHidden();
   await expect(page.getByText(titre)).toBeVisible();
   await shot(page, '2-parametres-tarifaires');
 
-  // Abonnements : essai gratuit de l'établissement fictif, avec un code.
+  // Abonnements : l'établissement fictif est un établissement de test, jamais facturé ni limité, sans essai ni pilote.
   await rubrique(page, 'Commercial et facturation', 'Abonnements');
   const ligne = page.locator('tr', { hasText: ecole });
+  // 24 novembre 2026 : badge distinct, « Établissement de test » (contour pointillé), puis « Client réel » (plein).
+  await expect(ligne.getByText('Établissement de test', { exact: true })).toBeVisible();
+  await expect(ligne.getByText('Jamais facturé ni limité')).toBeVisible();
+  await expect(ligne.getByRole('button', { name: 'Ouvrir l’essai' })).toHaveCount(0);
+  await expect(ligne.getByRole('button', { name: 'École pilote' })).toHaveCount(0);
+  await expect(page.getByText('Le statut se change seulement tant qu’aucun abonnement ni document n’existe', { exact: false })).toBeVisible();
+  await tientEnLargeur(page);
+  // Capture sans le message de la publication des conditions (il disparaît seul après quelques secondes).
+  if (SHOTS) await expect(page.getByText('Conditions commerciales publiées', { exact: true })).toBeHidden({ timeout: 10_000 });
+  await shot(page, '3a-etablissement-de-test');
+  // Passage en client réel : confirmation cochée obligatoire, motif et code. Case décochée à l'ouverture, bouton
+  // désactivé tant qu'il manque une information, avec ce qui reste à compléter (24 novembre 2026).
+  await ligne.getByRole('button', { name: 'Passer en client réel' }).click();
+  const statut = page.getByRole('dialog', { name: `Passer en client réel : ${ecole}` });
+  await expect(statut).toBeVisible();
+  const client = statut.getByLabel(/Je confirme que cet établissement est un client commercial réel de Cahiora/);
+  const passer = statut.getByRole('button', { name: 'Passer en client réel' });
+  await expect(client).not.toBeChecked();
+  await expect(passer).toBeDisabled();
+  await expect(statut.getByTestId('a-completer')).toHaveText('À compléter : le motif (5 caractères au moins), la case de confirmation, le code à 6 chiffres de votre application d’authentification.');
+  await statut.getByLabel('Motif').fill('Accord fictif de la direction pour un abonnement (test de navigateur)');
+  await statut.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await expect(passer).toBeDisabled();
+  await expect(statut.getByTestId('a-completer')).toHaveText('À compléter : la case de confirmation.');
+  expect(await client.evaluate((el: HTMLInputElement) => el.validity.valueMissing)).toBe(true);
+  await shot(page, '3b-passer-en-client-reel');
+  await client.check();
+  await expect(passer).toBeEnabled();
+  await expect(statut.getByTestId('a-completer')).toHaveCount(0);
+  await statut.getByLabel('Code de votre application d’authentification').fill(await code(page));
+  await passer.click();
+  await expect(statut).toBeHidden();
+  await expect(ligne.getByText('Client réel', { exact: true })).toBeVisible();
+  // Essai gratuit du client réel, avec un code ; son statut ne change plus dès que l'abonnement existe.
   await expect(ligne.getByText('Aucun abonnement')).toBeVisible();
   await ligne.getByRole('button', { name: 'Ouvrir l’essai' }).click();
   const essai = page.getByRole('dialog');
@@ -135,6 +180,7 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   await expect(essai).toBeHidden();
   await expect(ligne.getByText('Essai gratuit', { exact: true })).toBeVisible();
   await expect(ligne.getByText('encore 14 jours')).toBeVisible();
+  await expect(ligne.getByRole('button', { name: 'Repasser en test' })).toHaveCount(0);
   await ligne.getByRole('button', { name: `Historique de l’abonnement de ${ecole}` }).click();
   await expect(page.getByRole('dialog').getByText('Essai gratuit ouvert')).toBeVisible();
   await shot(page, '3-abonnements-historique');
@@ -164,7 +210,11 @@ test('Super Admin : double authentification, puis essai, calendrier, paramètres
   await shot(page, '4a-calendrier-annee-courte');
   await cal.getByRole('button', { name: 'Saisir les dates à la main' }).click();
   await expect(cal.getByLabel('Formule des dates proposées')).toHaveValue('MANUEL');
-  await expect(enregistrer).toBeEnabled();
+  await expect(cal.getByText('La formule B ne s’applique pas à une année de 6 mois ou moins', { exact: false })).toBeHidden();
+  // 24 novembre 2026 : le bouton reste désactivé tant que l'obligatoire manque, et la liste dit quoi.
+  await expect(enregistrer).toBeDisabled();
+  await expect(cal.getByTestId('a-completer')).toContainText('le motif (5 caractères au moins)');
+  await expect(cal.getByTestId('a-completer')).toContainText('le code à 6 chiffres de votre application d’authentification');
   // Retour à la formule B, puis la première régularisation avancée à la main : la version sera « ajustée », avec son motif.
   await cal.getByLabel('Début de l’année scolaire').fill('2026-09-14');
   await cal.getByLabel('Fin de l’année scolaire').fill('2027-07-09');

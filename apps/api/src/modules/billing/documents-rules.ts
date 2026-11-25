@@ -192,6 +192,10 @@ export function creditLine(input: CreditInput, decisions: AmountDecisions): Cred
   return { state: 'READY', year, pupilsChange: input.pupils - input.previousPupils, alreadyBilled: input.alreadyBilled, amount };
 }
 
-/** Libellé d'une ligne d'avoir : l'établissement et le comptage du document touché. */
-export const creditLineLabel = (establishment: string, kind: CountKind, date: string) =>
-  `${establishment} · Avoir après exclusion d’une inscription erronée (${COUNT_KIND_LABELS[kind].toLowerCase()} du ${frDay(date)})`;
+/**
+ * Libellé d'une ligne d'avoir : l'établissement et le comptage du document touché ; `departure` : date d'un départ
+ * contesté et accepté (G5b-2, 24 novembre 2026), sinon l'exclusion d'une inscription annulée pour erreur de saisie.
+ */
+export const creditLineLabel = (establishment: string, kind: CountKind, date: string, departure: string | null = null) => departure
+  ? `${establishment} · Avoir après le départ d’un élève avant le comptage, le ${frDay(departure)} (${COUNT_KIND_LABELS[kind].toLowerCase()} du ${frDay(date)})`
+  : `${establishment} · Avoir après exclusion d’une inscription erronée (${COUNT_KIND_LABELS[kind].toLowerCase()} du ${frDay(date)})`;

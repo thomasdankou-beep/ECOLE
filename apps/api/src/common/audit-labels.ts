@@ -168,6 +168,9 @@ export const AUDIT_LABELS: Record<string, string> = {
   'billing.count_exclusion_validated': 'Comptage des élèves : exclusion validée',
   'billing.count_exclusion_refused': 'Comptage des élèves : exclusion refusée',
   'billing.count_departure_dated': 'Comptage des élèves : date d’un départ fixée par la direction',
+  'billing.count_departure_confirmed': 'Comptage des élèves : date d’un départ confirmée introuvable par la direction (élève compté)',
+  // Statut commercial de l'établissement (ajustements G5) : établissement de test ou client réel.
+  'billing.commercial_status_changed': 'Cahiora : statut commercial de l’établissement modifié (établissement de test ou client réel)',
   // Prestations complémentaires de Cahiora pour l'établissement (lot G5g).
   'billing.service_rule_added': 'Cahiora : prix d’une prestation pour l’établissement (tarif particulier, remise ou gratuité)',
   'billing.service_rule_ended': 'Cahiora : règle de prix d’une prestation arrêtée',

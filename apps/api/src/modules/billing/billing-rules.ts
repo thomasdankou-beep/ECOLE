@@ -16,6 +16,8 @@ export interface ParameterDef {
   usedFrom: string;
   /// Décision qui doit encore confirmer la valeur.
   provisional?: string;
+  /// Valeur proposée par Cahiora, jamais appliquée : le paramètre reste sans effet tant qu'aucune version n'est saisie.
+  proposed?: number;
 }
 
 /** Paramètres modifiables par le Super Admin, sans code (§15). Pourcentages en centièmes : 1500 = 15 %. */
@@ -32,6 +34,17 @@ export const PARAMETERS = {
   // régularisation (0 : pas de préavis), durée maximale de chaque prolongation exceptionnelle, renouvellements compris.
   NOTICE_HOURS: { label: 'Préavis après la réponse à une demande de régularisation', unit: 'hours', min: 0, max: 168, usedFrom: 'G5d' },
   EXTENSION_MAX_DAYS: { label: 'Durée maximale d’une prolongation exceptionnelle', unit: 'days', min: 1, max: 366, usedFrom: 'G5d' },
+  // G5c-1 (Dankou, 20 novembre 2026) : une échéance explicite pour chaque document qui porte un montant à payer, avec
+  // des délais proposés mais pas activés avant la validation des conditions commerciales. Sans version saisie, le
+  // document porte « Échéance à fixer » ; une échéance passée ne limite jamais l'accès (D-G5-18 ouverte).
+  COMPLEMENT_DUE_DAYS: {
+    label: 'Échéance d’un document complémentaire de l’abonnement (régularisation), en jours après sa date', unit: 'days', min: 1, max: 120, usedFrom: 'G5c',
+    provisional: 'G5c-1', proposed: 30,
+  },
+  SERVICE_DUE_DAYS: {
+    label: 'Échéance d’une proforma de prestations complémentaires, en jours après sa date', unit: 'days', min: 1, max: 120, usedFrom: 'G5c',
+    provisional: 'G5c-1', proposed: 15,
+  },
   REFERRAL_REWARD: { label: 'Crédit de parrainage par école filleule', unit: 'money', min: 0, max: 10_000_000, usedFrom: 'G5h' },
   COMMISSION_APPORTEUR: { label: 'Commission d’un apporteur d’affaires', unit: 'percent', min: 0, max: 10_000, usedFrom: 'G5h' },
   COMMISSION_PREMIUM: { label: 'Commission d’un partenaire premium', unit: 'percent', min: 0, max: 10_000, usedFrom: 'G5h' },

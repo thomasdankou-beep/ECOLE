@@ -10,7 +10,7 @@ import { localDay } from '../../common/country';
 export const COUNT_KINDS = ['TRIAL_END', 'PILOT_END', 'INITIAL', 'FIRST_REGULARIZATION', 'FINAL_REGULARIZATION'] as const;
 export type CountKind = (typeof COUNT_KINDS)[number];
 export type CountStage = 'PROVISIONAL' | 'FROZEN';
-export type CountBasis = 'ACTIVE' | 'DEPARTURE_AUDIT' | 'DEPARTURE_UNKNOWN' | 'DEPARTURE_DIRECTION' | 'EXCLUDED';
+export type CountBasis = 'ACTIVE' | 'DEPARTURE_AUDIT' | 'DEPARTURE_UNKNOWN' | 'DEPARTURE_DIRECTION' | 'DEPARTURE_CONFIRMED' | 'EXCLUDED';
 
 export const COUNT_KIND_LABELS: Record<CountKind, string> = {
   TRIAL_END: 'Fin de l’essai gratuit',
@@ -24,11 +24,23 @@ export const COUNT_STAGE_LABELS: Record<CountStage, string> = { PROVISIONAL: 'Pr
 
 export const BASIS_LABELS: Record<CountBasis, string> = {
   ACTIVE: 'Inscrit à la date',
-  DEPARTURE_AUDIT: 'Départ enregistré avant l’historique : date du journal',
-  DEPARTURE_UNKNOWN: 'Départ enregistré avant l’historique, sans date : compté',
+  DEPARTURE_AUDIT: 'À vérifier : départ enregistré avant l’historique, compté (date du journal après le jour du comptage)',
+  DEPARTURE_UNKNOWN: 'À vérifier : départ enregistré avant l’historique, sans date connue, compté',
   DEPARTURE_DIRECTION: 'Départ enregistré avant l’historique : date fixée par la direction',
+  DEPARTURE_CONFIRMED: 'Départ sans date retrouvée, confirmé par la direction : compté',
   EXCLUDED: 'Exclu : inscription annulée par erreur de saisie',
 };
+
+/**
+ * G5b-2 (Dankou, 20 novembre 2026) : un élève signalé parti sans date de départ connue est « À vérifier » et reste
+ * compté, jamais exclu d'office. La direction fixe sa date, ou confirme qu'elle est introuvable (il reste compté, sans
+ * être « À vérifier »), à tout moment avant le comptage (période gratuite comprise) ou pendant sa vérification.
+ */
+export const TO_CHECK_BASES: CountBasis[] = ['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN'];
+export const isToCheck = (i: { counted: boolean; basis: CountBasis }) => i.counted && TO_CHECK_BASES.includes(i.basis);
+/** Jours avant la fin d'une vérification (ou d'une période gratuite) où la direction est rappelée s'il reste des élèves « À vérifier ». */
+export const TO_CHECK_REMINDER_DAYS = 2;
+export const FREE_END_CHECK_REMINDER_DAYS = 3;
 
 /** Dates du calendrier de facturation qui donnent un comptage. */
 export const CALENDAR_COUNT_DATES = {
@@ -128,14 +140,15 @@ export function auditDepartureDays(rows: ItemRow[], logs: { entityId: string | n
 /**
  * Liste d'un comptage au jour R, triée par inscription :
  * - inscription active à la fin du jour R : comptée ;
- * - départ enregistré avant l'historique : la date fixée par la direction pendant une vérification, sinon celle du
- *   journal d'audit ; comptée si le départ est après R (le jour du départ n'est plus un jour de présence, comme une
- *   sortie datée) ; sans aucune date, comptée et signalée (D-G5-16 A : un silence ne retire pas l'élève du comptage) ;
+ * - départ enregistré avant l'historique : la date fixée par la direction, sinon celle du journal d'audit ; comptée si
+ *   le départ est après R (le jour du départ n'est plus un jour de présence, comme une sortie datée) ; sans aucune date,
+ *   comptée et « À vérifier » (D-G5-16 A et G5b-2 : un silence ne retire pas l'élève du comptage), sauf si la direction
+ *   a confirmé la date introuvable (`confirmed`) : comptée, sans être « À vérifier » ;
  * - exclusion validée : gardée dans la liste, non comptée, pour que la direction la voie.
  * Une inscription qui n'était pas active à R n'apparaît pas.
  */
 export function resolveItems(
-  date: string, rows: ItemRow[], departures: { direction: Map<string, string>; audit: Map<string, string> }, excluded: Set<string>,
+  date: string, rows: ItemRow[], departures: { direction: Map<string, string>; audit: Map<string, string>; confirmed?: Set<string> }, excluded: Set<string>,
 ): CountItem[] {
   const out: CountItem[] = [];
   for (const r of rows) {
@@ -145,13 +158,37 @@ export function resolveItems(
     if (r.state === 'UNKNOWN') {
       const byDirection = departures.direction.get(r.enrollmentId);
       departureDate = byDirection ?? departures.audit.get(r.enrollmentId) ?? null;
-      basis = byDirection ? 'DEPARTURE_DIRECTION' : departureDate ? 'DEPARTURE_AUDIT' : 'DEPARTURE_UNKNOWN';
+      basis = byDirection ? 'DEPARTURE_DIRECTION' : departures.confirmed?.has(r.enrollmentId) ? 'DEPARTURE_CONFIRMED' : departureDate ? 'DEPARTURE_AUDIT' : 'DEPARTURE_UNKNOWN';
       if (departureDate && departureDate <= date) continue;
     }
     const isExcluded = excluded.has(r.enrollmentId);
     out.push({ enrollmentId: r.enrollmentId, classId: r.classId, siteId: r.siteId, counted: !isExcluded, basis: isExcluded ? 'EXCLUDED' : basis, departureDate });
   }
   return out.sort((a, b) => a.enrollmentId.localeCompare(b.enrollmentId));
+}
+
+/**
+ * Lecture 3 (Dankou, 24 novembre 2026, soir) : « un élève revenu après une contestation acceptée doit pouvoir redevenir
+ * facturable au prochain comptage s'il remplit les conditions requises et que sa précédente facturation a été
+ * intégralement annulée ». Une exclusion validée (inscription annulée par erreur de saisie) ou une contestation acceptée
+ * (à partir du jour du départ contesté) retire l'élève des comptages qui l'ont compté avant son retour : la ligne est
+ * « annulée » pour la facturation, le comptage figé ne change pas. Revenu (inscription rétablie après la demande), il
+ * est compté de nouveau au premier comptage qui suit son retour, s'il est inscrit ce jour-là ; chaque inscription ne
+ * compte qu'une fois dans l'année. Même règle que la base (billing_item_voided).
+ */
+export type VoidingRequest = { id: string; status: string; departureDate: string | null; requestedAt: Date; decidedAt: Date | null };
+
+/** La demande `k` (comptée comme validée) retire-t-elle la ligne d'un comptage du jour `c.referenceDate`, fin du jour `c.at` ? */
+export function requestVoids(k: VoidingRequest, returns: Date[], c: { referenceDate: string; at: Date }) {
+  return (!k.departureDate || k.departureDate <= c.referenceDate) && !returns.some((r) => r > k.requestedAt && r <= c.at);
+}
+
+/**
+ * Demande validée (au plus tard à `until`, sauf `except`) qui annule la ligne de ce comptage pour cette inscription, ou
+ * null. `returns` : instants où l'inscription a été rétablie (événements « REINSTATED »).
+ */
+export function voidingRequest<T extends VoidingRequest>(requests: T[], returns: Date[], c: { referenceDate: string; at: Date }, o: { until?: Date; except?: string } = {}) {
+  return requests.find((k) => k.status === 'VALIDATED' && !!k.decidedAt && (!o.until || k.decidedAt <= o.until) && k.id !== o.except && requestVoids(k, returns, c)) ?? null;
 }
 
 /** Vérification encore ouverte : comptage provisoire, dernier jour de vérification pas encore passé, pas encore figé. */

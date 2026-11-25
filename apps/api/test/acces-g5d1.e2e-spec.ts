@@ -84,7 +84,7 @@ async function login(s: { slug: string }, phone: string) {
 /** Établissement fictif, seul dans son groupe : direction de tout l'établissement, comptable et parent. */
 async function newSchool(k: 'A' | 'B' | 'C' | 'D' | 'E'): Promise<School> {
   const t = await admin.tenant.create({
-    data: { slug: `g5d1-${k.toLowerCase()}-${stamp}`, name: `École fictive G5d-1 ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5d-1 ${k} ${stamp}` } } },
+    data: { commercialStatus: 'CLIENT', slug: `g5d1-${k.toLowerCase()}-${stamp}`, name: `École fictive G5d-1 ${k} ${stamp}`, group: { create: { name: `Groupe fictif G5d-1 ${k} ${stamp}` } } },
   });
   const hash = await argon2.hash(PASSWORD, { type: argon2.argon2id });
   const directionId = await inTenant(t.id, async (tx) => {
@@ -200,7 +200,7 @@ describe('Lot G5d-1 · accès selon le paiement : rappels, délai de grâce, acc
     const v = (await school(S.A.direction).get('/settings/subscription')).body;
     expect(v.access).toMatchObject({ phase: 'GRACE', graceStart: J(15), graceEnd: J(29), paymentMeansActive: false });
     expect(v.regularization).toEqual({
-      currency: 'XOF', groupPending: null, documents: 0, requested: null, dueDate: null, dueDatePending: false, lines: [],
+      currency: 'XOF', groupPending: null, documents: 0, requested: null, dueDate: null, dueDatePending: false, dueDateNote: null, lines: [],
       mention: 'Document provisoire, sans valeur fiscale : ce n’est pas une facture.',
       payment: 'Aucun paiement validé par Cahiora pour le moment.', paymentMeans: [],
       paymentMeansNote: 'Aucun moyen de paiement n’est encore activé par Cahiora : envoyez une demande de régularisation, Cahiora vous répondra.',

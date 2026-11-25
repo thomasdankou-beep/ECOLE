@@ -26,13 +26,17 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
   const dir = mkdtempSync(join(tmpdir(), 'erp-migration-g1-'));
   const deploy = () =>
     execSync(`npx prisma migrate deploy --schema ${join(dir, 'schema.prisma')}`, { cwd: join(__dirname, '..'), env: { ...process.env, DATABASE_URL: URL, DATABASE_ADMIN_URL: URL }, stdio: 'pipe' });
-  /** Tout ce qui existait avant : chaque école (toutes ses colonnes) et ses lignes, lues dans sa propre zone. */
+  /**
+   * Tout ce qui existait avant : chaque école (toutes ses colonnes) et ses lignes, lues dans sa propre zone.
+   * Les colonnes ajoutées par des lots plus récents (groupe, puis statut commercial des ajustements G5)
+   * n'existaient pas avant : elles sont vérifiées à part, plus bas et dans migration-ajustements.
+   */
   const snapshot = () =>
     db.$transaction(async (tx) => {
       const out: Record<string, unknown> = {};
       for (const s of SCHOOLS) {
         await tx.$executeRaw`SELECT set_config('app.tenant_id', ${s.id}, true)`;
-        const [row] = await tx.$queryRaw<{ t: Record<string, unknown> }[]>`SELECT to_jsonb(t) - 'group_id' - 'groupJoinedAt' AS t FROM tenants t WHERE id = ${s.id}::uuid`;
+        const [row] = await tx.$queryRaw<{ t: Record<string, unknown> }[]>`SELECT to_jsonb(t) - 'group_id' - 'groupJoinedAt' - 'commercialStatus' - 'commercialStatusAt' AS t FROM tenants t WHERE id = ${s.id}::uuid`;
         const counts: Record<string, number> = {};
         for (const table of ['sites', 'users', 'user_roles', 'students', 'audit_logs']) {
           counts[table] = (await tx.$queryRawUnsafe<{ n: number }[]>(`SELECT count(*)::int AS n FROM ${table}`))[0].n;
@@ -104,6 +108,9 @@ describe('Lot G1 · migration des groupes sur une base qui a déjà des écoles 
       expect(after[s.slug]).toEqual({ ...before[s.slug], counts: { ...before[s.slug].counts, audit_logs: before[s.slug].counts.audit_logs + 1 } });
     }
     expect((before['ecole-alpha'] as any).tenant.platformNotes).toBe('Note interne fictive');
+    // Ajustements G5 : les écoles déjà présentes deviennent des établissements de test, jamais facturés ni limités.
+    const status = await db.$queryRaw<{ slug: string; status: string; at: Date | null }[]>`SELECT slug, "commercialStatus"::text AS status, "commercialStatusAt" AS at FROM tenants ORDER BY slug`;
+    expect(status).toEqual(SCHOOLS.map((s) => ({ slug: s.slug, status: 'TEST', at: null })));
   });
 
   it('le rattachement est tracé dans les trois journaux : plateforme, groupe et école', async () => {

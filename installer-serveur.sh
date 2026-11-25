@@ -97,11 +97,24 @@ if [ -n "$domaine" ]; then
   echo "Site configuré en HTTPS sur $domaine (chaque école sur <identifiant>.$domaine)."
 fi
 
-echo "Construction et démarrage des services (10 à 15 minutes la première fois)..."
+# Commit inscrit dans les images de l'API et du site : après la mise à jour, controle-production.sh vérifie que la version
+# réellement en marche est ce commit, et le commit attendu (demande de Dankou du 24 novembre 2026).
+CAHIORA_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo inconnu)
+export CAHIORA_COMMIT
+echo "Construction et démarrage des services (10 à 15 minutes la première fois), commit $CAHIORA_COMMIT..."
 docker compose up -d postgres
 ./infra/postgres/role-plateforme.sh
 ./infra/postgres/roles-groupes.sh
 docker compose up -d --build
+# L'API et le site doivent tourner sur les images qui viennent d'être construites. Certaines versions de Docker Compose
+# (vu avec la 2.38.2) gardent un conteneur sur son ancienne image : il est alors recréé, et la mise à jour s'arrête si
+# cela ne suffit pas.
+if ! ./infra/docker/conteneurs-a-jour.sh; then
+  echo ""
+  echo "ÉCHEC : l'API ou le site ne tourne pas sur le commit installé $CAHIORA_COMMIT (voir ci-dessus)."
+  echo "Ne forcez rien : envoyez ce message à la personne qui suit le serveur."
+  exit 1
+fi
 
 port=$(grep '^HTTP_PORT=' .env | cut -d= -f2-); port=${port:-80}
 echo "Attente de la réponse du site..."

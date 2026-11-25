@@ -18,7 +18,7 @@ import {
   ParameterKey, PARAMETERS, pilotEndDay, retroactiveChanges, STATUS_LABELS, subscriptionKindLabel, trialEndDay, versionOn, yearDatesError,
 } from './billing-rules';
 import { CountRecord, countView, sortCounts } from './counts-rules';
-import { financialTotals } from './payments-totals';
+import { financialTotals, REAL_INDICATORS_NOTE } from './payments-totals';
 
 /**
  * Facturation de Cahiora, lot G5a : paramètres tarifaires datés, conditions commerciales, calendriers des
@@ -77,6 +77,28 @@ export class PilotDto extends CodeDto {
 export class PilotEndDto extends CodeDto {
   @Matches(/^\d{4}-\d{2}-\d{2}$/, DAY) pilotEnd: string;
   @IsString(MOTIF) @MinLength(5, MOTIF) @MaxLength(300, MOTIF) reason: string;
+}
+
+/**
+ * Statut commercial d'un établissement (demande de Dankou du 20 novembre 2026) : tous les établissements présents avant
+ * ce lot servent aux tests ; un établissement de test n'est jamais facturé ni limité. Le statut se change seulement tant
+ * qu'aucun abonnement ni aucun document n'existe, avec un motif, le code et, vers « client réel », une confirmation.
+ */
+export const CLIENT_ATTESTATION =
+  'Je confirme que cet établissement est un client commercial réel de Cahiora : il pourra recevoir un essai, un pilote, des documents provisoires et des demandes de paiement.';
+const CLIENT_ATTEST = { message: 'Cochez la confirmation : seul un client commercial réel de Cahiora passe en « client réel ».' };
+export const COMMERCIAL_STATUS_LABELS = { TEST: 'Établissement de test', CLIENT: 'Client réel' } as const;
+/** Refus du changement de statut, par l'API comme par la base (tenants_commercial_status_guard). */
+export const COMMERCIAL_STATUS_FROZEN =
+  'Le statut commercial se change seulement tant qu’aucun abonnement ni aucun document de Cahiora n’existe pour l’établissement';
+/** Ce que l'établissement de test ne peut pas recevoir, dit au Super Admin et à la direction. */
+export const TEST_ESTABLISHMENT_NOTE =
+  'Établissement de test : aucun essai, pilote, abonnement, comptage, document, paiement ni accès limité. Seul le Super Admin le passe en client réel.';
+
+export class CommercialStatusDto extends CodeDto {
+  @IsIn(['TEST', 'CLIENT'], { message: 'Statut commercial inconnu' }) status: 'TEST' | 'CLIENT';
+  @IsString(MOTIF) @MinLength(5, MOTIF) @MaxLength(300, MOTIF) reason: string;
+  @IsOptional() @RawValue() @IsBoolean(CLIENT_ATTEST) confirmed?: boolean;
 }
 
 export class CalendarDto extends CodeDto {
@@ -167,9 +189,18 @@ export class BillingService {
   }
 
   private async tenant(id: string) {
-    const t = await this.db.tenant.findUnique({ where: { id }, select: { id: true, name: true, groupId: true, timezone: true, currency: true, createdAt: true } });
+    const t = await this.db.tenant.findUnique({
+      where: { id }, select: { id: true, name: true, groupId: true, timezone: true, currency: true, createdAt: true, commercialStatus: true },
+    });
     if (!t) throw new NotFoundException('Établissement introuvable');
     return t;
+  }
+
+  /** Un établissement de test ne reçoit ni essai ni pilote (la base le refuse aussi, quel que soit le chemin). */
+  private clientOnly(t: { commercialStatus: string }, what: string) {
+    if (t.commercialStatus !== 'CLIENT') {
+      throw new ConflictException(`Établissement de test : ${what}. Passez-le d’abord en client réel (statut commercial), s’il est un client commercial réel de Cahiora.`);
+    }
   }
 
   private async value(key: ParameterKey, currency: string | null, onDay: string) {
@@ -203,6 +234,9 @@ export class BillingService {
       today, currencies: CURRENCIES,
       definitions: PARAMETER_KEYS.map((key) => ({ key, ...PARAMETERS[key] })),
       current,
+      // G5c-1 : délais proposés par Cahiora, sans aucun effet tant qu'aucune version n'est saisie (conditions commerciales à valider).
+      proposals: PARAMETER_KEYS.filter((key) => (PARAMETERS[key] as { proposed?: number }).proposed !== undefined && !pairs.has(`${key}|`))
+        .map((key) => ({ key, ...PARAMETERS[key] })),
       history: versions.map((v) => ({ id: v.id, key: v.key, label: (PARAMETERS as Record<string, { label: string }>)[v.key]?.label ?? v.key, currency: v.currency, value: v.value, effectiveFrom: v.effectiveFrom, reason: v.reason, createdByName: v.createdByName, createdAt: v.createdAt })),
     };
   }
@@ -262,6 +296,7 @@ export class BillingService {
       orderBy: [{ name: 'asc' }, { createdAt: 'asc' }],
       select: {
         id: true, slug: true, name: true, status: true, country: true, currency: true, timezone: true, settings: true, createdAt: true,
+        commercialStatus: true, commercialStatusAt: true, _count: { select: { billingDocumentLines: true } },
         group: { select: { id: true, name: true } }, subscription: true, billingCalendars: true, billingCounts: true,
       },
     });
@@ -271,11 +306,48 @@ export class BillingService {
       return {
         id: t.id, slug: t.slug, name: t.name, status: t.status, country: t.country, currency: t.currency, timezone: t.timezone, today,
         createdOn: localDay(t.timezone, t.createdAt), demo: !!(t.settings as Record<string, unknown> | null)?.demo, group: t.group,
+        // Statut commercial : un établissement de test n'est jamais facturé ni limité ; il change seulement sans abonnement.
+        commercialStatus: t.commercialStatus, commercialStatusLabel: COMMERCIAL_STATUS_LABELS[t.commercialStatus], commercialStatusAt: t.commercialStatusAt,
+        commercialStatusNote: t.commercialStatus === 'TEST' ? TEST_ESTABLISHMENT_NOTE : null,
+        canChangeCommercialStatus: !t.subscription && t._count.billingDocumentLines === 0,
         subscription: t.subscription ? subscriptionView(t.subscription, today) : null, calendars: latestCalendars(t.billingCalendars),
         // Comptages des élèves (lot G5b) : des nombres seulement ; la liste nominative reste dans l'espace de l'école.
         counts: counts.map((c) => countView(c, today, counts)),
       };
     });
+  }
+
+  /**
+   * Change le statut commercial d'un établissement (« test » ou « client réel »), tant qu'aucun abonnement ni aucun
+   * document de Cahiora n'existe pour lui : jamais de facturation ni de limitation rétroactive d'un ancien essai de test,
+   * jamais un client réel qui redevient « test » avec un abonnement ou un document (la base le refuse aussi). Motif, code
+   * et, pour un client réel, confirmation.
+   */
+  async setCommercialStatus(actor: PlatformActor, tenantId: string, dto: CommercialStatusDto) {
+    const t = await this.tenant(tenantId);
+    if (t.commercialStatus === dto.status) throw new BadRequestException(`Cet établissement est déjà : ${COMMERCIAL_STATUS_LABELS[dto.status].toLowerCase()}`);
+    if (dto.status === 'CLIENT' && dto.confirmed !== true) throw new BadRequestException(CLIENT_ATTEST.message);
+    if (await this.db.subscription.findUnique({ where: { tenantId }, select: { id: true } }) || await this.db.billingDocumentLine.findFirst({ where: { tenantId }, select: { id: true } })) {
+      throw new ConflictException(COMMERCIAL_STATUS_FROZEN);
+    }
+    await this.confirm(actor, dto.code);
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const n = await tx.tenant.updateMany({ where: { id: tenantId, commercialStatus: t.commercialStatus }, data: { commercialStatus: dto.status } });
+        if (n.count !== 1) throw new ConflictException('Le statut vient de changer : rechargez la page');
+        const data = {
+          from: t.commercialStatus, to: dto.status, reason: dto.reason.trim(),
+          ...(dto.status === 'CLIENT' ? { attestation: CLIENT_ATTESTATION } : {}),
+        };
+        await this.journals(tx, actor, t, 'billing.commercial_status_changed', data);
+        const after = await tx.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { commercialStatus: true, commercialStatusAt: true } });
+        return { ...after, commercialStatusLabel: COMMERCIAL_STATUS_LABELS[after.commercialStatus] };
+      });
+    } catch (e) {
+      const m = (e instanceof Error ? e.message : String(e)).match(/CAHIORA: ([^\n"`]+)/);
+      if (m) throw new ConflictException(m[1].trim());
+      throw e;
+    }
   }
 
   async events(tenantId: string) {
@@ -292,6 +364,7 @@ export class BillingService {
     if (!isDay(dto.startDate)) throw new BadRequestException('Début de l’essai : date invalide');
     if (dto.startDate < createdOn) throw new BadRequestException(`L’essai ne commence pas avant la création de l’établissement (${frDay(createdOn)})`);
     if (Math.abs(daysBetween(today, dto.startDate)) > 30) throw new BadRequestException('Début de l’essai : au plus 30 jours avant ou après aujourd’hui');
+    this.clientOnly(t, 'aucun essai gratuit ne s’ouvre');
     const days = await this.value('TRIAL_DAYS', null, today);
     await this.confirm(actor, dto.code);
     const trialEnd = trialEndDay(dto.startDate, days);
@@ -324,6 +397,7 @@ export class BillingService {
     if (!isDay(dto.startDate)) throw new BadRequestException('Activation du pilote : date invalide');
     if (dto.startDate < createdOn) throw new BadRequestException(`Le pilote ne commence pas avant la création de l’établissement (${frDay(createdOn)})`);
     if (daysBetween(today, dto.startDate) > 60) throw new BadRequestException('Activation du pilote : au plus 60 jours après aujourd’hui');
+    this.clientOnly(t, 'aucune période pilote ne s’ouvre');
     const months = dto.months ?? (await this.value('PILOT_FREE_MONTHS', null, today));
     const pilotEnd = pilotEndDay(dto.startDate, months);
     if (pilotEnd < today) throw new BadRequestException(`Cette période pilote serait déjà terminée (le ${frDay(pilotEnd)})`);
@@ -364,6 +438,7 @@ export class BillingService {
     if (dto.pilotEnd < today) throw new BadRequestException('La fin du pilote ne peut pas être déplacée dans le passé');
     const s = await this.db.subscription.findUnique({ where: { tenantId } });
     if (!s || s.status !== 'PILOT') throw new ConflictException('Cet établissement n’est pas en période pilote');
+    this.clientOnly(t, 'sa période pilote ne change pas');
     if (dto.pilotEnd <= iso(s.pilotStart)!) throw new BadRequestException('La fin du pilote suit son activation');
     if (dto.pilotEnd === iso(s.pilotEnd)) throw new BadRequestException('Cette date est déjà la fin du pilote');
     await this.confirm(actor, dto.code);
@@ -464,11 +539,18 @@ export class BillingService {
   // ---------------------------------------------------------------- Vue d'ensemble et alertes (§14)
 
   async overview() {
-    const tenants = await this.db.tenant.findMany({ select: { id: true, name: true, timezone: true, settings: true, group: { select: { id: true, name: true } }, subscription: true } });
-    const counts = { establishments: tenants.length, none: 0, TRIAL: 0, PILOT: 0, AWAITING_ACCEPTANCE: 0, AWAITING_PAYMENT: 0, ACTIVE: 0, LIMITED: 0 };
+    const tenants = await this.db.tenant.findMany({
+      select: { id: true, name: true, timezone: true, settings: true, commercialStatus: true, group: { select: { id: true, name: true } }, subscription: true },
+    });
+    const counts = {
+      establishments: tenants.length, none: 0, TRIAL: 0, PILOT: 0, AWAITING_ACCEPTANCE: 0, AWAITING_PAYMENT: 0, ACTIVE: 0, LIMITED: 0,
+      testEstablishments: tenants.filter((t) => t.commercialStatus === 'TEST').length, clientEstablishments: tenants.filter((t) => t.commercialStatus === 'CLIENT').length,
+    };
     const soon: { tenantId: string; tenantName: string; group: string; kind: 'TRIAL' | 'PILOT'; lastDay: string; daysLeft: number }[] = [];
     for (const t of tenants) {
       const s = t.subscription;
+      // Établissement de test : compté à part, hors des abonnements et des échéances (un abonnement d'avant ce lot y est figé).
+      if (t.commercialStatus === 'TEST') continue;
       if (!s) { counts.none++; continue; }
       counts[s.status]++;
       const today = localDay(t.timezone);
@@ -488,6 +570,8 @@ export class BillingService {
         clientCredits: totals.credits, servicesRevenue: null, commissionsDue: null, commissionsPaid: null,
       },
       amountsFrom: { servicesRevenue: 'G5g', commissionsDue: 'G5h', commissionsPaid: 'G5h' },
+      // 24 novembre 2026 : indicateurs réels, clients réels seulement (les états d'abonnement aussi, plus haut).
+      amountsScope: REAL_INDICATORS_NOTE,
     };
   }
 
@@ -532,6 +616,11 @@ export class BillingController {
 
   @Get('platform/billing/establishments') @Header('Cache-Control', 'no-store')
   establishments() { return this.s.establishments(); }
+
+  @Post('platform/billing/establishments/:id/commercial-status') @Throttle({ default: { limit: 20, ttl: 60000 } })
+  commercialStatus(@Req() req: Request, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CommercialStatusDto) {
+    return this.s.setCommercialStatus(this.actor(req), id, dto);
+  }
 
   @Get('platform/billing/establishments/:id/events')
   events(@Param('id', ParseUUIDPipe) id: string) { return this.s.events(id); }

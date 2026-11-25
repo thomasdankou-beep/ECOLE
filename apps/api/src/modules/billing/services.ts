@@ -193,13 +193,16 @@ export class ServicesService {
     const today = localDay(PLATFORM_TZ);
     const [rows, tenants] = await Promise.all([
       this.db.service.findMany({ include: INCLUDE, orderBy: [{ createdAt: 'asc' }, { code: 'asc' }] }),
-      this.db.tenant.findMany({ orderBy: [{ name: 'asc' }, { createdAt: 'asc' }], select: { id: true, name: true, currency: true, timezone: true, group: { select: { name: true } } } }),
+      this.db.tenant.findMany({
+        orderBy: [{ name: 'asc' }, { createdAt: 'asc' }], select: { id: true, name: true, currency: true, timezone: true, commercialStatus: true, group: { select: { name: true } } },
+      }),
     ]);
     return {
       today, currencies: CURRENCIES,
       pricings: PRICINGS.map((p) => ({ value: p, label: PRICING_LABELS[p] })),
       kinds: RATE_KINDS.map((k) => ({ value: k, label: RATE_LABELS[k] })),
-      establishments: tenants.map((t) => ({ id: t.id, name: t.name, currency: t.currency, group: t.group.name, today: localDay(t.timezone) })),
+      // Statut commercial : un devis ou une proforma ne s'émet que pour un client réel (ajustements du 20 novembre 2026).
+      establishments: tenants.map((t) => ({ id: t.id, name: t.name, currency: t.currency, group: t.group.name, today: localDay(t.timezone), commercialStatus: t.commercialStatus })),
       services: rows.map((r) => this.view(r, today)),
     };
   }

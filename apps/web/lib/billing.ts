@@ -1,4 +1,4 @@
-/** Libellés des actions de la facturation (lots G5a, G5b, G5c, G5d-1, G5d-2 et G5g) dans les journaux de la plateforme et des groupes. */
+/** Libellés des actions de la facturation (lots G5a, G5b, G5c, G5d-1, G5d-2, G5g et ajustements) dans les journaux de la plateforme et des groupes. */
 export const BILLING_ACTIONS: Record<string, string> = {
   'billing.trial_opened': 'Facturation : essai gratuit ouvert',
   'billing.pilot_opened': 'Facturation : école pilote partenaire activée',
@@ -15,6 +15,9 @@ export const BILLING_ACTIONS: Record<string, string> = {
   'billing.count_exclusion_validated': 'Comptages : exclusion validée',
   'billing.count_exclusion_refused': 'Comptages : exclusion refusée',
   'billing.count_departure_dated': 'Comptages : date d’un départ fixée par la direction',
+  'billing.count_departure_confirmed': 'Comptages : date d’un départ confirmée introuvable par la direction (élève compté)',
+  'billing.commercial_status_changed': 'Facturation : statut commercial modifié (établissement de test ou client réel)',
+  'billing.commercial_status_initialized': 'Facturation : établissements existants marqués « établissement de test » (mise à jour de Cahiora)',
   'billing.terms_published': 'Facturation : conditions commerciales publiées',
   'billing.parameter_added': 'Facturation : nouvelle valeur d’un paramètre tarifaire',
   'billing.parameters.initial': 'Facturation : paramètres tarifaires initiaux (mise à jour de Cahiora)',

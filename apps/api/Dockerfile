@@ -19,6 +19,10 @@ WORKDIR /repo/apps/api
 RUN mkdir -p storage && chown -R node:node storage
 USER node
 EXPOSE 4000
+# Commit d'où vient cette image (installer-serveur.sh le donne) : controle-production.sh vérifie, après une mise à jour,
+# que la version en marche est bien le commit attendu (demande de Dankou du 24 novembre 2026). « inconnu » sinon.
+ARG CAHIORA_COMMIT=inconnu
+ENV CAHIORA_COMMIT=$CAHIORA_COMMIT
 # Applique les migrations (rôle propriétaire) puis démarre l'API sans le mot de passe du propriétaire
 # (SEC-009) : le processus de l'API n'utilise que erp_app (écoles) et erp_platform (Super Admin).
 CMD ["sh", "-c", "npx prisma migrate deploy && exec env -u DATABASE_ADMIN_URL node dist/main.js"]

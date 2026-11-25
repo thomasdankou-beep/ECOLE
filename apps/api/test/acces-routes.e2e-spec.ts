@@ -57,6 +57,9 @@ const OPEN_WRITES = [
   // Régularisation de l'abonnement (lectures 8 et 11) et corrections des comptages des élèves facturables (lot G5b).
   'POST /api/v1/settings/billing-counts/:id/corrections', 'POST /api/v1/settings/billing-counts/corrections/:id/decision',
   'POST /api/v1/settings/subscription/accept', 'POST /api/v1/settings/subscription/regularization-requests',
+  // Ajustements du 20 novembre 2026 : élèves « À vérifier » réglés hors d'un comptage (G5b-2), et demande de
+  // remboursement d'un crédit (G5d2-7), qui reste fermée tant que les paiements (verrou 1) ne sont pas ouverts.
+  'POST /api/v1/settings/billing-counts/checks', 'POST /api/v1/settings/subscription/refund-requests',
 ].sort();
 
 /**
@@ -144,7 +147,7 @@ beforeAll(async () => {
 
   // Établissement fictif, seul dans son groupe, un compte par rôle, puis en accès limité depuis 5 jours.
   const t = await admin.tenant.create({
-    data: { slug: `g5d1-routes-${stamp}`, name: `École fictive routes G5d-1 ${stamp}`, group: { create: { name: `Groupe fictif routes G5d-1 ${stamp}` } } },
+    data: { commercialStatus: 'CLIENT', slug: `g5d1-routes-${stamp}`, name: `École fictive routes G5d-1 ${stamp}`, group: { create: { name: `Groupe fictif routes G5d-1 ${stamp}` } } },
   });
   tenantId = t.id;
   const hash = await argon2.hash(PASSWORD, { type: argon2.argon2id });

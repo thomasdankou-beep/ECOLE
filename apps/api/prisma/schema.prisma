@@ -18,29 +18,36 @@ datasource db {
 
 /// École cliente (établissement) avec ses sites. Elle appartient toujours à un groupe scolaire (lot G1, D-G1).
 model Tenant {
-  id            String       @id @default(uuid()) @db.Uuid
-  slug          String       @unique
-  name          String
-  shortName     String?
-  country       String       @default("BJ")
-  currency      String       @default("XOF")
-  timezone      String       @default("Africa/Porto-Novo")
+  id                 String           @id @default(uuid()) @db.Uuid
+  slug               String           @unique
+  name               String
+  shortName          String?
+  country            String           @default("BJ")
+  currency           String           @default("XOF")
+  timezone           String           @default("Africa/Porto-Novo")
   /// Paramètres : seuils de distinction, règles de calcul, blocage bulletin si impayé, canaux de notification...
-  settings      Json         @default("{}")
+  settings           Json             @default("{}")
   /// Suspendu par la plateforme : plus aucune connexion possible, données conservées.
-  status        TenantStatus @default(ACTIVE)
+  status             TenantStatus     @default(ACTIVE)
   /// Nom de domaine propre à l'école (facultatif), en plus du sous-domaine <slug>.<domaine de la plateforme>.
-  domain        String?      @unique
+  domain             String?          @unique
   /// Notes internes de la plateforme (contrat, contact), jamais visibles par l'école.
-  platformNotes String?
+  platformNotes      String?
   /// Groupe scolaire de l'école (D-G1) : une école indépendante forme un groupe à elle seule, à son nom.
   /// Seul le Super Admin le change (rattacher, détacher). Jamais lu par le rôle des écoles (voir PrismaService).
-  groupId       String       @map("group_id") @db.Uuid
-  group         SchoolGroup  @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  groupId            String           @map("group_id") @db.Uuid
+  group              SchoolGroup      @relation(fields: [groupId], references: [id], onDelete: Restrict)
   /// Date du rattachement à ce groupe.
-  groupJoinedAt DateTime     @default(now())
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  groupJoinedAt      DateTime         @default(now())
+  /// Statut commercial (demande de Dankou du 20 novembre 2026) : « test » par défaut, y compris pour tous les
+  /// établissements présents avant ce lot. Un établissement de test n'a ni essai, ni pilote, ni abonnement, ni
+  /// comptage, ni document, ni paiement, et n'est jamais limité : la base le refuse elle-même. Seul le Super Admin le
+  /// passe en « client réel », tant qu'aucun abonnement n'est ouvert. L'école lit le statut, jamais sa date.
+  commercialStatus   CommercialStatus @default(TEST)
+  /// Date du dernier changement de statut, inscrite par la base.
+  commercialStatusAt DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   /// Facturation de Cahiora (lot G5a) : zone de la plateforme, jamais lue par le rôle des écoles.
   subscription           Subscription?
@@ -59,11 +66,23 @@ model Tenant {
   billingAllocations     BillingAllocation[]
   billingCreditEntries   BillingCreditEntry[]
   billingRefunds         BillingRefund[]
-  creditTransfersOut     BillingCreditTransfer[] @relation("BillingCreditTransferFrom")
-  creditTransfersIn      BillingCreditTransfer[] @relation("BillingCreditTransferTo")
+  creditTransfersOut     BillingCreditTransfer[]  @relation("BillingCreditTransferFrom")
+  creditTransfersIn      BillingCreditTransfer[]  @relation("BillingCreditTransferTo")
+  /// Liens des exclusions validées par le Super Admin vers leur document d'origine (G5c-9).
+  billingExclusionLinks  BillingExclusionLink[]
+  /// Dérogations du Super Admin au délai de 30 jours d'une demande d'exclusion ou de contestation (lecture 1, 24 novembre 2026).
+  countDerogations       CountRequestDerogation[]
 
   @@index([groupId])
   @@map("tenants")
+}
+
+/// Statut commercial d'un établissement (ajustements du 20 novembre 2026).
+enum CommercialStatus {
+  /// Établissement de test : jamais facturé ni limité.
+  TEST
+  /// Client commercial réel : essai, pilote et abonnement possibles.
+  CLIENT
 }
 
 enum TenantStatus {
@@ -673,8 +692,10 @@ enum CountCorrectionKind {
   /// Exclusion d'une inscription annulée pour erreur de saisie (règle du 13 novembre 2026), justifiée puis validée.
   EXCLUSION
   /// Date d'un départ enregistré avant l'historique des inscriptions, fixée par la direction pendant la vérification
-  /// (D-G5-16 A) : jamais après la date du journal d'audit.
+  /// (D-G5-16 A) : jamais après la date du journal d'audit. Aussi hors de tout comptage, avant lui (G5b-2).
   DEPARTURE_DATE
+  /// Date d'un tel départ introuvable, confirmé par la direction (G5b-2) : l'élève reste compté, sans être « À vérifier ».
+  DEPARTURE_CONFIRMED
 }
 
 enum CountCorrectionStatus {
@@ -687,35 +708,69 @@ enum CountCorrectionStatus {
 /// justificatif. Une exclusion est validée par la direction tant qu'aucun document émis n'est touché (D-G5-13 B ; les
 /// documents arrivent au lot G5c). Jamais supprimée ; seule la décision s'inscrit, une fois.
 model CountCorrection {
-  id              String                @id @default(uuid()) @db.Uuid
-  tenantId        String                @map("tenant_id") @db.Uuid
+  id              String                  @id @default(uuid()) @db.Uuid
+  tenantId        String                  @map("tenant_id") @db.Uuid
   kind            CountCorrectionKind
-  enrollmentId    String                @db.Uuid
-  enrollment      Enrollment            @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
-  /// Comptage en vérification au moment de la demande.
-  countId         String                @db.Uuid
-  count           BillingCount          @relation(fields: [countId], references: [id], onDelete: Restrict)
-  departureDate   DateTime?             @db.Date
+  enrollmentId    String                  @db.Uuid
+  enrollment      Enrollment              @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  /// Comptage en vérification au moment de la demande ; vide pour une date de départ fixée ou confirmée introuvable
+  /// hors de tout comptage (G5b-2). Une exclusion porte toujours sur un comptage.
+  countId         String?                 @db.Uuid
+  count           BillingCount?           @relation(fields: [countId], references: [id], onDelete: Restrict)
+  departureDate   DateTime?               @db.Date
   justification   String
   fileKey         String?
   fileMime        String?
   fileSize        Int?
   status          CountCorrectionStatus
-  requestedById   String?               @db.Uuid
+  requestedById   String?                 @db.Uuid
   requestedByName String
-  requestedAt     DateTime              @default(now())
+  requestedAt     DateTime                @default(now())
   /// school (direction) ; platform (Super Admin, quand un document émis est touché : lot G5c).
   decidedByKind   String?
-  decidedById     String?               @db.Uuid
+  decidedById     String?                 @db.Uuid
   decidedByName   String?
   decidedAt       DateTime?
   decisionNote    String?
   /// Ligne d'avoir émise pour cette exclusion après un document (lot G5c) : une seule.
   creditLine      BillingDocumentLine?
+  /// Document d'origine de l'exclusion, inscrit par la base à la décision du Super Admin (G5c-9).
+  exclusionLink   BillingExclusionLink?
+  /// Lecture 1 (24 novembre 2026, soir) : demande faite après le délai de 30 jours, sous cette dérogation (une seule fois).
+  derogationId    String?                 @unique @db.Uuid
+  derogation      CountRequestDerogation? @relation(fields: [derogationId], references: [id], onDelete: Restrict)
 
   @@index([tenantId, enrollmentId])
   @@index([countId])
   @@map("count_corrections")
+}
+
+/// Lecture 1 (Dankou, 24 novembre 2026, soir) : passé le délai de 30 jours après le dernier document qui a demandé un
+/// élève (D-G5-14 A), le Super Admin rouvre exceptionnellement, pour cette inscription, la demande d'une exclusion ou
+/// d'une contestation : motif obligatoire (journal de la plateforme seulement), une seule demande, dans les 30 jours.
+/// Zone de la plateforme, en ajout seul ; écrite par la seule fonction grant_count_request_derogation ; l'école lit les
+/// siennes sans le motif (current_tenant_count_derogations).
+model CountRequestDerogation {
+  id            String           @id @default(uuid()) @db.Uuid
+  tenantId      String           @map("tenant_id") @db.Uuid
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  enrollmentId  String           @db.Uuid
+  enrollment    Enrollment       @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  /// Matricule de l'élève (jamais son nom), pour la console du Super Admin.
+  matricule     String
+  yearLabel     String
+  /// Dernier document qui demandait l'élève quand le délai a été rouvert.
+  documentDate  DateTime         @db.Date
+  /// Dernier jour pour faire la demande (30 jours après l'accord).
+  until         DateTime         @db.Date
+  reason        String
+  grantedById   String?          @db.Uuid
+  grantedByName String
+  grantedAt     DateTime         @default(now())
+  request       CountCorrection?
+
+  @@index([tenantId, enrollmentId])
+  @@map("count_request_derogations")
 }
 
 /// Document provisoire de Cahiora (lot G5c) : proforma de l'abonnement (première facture, complément d'une
@@ -724,39 +779,57 @@ model CountCorrection {
 /// établissement. Zone de la plateforme, en ajout seul (déclencheur forbid_change) ; émis par la seule fonction
 /// issue_billing_document, qui refait les contrôles et les calculs.
 model BillingDocument {
-  id                String                @id @default(uuid()) @db.Uuid
-  groupId           String                @map("group_id") @db.Uuid
-  group             SchoolGroup           @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  id                String                 @id @default(uuid()) @db.Uuid
+  groupId           String                 @map("group_id") @db.Uuid
+  group             SchoolGroup            @relation(fields: [groupId], references: [id], onDelete: Restrict)
   kind              BillingDocumentKind
   /// Référence provisoire « PROV-… », jamais un numéro de facture.
-  reference         String                @unique
+  reference         String                 @unique
   currency          String
-  issueDate         DateTime              @db.Date
+  issueDate         DateTime               @db.Date
   /// Échéance : dernier jour de grâce pour la première facture (D-G5-30) ; ailleurs INFORMATION MANQUANTE.
-  dueDate           DateTime?             @db.Date
+  dueDate           DateTime?              @db.Date
   total             Int
   yearLabel         String?
   /// Avoir : document d'abonnement touché ; proforma de prestations : devis repris.
-  relatedDocumentId String?               @db.Uuid
-  related           BillingDocument?      @relation("BillingDocumentRelated", fields: [relatedDocumentId], references: [id], onDelete: Restrict)
-  relatedBy         BillingDocument[]     @relation("BillingDocumentRelated")
+  relatedDocumentId String?                @db.Uuid
+  related           BillingDocument?       @relation("BillingDocumentRelated", fields: [relatedDocumentId], references: [id], onDelete: Restrict)
+  relatedBy         BillingDocument[]      @relation("BillingDocumentRelated")
   /// Instantané au jour de l'émission : client, établissements, tarif, décisions en vigueur, mention.
   data              Json
   /// system (tâche planifiée) ou platform (Super Admin).
   createdByKind     String
-  createdById       String?               @db.Uuid
+  createdById       String?                @db.Uuid
   createdByName     String
-  createdAt         DateTime              @default(now())
+  createdAt         DateTime               @default(now())
   lines             BillingDocumentLine[]
   /// Lot G5d-2 : paiements qui citent ce document, imputations reçues (paiements, avoirs, crédits) et, pour un avoir,
   /// ses imputations et le crédit qu'il a laissé.
   payments          BillingPayment[]
-  allocations       BillingAllocation[]   @relation("BillingAllocationDocument")
-  creditAllocations BillingAllocation[]   @relation("BillingAllocationCreditNote")
+  allocations       BillingAllocation[]    @relation("BillingAllocationDocument")
+  creditAllocations BillingAllocation[]    @relation("BillingAllocationCreditNote")
   creditEntries     BillingCreditEntry[]
+  /// Exclusions dont ce document est le document d'origine (G5c-9).
+  exclusionOrigins  BillingExclusionLink[]
 
   @@index([groupId, issueDate])
   @@map("billing_documents")
+}
+
+/// Lien d'une exclusion validée par le Super Admin (D-G5-13 B) vers son document d'origine, le premier document
+/// d'abonnement de l'année qui a demandé l'élève (G5c-9) : inscrit par la base à la décision, jamais modifié. L'avoir
+/// cite l'exclusion (ligne, une seule fois) et le document qu'il corrige (relatedDocumentId).
+model BillingExclusionLink {
+  correctionId     String          @id @db.Uuid
+  correction       CountCorrection @relation(fields: [correctionId], references: [id], onDelete: Restrict)
+  tenantId         String          @map("tenant_id") @db.Uuid
+  tenant           Tenant          @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  originDocumentId String          @db.Uuid
+  originDocument   BillingDocument @relation(fields: [originDocumentId], references: [id], onDelete: Restrict)
+  createdAt        DateTime        @default(now())
+
+  @@index([originDocumentId])
+  @@map("billing_exclusion_links")
 }
 
 /// Ligne d'un document provisoire : abonnement d'un établissement à la date d'un comptage figé (calcul complet),
@@ -836,46 +909,55 @@ model BillingPaymentMeans {
 /// une saisie erronée s'annule par une contre-écriture motivée (cancelledAt…), une fois. Reçu provisoire « PROV-REC-… »,
 /// sans valeur fiscale. Une même référence de transaction ne s'enregistre qu'une fois (sauf saisie annulée).
 model BillingPayment {
-  id              String               @id @default(uuid()) @db.Uuid
-  tenantId        String               @map("tenant_id") @db.Uuid
-  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  groupId         String               @map("group_id") @db.Uuid
-  group           SchoolGroup          @relation(fields: [groupId], references: [id], onDelete: Restrict)
+  id                String               @id @default(uuid()) @db.Uuid
+  tenantId          String               @map("tenant_id") @db.Uuid
+  tenant            Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  groupId           String               @map("group_id") @db.Uuid
+  group             SchoolGroup          @relation(fields: [groupId], references: [id], onDelete: Restrict)
   /// Document concerné : proforma de l'abonnement, adressée à l'établissement seul.
-  documentId      String               @db.Uuid
-  document        BillingDocument      @relation(fields: [documentId], references: [id], onDelete: Restrict)
-  currency        String
+  documentId        String               @db.Uuid
+  document          BillingDocument      @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  currency          String
   /// Reste à payer du document concerné au moment de la saisie.
-  expectedAmount  Int
-  amount          Int
-  paidOn          DateTime             @db.Date
-  meansId         String               @db.Uuid
-  means           BillingPaymentMeans  @relation(fields: [meansId], references: [id], onDelete: Restrict)
-  meansName       String
-  transactionRef  String
+  expectedAmount    Int
+  amount            Int
+  paidOn            DateTime             @db.Date
+  meansId           String               @db.Uuid
+  means             BillingPaymentMeans  @relation(fields: [meansId], references: [id], onDelete: Restrict)
+  meansName         String
+  transactionRef    String
   /// Référence normalisée (sans espaces, en capitales) : contrôle des doublons.
-  transactionKey  String
-  proofKey        String
-  proofMime       String
+  transactionKey    String
+  proofKey          String
+  proofMime         String
   /// Commentaire interne de Cahiora, jamais montré à l'école.
-  note            String?
-  receiptSeq      Int                  @unique
-  receiptNumber   String               @unique
+  note              String?
+  receiptSeq        Int                  @unique
+  receiptNumber     String               @unique
   /// Part du paiement devenue un crédit de l'établissement (au-delà des documents à payer).
-  creditAmount    Int
-  recordedById    String?              @db.Uuid
-  recordedByName  String
-  recordedAt      DateTime             @default(now())
-  ip              String?
-  cancelledAt     DateTime?
-  cancelledById   String?              @db.Uuid
-  cancelledByName String?
-  cancelReason    String?
-  cancelIp        String?
-  allocations     BillingAllocation[]
-  creditEntries   BillingCreditEntry[]
+  creditAmount      Int
+  recordedById      String?              @db.Uuid
+  recordedByName    String
+  recordedAt        DateTime             @default(now())
+  ip                String?
+  cancelledAt       DateTime?
+  cancelledById     String?              @db.Uuid
+  cancelledByName   String?
+  cancelReason      String?
+  cancelIp          String?
+  /// Ressaisie d'un paiement annulé (G5d2-5) : une seule par paiement annulé, au besoin pour un autre établissement
+  /// (choisi par erreur) ; sans clé étrangère pour cette raison, vérifiée par record_billing_payment.
+  replacesPaymentId String?              @unique @db.Uuid
+  /// Empreinte SHA-256 du justificatif (G5d2-5) : un fichier déjà joint à un autre paiement exige un motif.
+  proofSha256       String?
+  /// Motif donné quand un paiement semblable (même établissement, montant et moyen, à 3 jours près) ou un même
+  /// justificatif existait déjà.
+  similarReason     String?
+  allocations       BillingAllocation[]
+  creditEntries     BillingCreditEntry[]
 
   @@index([tenantId, paidOn])
+  @@index([proofSha256])
   @@index([documentId])
   @@map("billing_payments")
 }
@@ -1440,29 +1522,31 @@ enum EnrollmentType {
 
 /// Inscription : élève × classe × année. Une seule par élève et par année ; jamais supprimée (lot G4).
 model Enrollment {
-  id               String             @id @default(uuid()) @db.Uuid
-  tenantId         String             @map("tenant_id") @db.Uuid
-  studentId        String             @db.Uuid
-  student          Student            @relation(fields: [studentId], references: [id])
-  classId          String             @db.Uuid
-  class            Class              @relation(fields: [classId], references: [id])
-  academicYearId   String             @db.Uuid
-  academicYear     AcademicYear       @relation(fields: [academicYearId], references: [id])
-  status           EnrollmentStatus   @default(ACTIVE)
-  enrolledAt       DateTime           @default(now())
+  id               String                   @id @default(uuid()) @db.Uuid
+  tenantId         String                   @map("tenant_id") @db.Uuid
+  studentId        String                   @db.Uuid
+  student          Student                  @relation(fields: [studentId], references: [id])
+  classId          String                   @db.Uuid
+  class            Class                    @relation(fields: [classId], references: [id])
+  academicYearId   String                   @db.Uuid
+  academicYear     AcademicYear             @relation(fields: [academicYearId], references: [id])
+  status           EnrollmentStatus         @default(ACTIVE)
+  enrolledAt       DateTime                 @default(now())
   /// Inscription ou réinscription ; vide pour les inscriptions enregistrées avant le lot G4.
   type             EnrollmentType?
   /// Départ en cours d'année (transfert, abandon) : date de sortie et motif.
-  exitDate         DateTime?          @db.Date
+  exitDate         DateTime?                @db.Date
   exitReason       String?
   /// Annulation par la direction : date, motif, auteur. Une inscription annulée ne compte plus à partir de cette date.
   cancelledAt      DateTime?
   cancelReason     String?
-  cancelledById    String?            @db.Uuid
+  cancelledById    String?                  @db.Uuid
   events           EnrollmentEvent[]
   /// Lot G5b : lignes des comptages des élèves facturables et demandes de correction de la direction.
   countItems       BillingCountItem[]
   countCorrections CountCorrection[]
+  /// Lecture 1 (24 novembre 2026, soir) : délai de demande rouvert par le Super Admin, par dérogation.
+  countDerogations CountRequestDerogation[]
 
   @@unique([studentId, academicYearId])
   @@index([classId])

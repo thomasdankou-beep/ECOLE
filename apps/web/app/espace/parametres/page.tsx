@@ -19,7 +19,7 @@ import { Honneur } from './honneur';
 import { ImageEcole, type PublicTexts } from './image';
 
 type Settings = {
-  tenant: { name: string; shortName: string | null; identity: SchoolIdentity; country: string; countryName: string; currency: string; timezone: string; operators: string[]; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean; paymentSms: boolean; smsAlways: boolean }; identity: IdentitySettings } };
+  tenant: { commercialStatus?: 'TEST' | 'CLIENT'; name: string; shortName: string | null; identity: SchoolIdentity; country: string; countryName: string; currency: string; timezone: string; operators: string[]; settings: { public?: PublicTexts; branding: { primaryColor: string | null }; grading: { distinctions: { min: number; label: string }[]; missingGrade: 'exclude' | 'zero'; passMark: number | null }; blockReportCardIfUnpaid: boolean; notifications: { absenceSms: boolean; paymentSms: boolean; smsAlways: boolean }; identity: IdentitySettings } };
   currentYear: { id: string; label: string; startDate: string; endDate: string; terms: { id: string; name: string; startDate: string; endDate: string; weight: string }[] } | null;
   years: { id: string; label: string; isCurrent: boolean }[];
   sites: { id: string; name: string; address: string | null; phone: string | null; active: boolean; photoUrl: string | null }[];
@@ -40,15 +40,20 @@ export default function Parametres() {
   useEffect(() => {
     if (asked) setTab(asked);
   }, [asked]);
+  // Établissement de test (24 novembre 2026) : jamais compté ni facturé, la rubrique « Effectifs facturables » ne lui sert
+  // à rien ; « Abonnement Cahiora » reste, en une seule carte simple. L'onglet n'apparaît qu'une fois le statut lu.
+  const status = q.data?.tenant.commercialStatus;
+  const client = status === 'CLIENT';
+  const shown = tab === 'effectifs' && status === 'TEST' ? 'abonnement' : tab;
   return (
     <>
       <PageHeader title="Paramètres" subtitle="Tout ce que l’école renseigne elle-même : identité officielle, logo et site public, classes, matières et coefficients, salles et ateliers, année, règles des bulletins." />
-      <Chips label="Rubrique" value={tab} onChange={setTab} options={[
+      <Chips label="Rubrique" value={shown} onChange={setTab} options={[
         { value: 'etablissement', label: 'Établissement' }, { value: 'image', label: 'Logo et site public' }, { value: 'honneur', label: 'Élèves à l’honneur' }, { value: 'classes', label: 'Classes et matières' }, { value: 'coefficients', label: 'Coefficients' },
         { value: 'structure', label: 'Sites, salles, matières' }, { value: 'annee', label: 'Année et périodes' }, { value: 'regles', label: 'Mentions et règles' }, { value: 'abonnement', label: 'Abonnement Cahiora' },
-        { value: 'effectifs', label: 'Effectifs facturables' },
+        ...(client ? [{ value: 'effectifs', label: 'Effectifs facturables' }] : []),
       ]} />
-      {tab === 'abonnement' ? <Abonnement openCounts={() => setTab('effectifs')} /> : tab === 'effectifs' ? <Effectifs /> : <Loader {...q}>
+      {shown === 'abonnement' ? <Abonnement openCounts={client ? () => setTab('effectifs') : undefined} /> : shown === 'effectifs' ? (client ? <Effectifs /> : <Loader {...q}>{() => null}</Loader>) : <Loader {...q}>
         {(s) => (
           <>
             {tab === 'etablissement' && <Etablissement settings={s.tenant.settings.identity} identity={s.tenant.identity} locale={s.tenant} reload={q.reload} />}

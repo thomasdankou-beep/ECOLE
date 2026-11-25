@@ -18,6 +18,9 @@ const { authenticator } = require('otplib');
  * établissement « préavis » (délai de grâce qui finit aujourd'hui, demande en attente) : le Super Admin lit le jour et
  * l'heure de la limitation avant de répondre, la réponse ouvre un préavis de 48 heures que la direction lit avec les
  * heures restantes ; le renouvellement exceptionnel d'une prolongation demande son propre motif et reste marqué.
+ * Ajustements du 20 novembre 2026 : les trois établissements sont des clients réels ; un quatrième, « de test », dont
+ * l'essai est fini depuis aussi longtemps que celui de l'établissement limité, n'est jamais limité : ni alerte ni
+ * bandeau, la direction lit qu'il est un établissement de test, et la console ne le compte pas parmi les clients.
  * Base de test seulement : abonnements fictifs posés dans la base, aucun paiement, aucun SMS.
  */
 const url = process.env.DATABASE_ADMIN_URL ?? 'postgresql://erp_owner:erp_owner_dev@localhost:5432/erp_test';
@@ -63,10 +66,16 @@ let saName = '';
 const G: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
 const L: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
 const N: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
+const X: Ecole = { id: '', name: '', domain: '', direction: '', comptable: '' };
+/** Ce que lit la direction d'un établissement de test (même texte que l'API). */
+const SCHOOL_TEST_NOTICE = 'Établissement de test : Cahiora ne lui ouvre ni essai, ni abonnement, ni document, ni paiement, et ne limite jamais son accès. Rien ne vous est facturé.';
 
-/** Établissement fictif seul dans son groupe, à sa propre adresse locale, avec sa direction, une comptable et une année en cours. */
+/**
+ * Établissement fictif seul dans son groupe, à sa propre adresse locale, avec sa direction, une comptable et une année
+ * en cours ; client réel (statut commercial), sans quoi aucun abonnement ne s'enregistre pour lui.
+ */
 async function ecole(e: Ecole, slug: string, name: string, phones: [string, string]) {
-  const t = await db.tenant.create({ data: { slug, name, timezone: TZ, domain: `${slug}.localhost`, group: { create: { name: `Groupe ${name}` } } } });
+  const t = await db.tenant.create({ data: { commercialStatus: 'CLIENT', slug, name, timezone: TZ, domain: `${slug}.localhost`, group: { create: { name: `Groupe ${name}` } } } });
   Object.assign(e, { id: t.id, name: t.name, domain: t.domain, direction: phones[0], comptable: phones[1] });
   const hash = await argon2.hash(PW, { type: argon2.argon2id });
   await db.$transaction(async (tx) => {
@@ -148,6 +157,21 @@ test.beforeAll(async ({}, info) => {
   await db.regularizationRequest.create({
     data: { tenantId: n.id, subscriptionId: ns.id, status: 'PENDING', subscriptionStatus: 'AWAITING_ACCEPTANCE', message: MESSAGE_PREAVIS, requestedByName: `Fictive DIRECTION ${n.name}` },
   });
+
+  // Établissement de test : essai terminé il y a 40 jours et délai de grâce passé, posés avant son passage « de test »
+  // (état d'un établissement qui avait un essai avant la mise à jour ; la base refuse tout nouvel abonnement pour lui).
+  const x = await ecole(X, `e2e-g5d-test-${suffix}-${stamp}`, `École fictive de test ${suffix} ${stamp}`, [`+22901900087${suffix}1`, `+22901900087${suffix}2`]);
+  await db.subscription.create({
+    data: {
+      tenantId: x.id, status: 'AWAITING_ACCEPTANCE', statusSince: at(addDays(lEnd, 1)), trialStart: new Date(addDays(lEnd, -13)), trialEnd: new Date(lEnd), trialDays: 14,
+      graceStart: new Date(addDays(lEnd, 1)), graceEnd: new Date(addDays(lEnd, 15)),
+    },
+  });
+  await db.$transaction([
+    db.$executeRaw`ALTER TABLE tenants DISABLE TRIGGER tenants_commercial_status_guard`,
+    db.$executeRaw`UPDATE tenants SET "commercialStatus" = 'TEST' WHERE id = ${x.id}::uuid`,
+    db.$executeRaw`ALTER TABLE tenants ENABLE TRIGGER tenants_commercial_status_guard`,
+  ]);
 });
 
 test.afterAll(async () => {
@@ -350,6 +374,28 @@ test('Accès limité : bandeau pour tout le personnel, saisie refusée avec son 
   await shot(page, 'g5d-7-limite-abonnement');
 });
 
+test('Établissement de test : jamais limité, ni alerte ni bandeau ; la direction lit qu’il est de test', async ({ page }) => {
+  // L'essai est fini depuis aussi longtemps que celui de l'établissement limité : rien ne change pour un établissement de test.
+  await connexion(page, X, X.comptable);
+  await expect(page.getByRole('region', { name: 'Abonnement Cahiora' })).toHaveCount(0);
+  await connexion(page, X, X.direction);
+  await expect(page.getByRole('alertdialog')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Abonnement Cahiora' })).toHaveCount(0);
+  await page.goto(`${adresse(X)}/espace/parametres?rubrique=abonnement`);
+  await expect(page.getByTestId('etablissement-de-test')).toHaveText(SCHOOL_TEST_NOTICE);
+  // 24 novembre 2026 : une seule carte simple ; ni tarif, ni calendrier, ni documents, ni rubrique « Effectifs facturables ».
+  await expect(page.getByRole('list', { name: 'Établissement de test : ce que cela veut dire' })).toContainText('Accès complet à Cahiora, jamais limité.');
+  await expect(page.locator('#regulariser')).toHaveCount(0);
+  for (const titre of ['Tarif de Cahiora', 'Calendrier de facturation', 'Documents de Cahiora', 'Historique']) await expect(page.getByRole('heading', { name: titre })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Rubrique' }).getByRole('button', { name: 'Abonnement Cahiora' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('group', { name: 'Rubrique' }).getByRole('button', { name: 'Effectifs facturables' })).toHaveCount(0);
+  await tientEnLargeur(page);
+  await shot(page, 'g5d-7b-etablissement-de-test');
+  // L’abonnement d’avant reste figé dans la base : jamais limité.
+  const s = await db.subscription.findUniqueOrThrow({ where: { tenantId: X.id } });
+  expect([s.status, s.limitedSince]).toEqual(['AWAITING_ACCEPTANCE', null]);
+});
+
 test('Super Admin : réponse à la demande de régularisation et prolongation qui lève l’accès limité, avec un code', async ({ page }) => {
   await page.goto('/plateforme/connexion');
   await page.getByLabel('Adresse e-mail').fill(saEmail);
@@ -378,6 +424,8 @@ test('Super Admin : réponse à la demande de régularisation et prolongation qu
   await expect(cL.getByText('Accès limité', { exact: true }).first()).toBeVisible();
   await expect(cL).toContainText('Accès limité depuis le');
   await expect(cL).toContainText('Conditions commerciales pas encore acceptées.');
+  // Établissement de test, au délai passé depuis aussi longtemps : jamais parmi les clients en attente ou limités.
+  await expect(clients.locator(':scope > li', { hasText: X.name })).toHaveCount(0);
   await tientEnLargeur(page);
   await shot(page, 'g5d-8-acces-clients');
 

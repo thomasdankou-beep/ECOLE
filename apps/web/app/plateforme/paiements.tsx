@@ -3,9 +3,9 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { Ban, HandCoins, Lock, LockOpen, Plus, Printer, Receipt, Shuffle } from 'lucide-react';
-import { Badge, Button, Card, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Select, Stat, Table, Textarea } from '@/components/ui';
+import { Badge, Button, Card, Dialog, DialogContent, Empty, ErrorNote, Field, Input, Missing, Select, Stat, Table, Textarea } from '@/components/ui';
 import { pf } from '@/lib/platform';
-import { CodeField, frDate, money, useSubmit } from './facturation-outils';
+import { CodeField, frDate, money, need, ready, useSubmit } from './facturation-outils';
 
 /**
  * Paiements, avoirs et crédits, rapports financiers (lot G5d-2), plan validé par Dankou le 20 novembre 2026 :
@@ -18,6 +18,8 @@ import { CodeField, frDate, money, useSubmit } from './facturation-outils';
  * Chaque écriture demande un code actuel de l'application d'authentification. Tant que le verrou du serveur est fermé
  * (par défaut, donc en production), l'API refuse chaque écriture : les écrans le disent, l'historique reste lisible.
  * Aucun prestataire n'est appelé : Cahiora enregistre à la main ce qu'il a reçu.
+ * Ajustement G5d2-5 (20 novembre 2026) : la ressaisie d'un paiement annulé le désigne, une seule fois ; un justificatif
+ * déjà joint ou un paiement semblable exige le motif de cet autre versement (réservé à Cahiora).
  */
 
 type MoneyRow = { currency: string; amount: number };
@@ -35,8 +37,15 @@ type Payment = {
   id: string; receiptNumber: string; tenantId: string; tenantName: string; group: { id: string; name: string }; documentId: string; documentReference: string; currency: string;
   expectedAmount: number; amount: number; paidOn: string; meansName: string; transactionRef: string; creditAmount: number; note: string | null; recordedByName: string; recordedAt: string;
   status: 'VALIDATED' | 'CANCELLED'; statusLabel: string; cancelledAt: string | null; cancelledByName: string | null; cancelReason: string | null; allocations: { reference: string; amount: number }[];
+  /** G5d2-5 : reçu du paiement annulé que celui-ci ressaisit, reçu de la ressaisie d'un paiement annulé, motif d'un autre versement. */
+  replacesPaymentId: string | null; replacesReceipt: string | null; reenteredBy: string | null; similarReason: string | null;
 };
-type Overview = { unlocked: boolean; lockMessage: string | null; mention: string; today: string; currencies: string[]; means: { current: Means[]; versions: Means[] }; establishments: Establishment[]; payments: Payment[] };
+/** Paiement annulé pas encore ressaisi, à désigner lors de sa ressaisie (G5d2-5). */
+type Reentry = { id: string; receiptNumber: string; tenantId: string; tenantName: string; amount: number; currency: string; paidOn: string; transactionRef: string; cancelledAt: string };
+type Overview = {
+  unlocked: boolean; lockMessage: string | null; mention: string; today: string; currencies: string[]; means: { current: Means[]; versions: Means[] }; establishments: Establishment[]; payments: Payment[];
+  toReenter: Reentry[]; duplicateRule: string;
+};
 type PaymentDetail = Payment & {
   proofUrl: string; proofMime: string;
   movements: { reference: string; amount: number; reversal: boolean; createdAt: string }[];
@@ -60,6 +69,8 @@ type Totals = { billed: MoneyRow[]; credited: MoneyRow[]; collected: MoneyRow[];
 type Report = {
   filters: { from: string | null; to: string | null; tenantId: string | null; groupId: string | null; status: string | null };
   totals: Totals; documents: ReportDoc[]; payments: Payment[]; mention: string;
+  /** 24 novembre 2026 : indicateurs réels, clients réels seulement (filtres compris). */
+  scope: string;
   groups: { id: string; name: string }[]; tenants: { id: string; name: string; groupId: string }[];
 };
 
@@ -200,13 +211,29 @@ export function Paiements() {
       </Card>
 
       <Card className="grid gap-3">
-        <h3 className="font-bold">Paiements enregistrés</h3>
+        <div>
+          <h3 className="font-bold">Paiements enregistrés</h3>
+          <p className="text-sm text-muted">{d.duplicateRule}</p>
+        </div>
+        {d.toReenter.length > 0 && (
+          <details className="text-sm">
+            <summary className="cursor-pointer font-bold">Saisies annulées pas encore ressaisies ({d.toReenter.length})</summary>
+            <ul className="mt-2 grid gap-1" aria-label="Saisies annulées pas encore ressaisies">
+              {d.toReenter.map((r) => (
+                <li key={r.id} className="rounded bg-sunk p-2">
+                  <b className="font-mono text-xs">{r.receiptNumber}</b> · {r.tenantName} · {money(r.amount, r.currency)} du {frDate(r.paidOn)}, référence <span className="font-mono text-xs">{r.transactionRef}</span>
+                  <span className="block text-xs text-muted">Annulée le {dateTime(r.cancelledAt)} : à désigner si ce paiement est ressaisi.</span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {d.payments.length === 0 ? <p className="text-sm text-muted">Aucun paiement enregistré.</p> : <PaymentsTable payments={d.payments} open={(id) => setDialog({ kind: 'payment', id })} />}
       </Card>
 
       <Dialog open={!!dialog} onOpenChange={(o) => !o && setDialog(null)}>
         {dialog?.kind === 'means' && <MeansDialog base={dialog.base} currencies={d.currencies} today={d.today} done={done} />}
-        {dialog?.kind === 'record' && <RecordDialog e={dialog.e} done={done} />}
+        {dialog?.kind === 'record' && <RecordDialog e={dialog.e} toReenter={d.toReenter} done={done} />}
         {dialog?.kind === 'payment' && <PaymentDialog id={dialog.id} unlocked={d.unlocked} done={done} />}
       </Dialog>
     </div>
@@ -220,7 +247,11 @@ function PaymentsTable({ payments, open }: { payments: Payment[]; open?: (id: st
       <tbody>
         {payments.map((p) => (
           <tr key={p.id}>
-            <td className={`font-mono text-xs font-bold ${p.cancelledAt ? 'line-through' : ''}`}>{p.receiptNumber}</td>
+            <td>
+              <span className={`font-mono text-xs font-bold ${p.cancelledAt ? 'line-through' : ''}`}>{p.receiptNumber}</span>
+              {p.replacesReceipt && <span className="block text-xs text-muted">ressaisie de {p.replacesReceipt}</span>}
+              {p.reenteredBy && <span className="block text-xs text-muted">ressaisi par {p.reenteredBy}</span>}
+            </td>
             <td>{p.tenantName}</td>
             <td className="font-mono text-xs">{p.documentReference}</td>
             <td><b>{money(p.amount, p.currency)}</b>{p.creditAmount > 0 && <span className="block text-xs text-muted">dont {money(p.creditAmount, p.currency)} en crédit</span>}</td>
@@ -240,6 +271,8 @@ function MeansDialog({ base, currencies, today: day, done }: { base: Means | nul
     name: base?.name ?? '', instructions: base?.instructions ?? '', currency: base?.currency ?? currencies[0] ?? 'XOF', active: base?.active ?? false, effectiveFrom: day, reason: '', code: '',
   });
   const { busy, error, submit } = useSubmit(done, base ? 'Nouvelle version du moyen de paiement enregistrée' : 'Moyen de paiement enregistré');
+  const missing = [need.text(f.name, 'le nom du moyen', 2), need.text(f.instructions, 'les coordonnées et instructions'), need.value(f.effectiveFrom, 'la date d’effet'),
+    need.text(f.reason, 'le motif'), need.code(f.code)];
   return (
     <DialogContent title={base ? `Nouvelle version : ${base.name}` : 'Nouveau moyen de paiement'} description="Une version ne se modifie plus : la suivante la remplace à sa date d’effet. Une date passée ne change jamais ce qui a déjà été vu.">
       <form className="grid gap-3" onSubmit={(ev) => { ev.preventDefault(); submit(() => pf('POST', '/billing/payment-means', { ...f, ...(base ? { meansCode: base.code } : {}) })); }}>
@@ -268,20 +301,30 @@ function MeansDialog({ base, currencies, today: day, done }: { base: Means | nul
         </Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer la version</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer la version</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
 }
 
-function RecordDialog({ e, done }: { e: Establishment; done: () => void }) {
+function RecordDialog({ e, toReenter, done }: { e: Establishment; toReenter: Reentry[]; done: () => void }) {
   const first = e.documents.find((x) => x.id === e.graceDocument?.id && (x.balance ?? 0) > 0) ?? e.documents.find((x) => (x.balance ?? 0) > 0) ?? e.documents[0];
-  const [f, setF] = useState({ documentId: first?.id ?? '', amount: '', paidOn: e.today, meansCode: e.means[0]?.code ?? '', transactionRef: '', note: '', code: '' });
+  const [f, setF] = useState({
+    documentId: first?.id ?? '', amount: '', paidOn: e.today, meansCode: e.means[0]?.code ?? '', transactionRef: '', replacesPaymentId: '', similarReason: '', note: '', code: '',
+  });
+  // Les saisies annulées de cet établissement d'abord : une ressaisie pour un autre établissement reste possible (erreur d'établissement).
+  const reentries = [...toReenter.filter((r) => r.tenantId === e.tenantId), ...toReenter.filter((r) => r.tenantId !== e.tenantId)];
   const [file, setFile] = useState<File | null>(null);
   const { busy, error, submit } = useSubmit(done, 'Paiement enregistré : reçu provisoire émis');
   const doc = e.documents.find((x) => x.id === f.documentId);
   const amount = Number(f.amount) || 0;
   const surplus = doc ? Math.max(0, amount - (doc.balance ?? 0)) : 0;
+  // DS-7 A (24 novembre 2026) : toute ressaisie est justifiée par son motif, authentifiée par le code et tracée.
+  const reentry = !!f.replacesPaymentId;
+  const missing = [need.value(f.documentId, 'le document concerné'), need.value(amount > 0, 'le montant reçu'), need.value(f.paidOn, 'la date du paiement'),
+    need.value(f.meansCode, 'le moyen de paiement'), need.text(f.transactionRef, 'la référence de la transaction', 3), need.value(file, 'le justificatif du paiement'),
+    reentry && need.text(f.similarReason, 'le motif de la ressaisie'), need.code(f.code)];
   const send = () => {
     const form = new FormData();
     form.append('tenantId', e.tenantId);
@@ -316,18 +359,38 @@ function RecordDialog({ e, done }: { e: Establishment; done: () => void }) {
             {e.means.map((m) => <option key={m.code} value={m.code}>{m.name}</option>)}
           </Select>
         </Field>
-        <Field label="Référence de la transaction" hint="Une même référence ne s’enregistre qu’une fois (3 à 100 caractères).">
+        <Field label="Référence de la transaction" hint="Une même référence ne s’enregistre qu’une fois (3 à 100 caractères) ; celle d’une saisie annulée revient seulement dans sa ressaisie.">
           <Input value={f.transactionRef} minLength={3} maxLength={100} onChange={(x) => setF({ ...f, transactionRef: x.target.value })} required />
         </Field>
+        {reentries.length > 0 && (
+          <Field label="Ressaisie d’un paiement annulé" hint="Seulement si ce paiement remplace une saisie annulée : désignez-la (une ressaisie ne se fait qu’une fois).">
+            <Select value={f.replacesPaymentId} onChange={(x) => setF({ ...f, replacesPaymentId: x.target.value })}>
+              <option value="">Non : nouveau paiement</option>
+              {reentries.map((r) => (
+                <option key={r.id} value={r.id}>{r.receiptNumber} · {r.tenantName} · {money(r.amount, r.currency)} du {frDate(r.paidOn)} · réf. {r.transactionRef}</option>
+              ))}
+            </Select>
+          </Field>
+        )}
         <Field label="Justificatif du paiement" hint="Photo ou PDF de la preuve reçue (obligatoire).">
           <Input type="file" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={(x) => setFile(x.target.files?.[0] ?? null)} required />
         </Field>
+        {reentry ? (
+          <Field label="Motif de la ressaisie" hint="Obligatoire : pourquoi ce paiement est saisi à nouveau (5 à 300 caractères). Inscrit au journal de Cahiora, jamais montré à l’établissement.">
+            <Input value={f.similarReason} maxLength={300} onChange={(x) => setF({ ...f, similarReason: x.target.value })} required />
+          </Field>
+        ) : (
+          <Field label="Motif d’un autre versement (si Cahiora le demande)" hint="Seulement quand un paiement semblable ou un même justificatif existe déjà : pourquoi ce versement est distinct (5 à 300 caractères). Jamais montré à l’établissement.">
+            <Input value={f.similarReason} maxLength={300} onChange={(x) => setF({ ...f, similarReason: x.target.value })} />
+          </Field>
+        )}
         <Field label="Commentaire interne (facultatif)" hint="Jamais montré à l’établissement.">
           <Input value={f.note} maxLength={500} onChange={(x) => setF({ ...f, note: x.target.value })} />
         </Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer le paiement</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer le paiement</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -353,6 +416,9 @@ function PaymentDialog({ id, unlocked, done }: { id: string; unlocked: boolean; 
             <dt className="text-muted">Date, moyen</dt><dd>{frDate(p.paidOn)} · {p.meansName}</dd>
             <dt className="text-muted">Référence</dt><dd className="font-mono text-xs">{p.transactionRef}</dd>
             <dt className="text-muted">Enregistré</dt><dd>{dateTime(p.recordedAt)} par {p.recordedByName}</dd>
+            {p.replacesReceipt && <><dt className="text-muted">Ressaisie de</dt><dd className="font-mono text-xs">{p.replacesReceipt} (saisie annulée)</dd></>}
+            {p.reenteredBy && <><dt className="text-muted">Ressaisi par</dt><dd className="font-mono text-xs">{p.reenteredBy}</dd></>}
+            {p.similarReason && <><dt className="text-muted">{p.replacesReceipt ? 'Motif de la ressaisie' : 'Motif d’un autre versement'}</dt><dd>{p.similarReason}</dd></>}
             {p.note && <><dt className="text-muted">Commentaire interne</dt><dd>{p.note}</dd></>}
           </dl>
           <p><a href={p.proofUrl} target="_blank" rel="noreferrer" className="font-bold text-brand underline">Ouvrir le justificatif</a> <span className="text-xs text-muted">(lien valable quinze minutes)</span></p>
@@ -378,7 +444,8 @@ function PaymentDialog({ id, unlocked, done }: { id: string; unlocked: boolean; 
               </Field>
               <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
               <ErrorNote error={error} />
-              <Button type="submit" variant="outline" loading={busy} disabled={!unlocked}>Annuler la saisie</Button>
+              <Button type="submit" variant="outline" loading={busy} disabled={!unlocked || !ready([need.text(f.reason, 'le motif de l’annulation'), need.code(f.code)])}>Annuler la saisie</Button>
+              {unlocked && <Missing items={[need.text(f.reason, 'le motif de l’annulation'), need.code(f.code)]} />}
             </form>
           )}
         </div>
@@ -415,7 +482,7 @@ export function AvoirsCredits() {
 
       <Card className="grid gap-3">
         <h3 className="font-bold">Demandes de remboursement</h3>
-        <p className="text-sm text-muted">Un crédit se rembourse seulement sur demande de la direction, validée ici avec sa preuve. Un crédit déjà déduit d’un document ne se rembourse pas.</p>
+        <p className="text-sm text-muted">Un crédit se rembourse seulement sur demande de la direction, validée ici avec sa preuve. Un crédit déjà déduit d’un document ne se rembourse pas. La direction peut demander un remboursement même pendant un accès limité, dès que les remboursements sont ouverts (verrou du serveur).</p>
         {pending.length === 0 ? <p className="text-sm text-muted">Aucune demande en attente.</p> : (
           <ul className="grid gap-2" aria-label="Demandes de remboursement en attente">
             {pending.map((r) => (
@@ -537,6 +604,10 @@ function RefundDialog({ r, today, done }: { r: Refund; today: string; done: () =
   const [file, setFile] = useState<File | null>(null);
   const { busy, error, submit } = useSubmit(done, f.decision === 'REFUNDED' ? 'Remboursement enregistré' : 'Demande refusée');
   const refunded = f.decision === 'REFUNDED';
+  const missing = refunded
+    ? [need.value(f.refundedOn, 'la date du remboursement'), need.text(f.means, 'le moyen du remboursement', 2), need.text(f.reference, 'la référence du remboursement', 3),
+      need.value(file, 'la preuve du remboursement'), need.code(f.code)]
+    : [need.text(f.note, 'le motif du refus'), need.code(f.code)];
   const send = () => {
     const form = new FormData();
     form.append('decision', f.decision);
@@ -576,7 +647,8 @@ function RefundDialog({ r, today, done }: { r: Refund; today: string; done: () =
         )}
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy}>Enregistrer la décision</Button>
+        <Button type="submit" loading={busy} disabled={!ready(missing)}>Enregistrer la décision</Button>
+        <Missing items={missing} />
       </form>
     </DialogContent>
   );
@@ -587,6 +659,8 @@ function TransferDialog({ from, all, done }: { from: CreditEstablishment; all: C
   const [f, setF] = useState({ toTenantId: targets[0]?.tenantId ?? '', amount: '', authorizedBy: '', reason: '', code: '' });
   const [file, setFile] = useState<File | null>(null);
   const { busy, error, submit } = useSubmit(done, 'Crédit transféré');
+  const missing = [need.value(f.toTenantId, 'l’établissement qui reçoit'), need.value(Number(f.amount) > 0, 'le montant'), need.text(f.authorizedBy, 'l’autorisation'),
+    need.text(f.reason, 'le motif'), need.code(f.code)];
   const send = () => {
     const form = new FormData();
     form.append('fromTenantId', from.tenantId);
@@ -608,7 +682,8 @@ function TransferDialog({ from, all, done }: { from: CreditEstablishment; all: C
         <Field label="Motif" hint="Interne à Cahiora (5 à 300 caractères)."><Input value={f.reason} minLength={5} maxLength={300} onChange={(x) => setF({ ...f, reason: x.target.value })} required /></Field>
         <CodeField value={f.code} onChange={(code) => setF({ ...f, code })} />
         <ErrorNote error={error} />
-        <Button type="submit" loading={busy} disabled={!targets.length}>Transférer</Button>
+        <Button type="submit" loading={busy} disabled={!targets.length || !ready(missing)}>Transférer</Button>
+        {targets.length > 0 && <Missing items={missing} />}
       </form>
     </DialogContent>
   );
@@ -677,6 +752,7 @@ export function Rapports() {
           <Card className="grid gap-2">
             <h3 className="flex items-center gap-2 font-bold"><Receipt className="size-4" /> Totaux par monnaie</h3>
             <p className="text-sm text-muted">Facturé et encaissé ne se confondent jamais : les documents restent provisoires, l’encaissé ne compte que les paiements validés par Cahiora. Aucune monnaie ne s’additionne à une autre.</p>
+            <p className="text-sm font-bold" data-testid="portee-indicateurs">{d.scope}</p>
             <dl className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4" aria-label="Totaux financiers">
               {TOTALS.map(([k, label, hint]) => (
                 <div key={k} className="grid gap-0.5 rounded-lg bg-sunk p-3">

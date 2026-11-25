@@ -30,6 +30,8 @@ const PW = 'Documents-Direction-E2E-2026';
 const PHONE = '+2290190008101';
 const TZ = 'Africa/Porto-Novo';
 const MENTION = 'Document provisoire, sans valeur fiscale : ce n’est pas une facture.';
+/** Ce que porte un document à payer sans échéance (G5c-1, même texte que l'API). */
+const DUE_TO_BE_FIXED = 'Échéance à fixer : délai proposé, en attente de la validation des conditions commerciales de Cahiora';
 const CANCEL = 'Inscription saisie en double (fictive E2E)';
 /** 82 élèves × 500 FCFA = 41 000 FCFA, au-dessus du minimum de 40 000 FCFA : une exclusion donne un avoir de 500 FCFA. */
 const PUPILS = 82;
@@ -74,7 +76,10 @@ test.beforeAll(async ({}, info) => {
   // Établissement fictif, seul dans son groupe (sa direction voit ses documents, D-G5-19), à sa propre adresse locale.
   domain = `e2e-g5c-${suffix}-${stamp}.localhost`;
   const t = await db.tenant.create({
-    data: { slug: `e2e-g5c-${suffix}-${stamp}`, name: `École fictive documents ${suffix} ${stamp}`, timezone: TZ, domain, group: { create: { name: `Groupe fictif documents ${suffix} ${stamp}` } } },
+    data: {
+      commercialStatus: 'CLIENT', slug: `e2e-g5c-${suffix}-${stamp}`, name: `École fictive documents ${suffix} ${stamp}`, timezone: TZ, domain,
+      group: { create: { name: `Groupe fictif documents ${suffix} ${stamp}` } },
+    },
     include: { group: true },
   });
   Object.assign(ecole, { id: t.id, name: t.name, groupId: t.groupId, groupName: t.group.name });
@@ -242,10 +247,14 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await expect(emis.filter({ hasText: abonnement.reference })).toContainText('41 000 FCFA');
 
   // Exclusion à décider : établissement, inscription et avoir qu'elle donnerait ; jamais le nom de l'élève.
-  const demande = page.getByRole('list', { name: 'Exclusions à décider' }).locator(':scope > li', { hasText: ecole.name });
+  const demande = page.getByRole('list', { name: 'Exclusions et contestations à décider' }).locator(':scope > li', { hasText: ecole.name });
   await expect(demande).toContainText(`Inscription ${eleves.premier.matricule}`);
   await expect(demande).toContainText(`Si elle est validée : avoir provisoire de 500 FCFA sur le document ${abonnement.reference}`);
   await expect(demande).toContainText('81 élèves après l’exclusion : 40 500 FCFA pour l’année, 41 000 FCFA déjà demandés.');
+  // Ajustements G5c-7 et G5c-9 : objectif de 7 jours ouvrés (aucune acceptation d'office) et document d'origine.
+  await expect(page.getByText('Objectif de Cahiora : décider dans les 7 jours ouvrés (lundi à vendredi ; jours fériés : INFORMATION MANQUANTE). Aucune demande n’est acceptée d’office.', { exact: false })).toBeVisible();
+  await expect(demande).toContainText('(objectif de 7 jours ouvrés)');
+  await expect(demande).toContainText(`Document d’origine : ${abonnement.reference}`);
   await expect(page.getByText(eleves.premier.nom)).toHaveCount(0);
   await tientEnLargeur(page);
   await shot(page, 'g5c-1-documents');
@@ -254,9 +263,10 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await page.getByRole('button', { name: `Décider : inscription ${eleves.premier.matricule}, ${ecole.name}` }).click();
   const dlg = page.getByRole('dialog');
   await expect(dlg.getByText(`Annulation : « ${CANCEL} »`, { exact: false })).toBeVisible();
+  await expect(dlg.getByTestId('a-completer')).toHaveText('À compléter : le code à 6 chiffres de votre application d’authentification, pour refuser, le motif de la décision (5 caractères au moins).');
   await dlg.getByLabel('Code de votre application d’authentification').fill('000000');
-  await dlg.getByRole('button', { name: 'Refuser' }).click();
-  await expect(dlg.getByText('Un refus exige un motif (5 caractères au moins).')).toBeVisible();
+  // Refus impossible sans motif : le bouton reste désactivé (24 novembre 2026).
+  await expect(dlg.getByRole('button', { name: 'Refuser' })).toBeDisabled();
   await dlg.getByRole('button', { name: 'Valider l’exclusion' }).click();
   await expect(dlg.getByText('Code de votre application incorrect ou expiré')).toBeVisible();
   await dlg.getByLabel('Motif de la décision').fill('Doublon vérifié dans le registre (test de navigateur)');
@@ -264,18 +274,24 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await shot(page, 'g5c-2-decision');
   await dlg.getByRole('button', { name: 'Valider l’exclusion' }).click();
   await expect(dlg).toBeHidden();
-  await expect(page.getByRole('list', { name: 'Exclusions à décider' }).locator(':scope > li', { hasText: ecole.name })).toHaveCount(0);
+  await expect(page.getByRole('list', { name: 'Exclusions et contestations à décider' }).locator(':scope > li', { hasText: ecole.name })).toHaveCount(0);
   await page.locator('summary', { hasText: /^Décisions prises/ }).click();
   const decidee = page.locator('details li', { hasText: `${ecole.name} · ${eleves.premier.matricule}` });
   await expect(decidee).toContainText('Validée');
   await expect(decidee).toContainText(`par ${saName} : « Doublon vérifié dans le registre (test de navigateur) »`);
+  // G5c-9 : l'exclusion, son document d'origine et son avoir, reliés.
+  const avoirEmis = await db.billingDocument.findFirstOrThrow({ where: { groupId: ecole.groupId, kind: 'CREDIT_NOTE' } });
+  await expect(decidee).toContainText(`Document d’origine : ${abonnement.reference}`);
+  await expect(decidee).toContainText(`Avoir : ${avoirEmis.reference} (− 500 FCFA)`);
 
   // L'avoir provisoire : 500 FCFA sur la proforma de l'abonnement, avec son calcul.
   const avoir = emis.filter({ hasText: 'Avoir provisoire' }).filter({ hasText: ecole.groupName });
   await expect(avoir).toContainText('− 500 FCFA');
   await avoir.getByRole('button', { name: /^Voir Avoir provisoire/ }).click();
   await expect(dlg.getByText(MENTION)).toBeVisible();
-  await expect(dlg.getByText(`Document lié : ${abonnement.reference}`)).toBeVisible();
+  await expect(dlg.getByText(`Document corrigé : ${abonnement.reference}`)).toBeVisible();
+  await expect(dlg.getByLabel('Exclusion de cet avoir')).toContainText(`Exclusion de l’inscription ${eleves.premier.matricule}`);
+  await expect(dlg.getByLabel('Exclusion de cet avoir')).toContainText(`Document d’origine : ${abonnement.reference}`);
   const lignes = dlg.getByRole('list', { name: 'Lignes du document' });
   await expect(lignes).toContainText(`${ecole.name} · Avoir après exclusion d’une inscription erronée`);
   await expect(lignes).toContainText('81 élèves (-1) × 500 FCFA, minimum 40 000 FCFA : 40 500 FCFA pour l’année, 41 000 FCFA déjà demandés');
@@ -311,7 +327,8 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await expect(dlg.getByRole('group', { name: 'Document' }).getByRole('button', { name: 'Proforma', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await dlg.getByRole('combobox', { name: /^Reprendre un devis/ }).selectOption(devis.id);
   await expect(dlg.getByRole('list', { name: 'Prestations du catalogue' })).toHaveCount(0);
-  await expect(dlg.getByText('Échéance d’une proforma : INFORMATION MANQUANTE, aucune date n’est inscrite.', { exact: false })).toBeVisible();
+  // G5c-1 : délai de la proforma proposé, non activé : « Échéance à fixer ».
+  await expect(dlg.getByText('Échéance d’une proforma : sa date plus le délai des paramètres tarifaires, s’il est activé ; sinon « Échéance à fixer ».', { exact: false })).toBeVisible();
   await dlg.getByLabel('Code de votre application d’authentification').fill(await code(page));
   await shot(page, 'g5c-5-proforma');
   await dlg.getByRole('button', { name: 'Émettre la proforma' }).click();
@@ -321,7 +338,7 @@ test('Super Admin : exclusion qui touche un document, décidée avec un code, av
   await proforma.getByRole('button', { name: /^Voir Proforma de prestations/ }).click();
   await expect(dlg.getByText(`Document lié : ${devis.reference}`)).toBeVisible();
   await expect(dlg.getByRole('list', { name: 'Lignes du document' })).toContainText('2 × 25 000 FCFA (prix saisi sur le devis)');
-  await expect(dlg.getByText('INFORMATION MANQUANTE : échéance d’une proforma non fixée')).toBeVisible();
+  await expect(dlg.getByText(DUE_TO_BE_FIXED)).toBeVisible();
   await tientEnLargeur(page);
   await shot(page, 'g5c-6-proforma-detail');
   await page.keyboard.press('Escape');
@@ -355,7 +372,8 @@ test('Direction : documents de Cahiora dans « Abonnement Cahiora », exclusion 
   await expect(doc(abonnement.reference)).toContainText(`82 élèves (+82) au ${frDate(D)} × 500 FCFA, minimum 40 000 FCFA : 41 000 FCFA pour l’année, 0 FCFA déjà demandés`);
   await doc(proforma.reference).locator('summary').click();
   await expect(doc(proforma.reference)).toContainText('2 × 25 000 FCFA');
-  await expect(doc(proforma.reference).getByText('INFORMATION MANQUANTE : échéance d’une proforma non fixée')).toBeVisible();
+  await expect(doc(proforma.reference).getByText(DUE_TO_BE_FIXED)).toBeVisible();
+  await expect(doc(proforma.reference)).toContainText('échéance à fixer');
   await tientEnLargeur(page);
   await shot(page, 'g5c-7-direction-documents');
 

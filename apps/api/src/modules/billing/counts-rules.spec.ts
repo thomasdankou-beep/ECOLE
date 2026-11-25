@@ -1,5 +1,6 @@
 import {
-  auditDepartureDays, CountCalendar, CountRecord, CountSubscription, countView, dueCounts, freeEndYear, ItemRow, RecordedCount, resolveItems, reviewOpen, sortCounts,
+  auditDepartureDays, BASIS_LABELS, CountCalendar, CountRecord, CountSubscription, countView, dueCounts, freeEndYear, isToCheck, ItemRow, RecordedCount, resolveItems,
+  requestVoids, reviewOpen, sortCounts, TO_CHECK_BASES, VoidingRequest, voidingRequest,
 } from './counts-rules';
 
 /**
@@ -188,5 +189,107 @@ describe('Comptages G5b : vérification et affichage', () => {
       rec({ id: '4', kind: 'FIRST_REGULARIZATION', referenceDate: '2027-03-31' }),
     ];
     expect(sortCounts(rows).map((r) => r.id)).toEqual(['4', '2', '1', '3']);
+  });
+});
+
+describe('Ajustements G5b-2 : élève parti sans date connue, « À vérifier »', () => {
+  const since = new Date('2026-09-14T08:00:00Z');
+  const row = (id: string): ItemRow => ({ enrollmentId: id, studentId: `s-${id}`, classId: 'c1', siteId: null, state: 'UNKNOWN', unknown: { since, before: null } });
+  const none = { direction: new Map<string, string>(), audit: new Map<string, string>() };
+
+  it('sans date connue : compté et « À vérifier », jamais retiré par un silence', () => {
+    const [a] = resolveItems('2026-11-30', [row('a')], none, new Set());
+    expect(a).toMatchObject({ counted: true, basis: 'DEPARTURE_UNKNOWN', departureDate: null });
+    expect(isToCheck(a)).toBe(true);
+    expect(BASIS_LABELS.DEPARTURE_UNKNOWN.startsWith('À vérifier')).toBe(true);
+    expect(BASIS_LABELS.DEPARTURE_AUDIT.startsWith('À vérifier')).toBe(true);
+    expect(TO_CHECK_BASES).toEqual(['DEPARTURE_AUDIT', 'DEPARTURE_UNKNOWN']);
+  });
+
+  it('date confirmée introuvable par la direction : toujours compté, plus « À vérifier »', () => {
+    const [a] = resolveItems('2026-11-30', [row('a')], { ...none, confirmed: new Set(['a']) }, new Set());
+    expect(a).toMatchObject({ counted: true, basis: 'DEPARTURE_CONFIRMED', departureDate: null });
+    expect(isToCheck(a)).toBe(false);
+  });
+
+  it('date fixée par la direction : elle l’emporte sur une confirmation antérieure', () => {
+    const before = resolveItems('2026-11-30', [row('a')], { ...none, direction: new Map([['a', '2026-10-15']]), confirmed: new Set(['a']) }, new Set());
+    expect(before).toEqual([]);
+    const [after] = resolveItems('2026-11-30', [row('a')], { ...none, direction: new Map([['a', '2026-12-10']]), confirmed: new Set(['a']) }, new Set());
+    expect(after).toMatchObject({ counted: true, basis: 'DEPARTURE_DIRECTION', departureDate: '2026-12-10' });
+    expect(isToCheck(after)).toBe(false);
+  });
+
+  it('date du journal après le jour R : compté et « À vérifier » ; confirmée introuvable, compté sans l’être', () => {
+    const audit = new Map([['a', '2026-12-05']]);
+    const [a] = resolveItems('2026-11-30', [row('a')], { ...none, audit }, new Set());
+    expect(a).toMatchObject({ counted: true, basis: 'DEPARTURE_AUDIT', departureDate: '2026-12-05' });
+    expect(isToCheck(a)).toBe(true);
+    const [b] = resolveItems('2026-11-30', [row('a')], { ...none, audit, confirmed: new Set(['a']) }, new Set());
+    expect(b).toMatchObject({ counted: true, basis: 'DEPARTURE_CONFIRMED', departureDate: '2026-12-05' });
+    // Date du journal le jour R ou avant : l'élève était déjà parti, confirmé ou non.
+    expect(resolveItems('2026-12-05', [row('a')], { ...none, audit, confirmed: new Set(['a']) }, new Set())).toEqual([]);
+  });
+
+  it('une inscription exclue n’est jamais « À vérifier »', () => {
+    const [a] = resolveItems('2026-11-30', [row('a')], none, new Set(['a']));
+    expect(a).toMatchObject({ counted: false, basis: 'EXCLUDED' });
+    expect(isToCheck(a)).toBe(false);
+  });
+});
+
+describe('Lecture 3 (24 novembre 2026, soir) : élève revenu après une exclusion ou une contestation acceptée', () => {
+  const at = (d: string) => new Date(`${d}T23:59:59.999Z`);
+  const count = (d: string) => ({ referenceDate: d, at: at(d) });
+  const request = (o: Partial<VoidingRequest> = {}): VoidingRequest => ({
+    id: 'k1', status: 'VALIDATED', departureDate: null, requestedAt: new Date('2026-12-10T09:00:00Z'), decidedAt: new Date('2026-12-12T10:00:00Z'), ...o,
+  });
+
+  it('exclusion validée : toutes les lignes de l’élève sont annulées tant qu’il n’est pas revenu', () => {
+    expect(requestVoids(request(), [], count('2026-11-30'))).toBe(true);
+    expect(requestVoids(request(), [], count('2027-03-31'))).toBe(true);
+  });
+
+  it('contestation acceptée : annule le comptage du départ et les suivants, jamais un comptage d’avant le départ', () => {
+    const k = request({ departureDate: '2027-02-10' });
+    expect(requestVoids(k, [], count('2026-11-30'))).toBe(false);
+    expect(requestVoids(k, [], count('2027-03-31'))).toBe(true);
+    expect(requestVoids(k, [], count('2027-02-10'))).toBe(true);
+  });
+
+  it('retour après la demande : les comptages faits depuis le comptent de nouveau, les précédents restent annulés', () => {
+    const back = [new Date('2027-01-20T08:00:00Z')];
+    expect(requestVoids(request(), back, count('2026-11-30'))).toBe(true);
+    expect(requestVoids(request(), back, count('2027-03-31'))).toBe(false);
+  });
+
+  it('un retour d’avant la demande ne compte pas : seul un retour après la demande rend l’élève facturable', () => {
+    const before = [new Date('2026-12-01T08:00:00Z')];
+    expect(requestVoids(request(), before, count('2027-03-31'))).toBe(true);
+  });
+
+  it('demande choisie : validée seulement, décidée à l’instant donné, autre que celle écartée', () => {
+    const refused = request({ id: 'k0', status: 'REFUSED' });
+    const pending = request({ id: 'k2', status: 'PENDING', decidedAt: null });
+    const k = request();
+    expect(voidingRequest([refused, pending], [], count('2027-03-31'))).toBeNull();
+    expect(voidingRequest([refused, k], [], count('2027-03-31'))).toBe(k);
+    expect(voidingRequest([k], [], count('2027-03-31'), { until: new Date('2026-12-11T00:00:00Z') })).toBeNull();
+    expect(voidingRequest([k], [], count('2027-03-31'), { until: new Date('2026-12-13T00:00:00Z') })).toBe(k);
+    expect(voidingRequest([k], [], count('2027-03-31'), { except: 'k1' })).toBeNull();
+  });
+
+  it('nouvelle demande après le retour : une exclusion annule de nouveau toute l’inscription, une contestation à partir du départ', () => {
+    const first = request();
+    const back = [new Date('2027-01-20T08:00:00Z')];
+    const again = { requestedAt: new Date('2027-05-15T09:00:00Z'), decidedAt: new Date('2027-05-16T09:00:00Z') };
+    expect(voidingRequest([first], back, count('2027-03-31'))).toBeNull();
+    // Exclusion : l'inscription rétablie était elle-même une erreur, le comptage du 31 mars l'a compté à tort.
+    const exclusion = request({ id: 'k3', ...again });
+    expect(voidingRequest([first, exclusion], back, count('2027-03-31'))).toBe(exclusion);
+    // Contestation : parti le 2 mai, il reste compté le 31 mars (lecture 2), plus le 30 juin.
+    const contest = request({ id: 'k4', departureDate: '2027-05-02', ...again });
+    expect(voidingRequest([first, contest], back, count('2027-03-31'))).toBeNull();
+    expect(voidingRequest([first, contest], back, count('2027-06-30'))).toBe(contest);
   });
 });
