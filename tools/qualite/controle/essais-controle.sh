@@ -4,7 +4,8 @@
 # puis les 5 de la mise à jour), Redis, la vraie image de Caddy avec le Caddyfile du code monté comme en production, l'API
 # et le site remplacés par un petit serveur (banc/serveur.js). Les deux scripts sont lancés comme sur le serveur,
 # sh -c "<contenu du script>", depuis ~/ecole : une copie du dépôt d'abord à fcb84eb, puis au commit essayé (la mise à
-# jour est simulée par git checkout). Données fictives ; rien n'est envoyé vers le serveur de production.
+# jour est simulée par git checkout, puis docker compose up -d --build et infra/docker/conteneurs-a-jour.sh, comme dans
+# installer-serveur.sh). Données fictives ; rien n'est envoyé vers le serveur de production.
 #
 # Usage : bash tools/qualite/controle/essais-controle.sh
 # Il faut Docker (avec compose), git, curl, node et l'historique complet du dépôt (fcb84eb).
@@ -73,6 +74,19 @@ maintenance() { # maintenance <nom> <code attendu> <debut|etat|fin> [VARIABLE=va
   (cd "$HOME/ecole" && env "$@" sh -c "$MAINTENANCE" maintenance "$action") > "$sorties/$nom.txt" 2>&1
   code_attendu "$nom" $? "$attendu"
 }
+a_jour() { # a_jour <nom> <code attendu> <commit> : infra/docker/conteneurs-a-jour.sh depuis ~/ecole, comme l'installateur
+  local nom=$1 attendu=$2
+  (cd "$HOME/ecole" && CAHIORA_COMMIT="$3" ./infra/docker/conteneurs-a-jour.sh) > "$sorties/$nom.txt" 2>&1
+  code_attendu "$nom" $? "$attendu"
+}
+commits_en_marche() { # « <commit de l'API> <commit du site> » en marche (« aucun » s'il n'y en a pas)
+  local s c r=""
+  for s in api web; do
+    c=$(docker compose exec -T "$s" printenv CAHIORA_COMMIT < /dev/null 2> /dev/null | tr -d '\r')
+    r="$r${r:+ }${c:-aucun}"
+  done
+  printf '%s\n' "$r"
+}
 contient() { if grep -qF -- "$2" "$sorties/$1.txt"; then ok=$((ok + 1)); else ko=$((ko + 1)); echo "  ÉCHEC $1 : « $2 » absent"; fi; }
 sans() { if grep -qF -- "$2" "$sorties/$1.txt"; then ko=$((ko + 1)); echo "  ÉCHEC $1 : « $2 » présent"; else ok=$((ok + 1)); fi; }
 verifier() { # verifier <description> <commande...>
@@ -116,6 +130,7 @@ for s in controle-production.sh maintenance.sh; do
   taille=$(wc -c < "$racine/$s")
   verifier "$s : $taille octets, passe en entier dans sh -c \"\$(git show …)\" (moins de 120 000)" test "$taille" -lt 120000
 done
+verifier "infra/docker/conteneurs-a-jour.sh (appelé par l'installateur) : syntaxe valide (sh -n)" sh -n "$racine/infra/docker/conteneurs-a-jour.sh"
 awk '/^config\(\) \{/ { f = 1; next } f && /<<.CADDY.$/ { c = 1; next } c && /^CADDY$/ { exit } c' "$racine/maintenance.sh" |
   sed '/^[[:space:]]*$/d' > "$tmp/config-maintenance"
 grep -v '^[[:space:]]*#' "$racine/infra/caddy/Caddyfile" | sed '/^[[:space:]]*$/d' > "$tmp/caddyfile"
@@ -417,18 +432,18 @@ docker compose restart caddy > /dev/null 2>&1
 wait "$pid_sonde"
 verifier "aucune réponse « site ouvert » pendant le redémarrage ($(grep -c . "$tmp/redemarrage-apres.txt") requêtes)" test "$(grep -c '^200 non' "$tmp/redemarrage-apres.txt")" = 0
 verifier "maintenance dès le redémarrage (dernière réponse : $(tail -n 1 "$tmp/redemarrage-apres.txt"))" test "$(tail -n 1 "$tmp/redemarrage-apres.txt")" = "503 oui"
-# Comme installer-serveur.sh : commit exporté, puis docker compose up -d --build (tous les services).
-CAHIORA_COMMIT="$NOUVEAU" BANC_DOCKERFILE_API=Dockerfile.api.apres BANC_DOCKERFILE_WEB=Dockerfile.web.apres docker compose up -d --build > "$tmp/maj.log" 2>&1
+# Comme installer-serveur.sh : commit exporté, docker compose up -d --build (tous les services), puis
+# infra/docker/conteneurs-a-jour.sh, qui recrée l'API ou le site resté sur son ancienne image.
+export BANC_DOCKERFILE_API=Dockerfile.api.apres BANC_DOCKERFILE_WEB=Dockerfile.web.apres
+CAHIORA_COMMIT="$NOUVEAU" docker compose up -d --build > "$tmp/maj.log" 2>&1
 code_maj=$?
-for s in api web; do
-  id=$(docker compose ps -q "$s" 2> /dev/null)
-  printf '%s %s %s\n' "$s" "${id:0:12}" "$(docker compose exec -T "$s" printenv CAHIORA_COMMIT < /dev/null 2> /dev/null | tr -d '\r')"
-done > "$tmp/images.txt"
-sed 's/^/        conteneur en marche, commit inscrit : /' "$tmp/images.txt"
-inscrits=$(awk '{ print $3 }' "$tmp/images.txt" | sort -u | tr '\n' ' ')
-verifier "mise à jour comme l'installateur (docker compose up -d --build) : API et site recréés depuis le commit essayé" \
-  test "$code_maj:$inscrits" = "0:$NOUVEAU "
-if [ "$code_maj:$inscrits" != "0:$NOUVEAU " ]; then
+apres_compose=$(commits_en_marche)
+echo "        après docker compose up -d --build : API ${apres_compose%% *}, site ${apres_compose#* }"
+a_jour a_jour_maj 0 "$NOUVEAU"
+sed 's/^/        | /' "$sorties/a_jour_maj.txt"
+verifier "mise à jour comme l'installateur (up -d --build, puis conteneurs-a-jour.sh) : API et site en marche depuis le commit essayé" \
+  test "$code_maj:$(commits_en_marche)" = "0:$NOUVEAU $NOUVEAU"
+if [ "$code_maj:$(commits_en_marche)" != "0:$NOUVEAU $NOUVEAU" ]; then
   sed 's/^/        | /' "$tmp/maj.log" | tail -n 60
   docker compose ps -a 2>&1 | sed 's/^/        | /'
 fi
@@ -437,7 +452,6 @@ contient m_apres_images "Fenêtre de maintenance : OUVERTE ET PROTÉGÉE."
 # shellcheck disable=SC2086
 migrer $NOUVELLES || exit 1
 echo "   Point 9 : commit réellement en marche"
-export BANC_DOCKERFILE_API=Dockerfile.api.apres BANC_DOCKERFILE_WEB=Dockerfile.web.apres
 controle apres_ok 0 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_ok "OK        version en marche : commit $court, celui attendu ; l'API et le site ont été construits depuis ce commit"
 contient apres_ok "OK        migrations : 30 appliquées, dont les 5 de la mise à jour, aucune en échec"
@@ -450,13 +464,13 @@ controle apres_sans 1 EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_sans "BLOQUANT  commit attendu non donné"
 controle apres_autre 1 ATTENDU="$EN_LIGNE" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_autre "code en ligne : $court au lieu du commit attendu $EN_LIGNE"
-BANC_DOCKERFILE_WEB=Dockerfile.web.avant docker compose up -d --build web > /dev/null 2>&1
+BANC_DOCKERFILE_WEB=Dockerfile.web.avant docker compose up -d --build --no-deps --force-recreate web > /dev/null 2>&1
 controle apres_site_ancien 1 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_site_ancien "site en marche construit depuis « aucun commit inscrit » et non depuis $court"
-CAHIORA_COMMIT="$EN_LIGNE" docker compose up -d --build web > /dev/null 2>&1
+CAHIORA_COMMIT="$EN_LIGNE" docker compose up -d --build --no-deps --force-recreate web > /dev/null 2>&1
 controle apres_site_autre 1 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_site_autre "site en marche construit depuis « $EN_LIGNE » et non depuis $court"
-CAHIORA_COMMIT="$NOUVEAU" docker compose up -d --build web > /dev/null 2>&1
+CAHIORA_COMMIT="$NOUVEAU" docker compose up -d --build --no-deps --force-recreate web > /dev/null 2>&1
 echo "# modifié à la main" >> "$HOME/ecole/README.md"
 controle apres_modifie 1 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_modifie "des fichiers suivis ont été modifiés sur le serveur"
@@ -465,6 +479,24 @@ sql "UPDATE students SET \"firstName\" = 'Changé' WHERE matricule = 'E-0001'"
 controle apres_empreinte 1 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_empreinte "DIFFÉRENTE de celle relevée avant ($EMP)"
 sql "UPDATE students SET \"firstName\" = 'Élève' WHERE matricule = 'E-0001'"
+echo "   Point 9 : API et site laissés sur une ancienne image après la construction (ce que Compose 2.38.2 a fait à l'API)"
+CAHIORA_COMMIT="$EN_LIGNE" docker compose build api web > /dev/null 2>&1 # images d'un autre commit, conteneurs laissés tels quels
+verifier "après la seule construction, l'API et le site tournent encore sur le commit essayé" test "$(commits_en_marche)" = "$NOUVEAU $NOUVEAU"
+a_jour a_jour_autre 0 "$EN_LIGNE"
+contient a_jour_autre "L'API tourne sur une image construite depuis « $NOUVEAU », et non depuis le commit $EN_LIGNE"
+contient a_jour_autre "Le site tourne sur une image construite depuis « $NOUVEAU », et non depuis le commit $EN_LIGNE"
+verifier "API et site recréés depuis les images construites (commit $EN_LIGNE)" test "$(commits_en_marche)" = "$EN_LIGNE $EN_LIGNE"
+a_jour a_jour_rien 0 "$EN_LIGNE"
+verifier "rien n'est recréé quand l'API et le site sont à jour" test ! -s "$sorties/a_jour_rien.txt"
+CAHIORA_COMMIT="$NOUVEAU" docker compose build api web > /dev/null 2>&1
+a_jour a_jour_retour 0 "$NOUVEAU"
+verifier "API et site revenus au commit essayé" test "$(commits_en_marche)" = "$NOUVEAU $NOUVEAU"
+a_jour a_jour_impossible 1 0000000000000000000000000000000000000000
+contient a_jour_impossible "ÉCHEC : l'API tourne toujours sur « $NOUVEAU » au lieu du commit 0000000000000000000000000000000000000000."
+contient a_jour_impossible "ÉCHEC : le site tourne toujours sur « $NOUVEAU » au lieu du commit 0000000000000000000000000000000000000000."
+maintenance m_apres_a_jour 0 etat
+contient m_apres_a_jour "Fenêtre de maintenance : OUVERTE ET PROTÉGÉE."
+controle apres_a_jour 0 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 
 echo "4. Fermeture de la fenêtre après la mise à jour"
 maintenance m_fin 0 fin
