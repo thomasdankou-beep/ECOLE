@@ -26,7 +26,7 @@ services:
   api:
     build:
       context: ${BANC_APP:?}
-      dockerfile: ${BANC_DOCKERFILE_API:-Dockerfile.avant}
+      dockerfile: ${BANC_DOCKERFILE_API:-Dockerfile.api.avant}
       args:
         CAHIORA_COMMIT: ${CAHIORA_COMMIT:-inconnu}
         ROLE_ESSAI: api
@@ -40,7 +40,7 @@ services:
   web:
     build:
       context: ${BANC_APP:?}
-      dockerfile: ${BANC_DOCKERFILE_WEB:-Dockerfile.avant}
+      dockerfile: ${BANC_DOCKERFILE_WEB:-Dockerfile.web.avant}
       args:
         CAHIORA_COMMIT: ${CAHIORA_COMMIT:-inconnu}
         ROLE_ESSAI: web

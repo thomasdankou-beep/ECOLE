@@ -158,8 +158,11 @@ COPY serveur.js /serveur.js
 ARG ROLE_ESSAI=api
 ARG PORT_ESSAI=4000
 ENV ROLE_ESSAI=\$ROLE_ESSAI PORT_ESSAI=\$PORT_ESSAI"
-printf '%s\nCMD ["node", "/serveur.js"]\n' "$base" > "$tmp/app/Dockerfile.avant" # comme les images de fcb84eb : aucun commit inscrit
-printf '%s\n%s\nCMD ["node", "/serveur.js"]\n' "$base" "$marque" > "$tmp/app/Dockerfile.apres" # lignes copiées de apps/api/Dockerfile
+# Un Dockerfile par service, comme en production (apps/api/Dockerfile, apps/web/Dockerfile).
+for s in api web; do
+  printf '%s\nCMD ["node", "/serveur.js"]\n' "$base" > "$tmp/app/Dockerfile.$s.avant" # comme les images de fcb84eb : aucun commit inscrit
+  printf '%s\n%s\nCMD ["node", "/serveur.js"]\n' "$base" "$marque" > "$tmp/app/Dockerfile.$s.apres" # lignes copiées de apps/api/Dockerfile
+done
 docker compose up -d postgres > "$tmp/demarrage.log" 2>&1 || { cat "$tmp/demarrage.log"; exit 1; }
 for i in $(seq 1 60); do docker compose exec -T postgres pg_isready -U postgres -d erp > /dev/null 2>&1 && break; sleep 2; done
 (cd "$HOME/ecole" && ./infra/postgres/role-plateforme.sh && ./infra/postgres/roles-groupes.sh) > /dev/null || { echo "Rôles de la base : échec."; exit 1; }
@@ -219,6 +222,7 @@ for a in localhost 127.0.0.1 '[::1]'; do
   adm="$adm${adm:+, }$a $r"
 done
 echo "        interface d'administration de Caddy dans son conteneur : $adm"
+echo "        Docker $(docker version --format '{{.Server.Version}}' 2> /dev/null), Compose $(docker compose version --short 2> /dev/null)"
 
 echo "1. Avant la mise à jour, fenêtre fermée"
 controle avant_fermee 0
@@ -413,13 +417,27 @@ docker compose restart caddy > /dev/null 2>&1
 wait "$pid_sonde"
 verifier "aucune réponse « site ouvert » pendant le redémarrage ($(grep -c . "$tmp/redemarrage-apres.txt") requêtes)" test "$(grep -c '^200 non' "$tmp/redemarrage-apres.txt")" = 0
 verifier "maintenance dès le redémarrage (dernière réponse : $(tail -n 1 "$tmp/redemarrage-apres.txt"))" test "$(tail -n 1 "$tmp/redemarrage-apres.txt")" = "503 oui"
-CAHIORA_COMMIT="$NOUVEAU" BANC_DOCKERFILE_API=Dockerfile.apres BANC_DOCKERFILE_WEB=Dockerfile.apres docker compose up -d --build api web > /dev/null 2>&1
+# Comme installer-serveur.sh : commit exporté, puis docker compose up -d --build (tous les services).
+CAHIORA_COMMIT="$NOUVEAU" BANC_DOCKERFILE_API=Dockerfile.api.apres BANC_DOCKERFILE_WEB=Dockerfile.web.apres docker compose up -d --build > "$tmp/maj.log" 2>&1
+code_maj=$?
+for s in api web; do
+  id=$(docker compose ps -q "$s" 2> /dev/null)
+  printf '%s %s %s\n' "$s" "${id:0:12}" "$(docker compose exec -T "$s" printenv CAHIORA_COMMIT < /dev/null 2> /dev/null | tr -d '\r')"
+done > "$tmp/images.txt"
+sed 's/^/        conteneur en marche, commit inscrit : /' "$tmp/images.txt"
+inscrits=$(awk '{ print $3 }' "$tmp/images.txt" | sort -u | tr '\n' ' ')
+verifier "mise à jour comme l'installateur (docker compose up -d --build) : API et site recréés depuis le commit essayé" \
+  test "$code_maj:$inscrits" = "0:$NOUVEAU "
+if [ "$code_maj:$inscrits" != "0:$NOUVEAU " ]; then
+  sed 's/^/        | /' "$tmp/maj.log" | tail -n 60
+  docker compose ps -a 2>&1 | sed 's/^/        | /'
+fi
 maintenance m_apres_images 0 etat
 contient m_apres_images "Fenêtre de maintenance : OUVERTE ET PROTÉGÉE."
 # shellcheck disable=SC2086
 migrer $NOUVELLES || exit 1
 echo "   Point 9 : commit réellement en marche"
-export BANC_DOCKERFILE_API=Dockerfile.apres BANC_DOCKERFILE_WEB=Dockerfile.apres
+export BANC_DOCKERFILE_API=Dockerfile.api.apres BANC_DOCKERFILE_WEB=Dockerfile.web.apres
 controle apres_ok 0 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_ok "OK        version en marche : commit $court, celui attendu ; l'API et le site ont été construits depuis ce commit"
 contient apres_ok "OK        migrations : 30 appliquées, dont les 5 de la mise à jour, aucune en échec"
@@ -432,7 +450,7 @@ controle apres_sans 1 EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_sans "BLOQUANT  commit attendu non donné"
 controle apres_autre 1 ATTENDU="$EN_LIGNE" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_autre "code en ligne : $court au lieu du commit attendu $EN_LIGNE"
-BANC_DOCKERFILE_WEB=Dockerfile.avant docker compose up -d --build web > /dev/null 2>&1
+BANC_DOCKERFILE_WEB=Dockerfile.web.avant docker compose up -d --build web > /dev/null 2>&1
 controle apres_site_ancien 1 ATTENDU="$NOUVEAU" EMPREINTE="$EMP" FENETRE=ouverte
 contient apres_site_ancien "site en marche construit depuis « aucun commit inscrit » et non depuis $court"
 CAHIORA_COMMIT="$EN_LIGNE" docker compose up -d --build web > /dev/null 2>&1
